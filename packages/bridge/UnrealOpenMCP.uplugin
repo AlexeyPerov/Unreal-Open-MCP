@@ -1,0 +1,31 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "0.0.1",
+	"FriendlyName": "Unreal Open MCP",
+	"Description": "Local-first Model Context Protocol (MCP) integration for the Unreal Editor. Exposes editor operations as AI tools so MCP-aware AI assistants (Cursor, Claude, Copilot, ...) can inspect and drive your Unreal project through a loopback HTTP bridge with a safe gate/verify workflow.",
+	"Category": "AI",
+	"CreatedBy": "Alexey Perov",
+	"CreatedByURL": "https://github.com/AlexeyPerov",
+	"DocsURL": "https://github.com/AlexeyPerov/Unreal-Open-MCP",
+	"MarketplaceURL": "",
+	"SupportURL": "https://github.com/AlexeyPerov/Unreal-Open-MCP/issues",
+	"CanContainContent": false,
+	"IsBetaVersion": false,
+	"IsExperimentalVersion": true,
+	"Installed": false,
+	"Modules": [
+		{
+			"Name": "UnrealOpenMcpRuntime",
+			"Type": "Runtime",
+			"LoadingPhase": "Default",
+			"PlatformAllowList": [ "Win64", "Mac", "Linux" ]
+		},
+		{
+			"Name": "UnrealOpenMcpEditor",
+			"Type": "Editor",
+			"LoadingPhase": "Default",
+			"PlatformAllowList": [ "Win64", "Mac", "Linux" ]
+		}
+	]
+}

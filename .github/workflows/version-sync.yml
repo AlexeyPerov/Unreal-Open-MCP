@@ -14,6 +14,7 @@ on:
       - mcp-server/package.json
       - packages/bridge/package.json
       - packages/verify/package.json
+      - packages/bridge/Source/UnrealOpenMcpEditor/Private/Bridge/UnrealOpenMcpBridgeSession.h
       - scripts/sync-version.mjs
       - .github/workflows/version-sync.yml
   push:
@@ -23,6 +24,7 @@ on:
       - mcp-server/package.json
       - packages/bridge/package.json
       - packages/verify/package.json
+      - packages/bridge/Source/UnrealOpenMcpEditor/Private/Bridge/UnrealOpenMcpBridgeSession.h
       - scripts/sync-version.mjs
 
 jobs:

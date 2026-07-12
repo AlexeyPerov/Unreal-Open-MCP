@@ -10,11 +10,11 @@
 // run `node scripts/sync-version.mjs`. The CI gate (version-sync.yml) fails
 // any PR where a generated target has drifted from its source.
 //
-// Unreal-specific targets (add BridgeSession.h when bridge ships in Phase 1):
+// Unreal-specific targets:
 //   - mcp-server/package.json
 //   - packages/bridge/package.json
 //   - packages/verify/package.json
-//   - packages/bridge/Source/.../BridgeSession.h (BridgeVersion constant)
+//   - packages/bridge/Source/.../Bridge/UnrealOpenMcpBridgeSession.h (BRIDGE_VERSION constant)
 //
 // Usage:
 //   node scripts/sync-version.mjs                # rewrite all trio targets from version.json
@@ -42,6 +42,18 @@ function setJsonVersion(body, v) {
   );
 }
 
+/**
+ * Replace the C++ BRIDGE_VERSION constant in UnrealOpenMcpBridgeSession.h.
+ * Matches `BRIDGE_VERSION = TEXT("<any>")` and rewrites the quoted string.
+ * @param {string} body @param {string} v
+ */
+function setCppBridgeVersion(body, v) {
+  return body.replace(
+    /(BRIDGE_VERSION\s*=\s*TEXT\(")[^"]*("\))/,
+    (_, pre, post) => `${pre}${v}${post}`,
+  );
+}
+
 const TRIO_TARGETS = [
   {
     file: "mcp-server/package.json",
@@ -60,6 +72,12 @@ const TRIO_TARGETS = [
     kind: "json",
     description: "verify module package.json",
     replace: (b, v) => setJsonVersion(b, v),
+  },
+  {
+    file: "packages/bridge/Source/UnrealOpenMcpEditor/Private/Bridge/UnrealOpenMcpBridgeSession.h",
+    kind: "cpp",
+    description: "C++ BRIDGE_VERSION constant (UnrealOpenMcpBridgeSession.h)",
+    replace: (b, v) => setCppBridgeVersion(b, v),
   },
 ];
 
@@ -120,6 +138,10 @@ function syncTargets(sourceFile, targets, mode) {
 
 /** @param {string} body @param {string} kind @returns {string | undefined} */
 function extractVersion(body, kind) {
+  if (kind === "cpp") {
+    const m = body.match(/BRIDGE_VERSION\s*=\s*TEXT\("([^"]+)"\)/);
+    return m ? m[1] : undefined;
+  }
   const m = body.match(/"version"\s*:\s*"([^"]+)"/);
   return m ? m[1] : undefined;
 }

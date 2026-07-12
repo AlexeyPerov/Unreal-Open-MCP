@@ -66,6 +66,20 @@ Unreal separates editor and runtime modules at compile time:
 
 The load-bearing invariant is one-directional: **Editor code may reference Runtime code; Runtime code may NEVER reference Editor code.**
 
+## Plugin layout
+
+The bridge is authored under `packages/bridge/` and installed into an Unreal project as `Plugins/UnrealOpenMCP/`:
+
+```
+packages/bridge/
+  UnrealOpenMCP.uplugin          # plugin descriptor (no EngineVersion pin, ADR-008)
+  Source/
+    UnrealOpenMcpRuntime/        # Runtime module — shared types (log category today)
+    UnrealOpenMcpEditor/         # Editor module — bridge lifecycle, tool handlers
+```
+
+The Editor module owns bridge boot/shutdown via `IModuleInterface` and logs a proof-of-life line on startup. The bridge version advertised to MCP clients lives in `UnrealOpenMcpBridgeSession.h` and is synced from `version.json` by `scripts/sync-version.mjs`.
+
 ## Multi-instance port + discovery
 
 Multiple Unreal projects can run bridges simultaneously without port collisions. The bridge port is **deterministic per project**: `20000 + (sha256(normalizedProjectPath) % 10000)`, where the hash uses the first 8 bytes of SHA256 as a big-endian `UInt64` so the C++ bridge and the TypeScript MCP server agree byte-for-byte. The `UNREAL_OPEN_MCP_BRIDGE_PORT` env var overrides the deterministic default.

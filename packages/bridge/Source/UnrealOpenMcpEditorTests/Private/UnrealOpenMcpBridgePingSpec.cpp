@@ -26,6 +26,7 @@
 #include "Bridge/UnrealOpenMcpBridgeHttpServer.h"
 #include "Bridge/UnrealOpenMcpBridgeJson.h"
 #include "Bridge/UnrealOpenMcpBridgeSession.h"
+#include "Bridge/UnrealOpenMcpInstancePortResolver.h"
 #include "Dispatch/UnrealOpenMcpGameThreadDispatcher.h"
 
 #include "Common/TcpSocketBuilder.h"
@@ -152,20 +153,21 @@ void FUnrealOpenMcpBridgePingSpec::Define()
 
 	Describe("Port resolution", [this]()
 	{
-		// No env override → documented default. We cannot reliably mutate the
-		// process env from a spec (cross-platform FPlatformMisc::SetEnvironmentVar
-		// is editor-only and the C-runtime copy may be cached), so we pin the
-		// fallback constant instead of asserting an env-driven value.
-		It("falls back to the documented default when no override is set", [this]()
+		// P1.4: ResolvePort now delegates to FUnrealOpenMcpInstancePortResolver.
+		// The full formula + golden values are pinned in
+		// UnrealOpenMcpPortResolverSpec; here we only pin the wiring so a
+		// refactor that bypasses the resolver trips this spec.
+		//
+		// We cannot reliably mutate the process env from a spec (cross-platform
+		// FPlatformMisc::SetEnvironmentVar is editor-only and the C-runtime copy
+		// may be cached), so we pin the resolver parity instead of asserting an
+		// env-driven value.
+		It("resolves via the deterministic resolver when no override is set", [this]()
 		{
-			// Clear the override via CLI arg parsing path first, then env —
-			// ResolvePort checks the CLI form before the env form.
-			const uint16 Resolved = FUnrealOpenMcpBridgeHttpServer::ResolvePort();
-			TestTrue(
-				TEXT("resolved port is the documented default when no override applies"),
-				Resolved == FUnrealOpenMcpBridgeHttpServer::DefaultPort ||
-				Resolved == static_cast<uint16>(FCString::Atoi(
-					*FPlatformMisc::GetEnvironmentVariable(FUnrealOpenMcpBridgeHttpServer::PortEnvVar()))));
+			const FString ProjectPath = TEXT("/Users/foo/MyGame");
+			const uint16 Resolved = FUnrealOpenMcpBridgeHttpServer::ResolvePort(ProjectPath);
+			const int32 Expected = FUnrealOpenMcpInstancePortResolver::ComputePort(ProjectPath);
+			TestEqual(TEXT("matches the resolver's ComputePort"), static_cast<int32>(Resolved), Expected);
 		});
 
 		// The env var name must match Unity's so the MCP server's

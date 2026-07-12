@@ -1,10 +1,16 @@
 // UnrealOpenMcpRuntime — runtime-safe bridge infrastructure.
 //
 // Per docs/architecture.md (Editor / Runtime boundary): Runtime may NEVER
-// reference Editor code; Editor may reference Runtime. This module exists from
-// day one (P1.1) as the packaging home for types that may ship to packaged
-// builds when explicitly opted in later. In P1.1 it carries only the log
-// category and module stub — no engine-agnostic subsystems yet.
+// reference Editor code; Editor may reference Runtime. This module is the
+// packaging home for types that may ship to packaged builds when explicitly
+// opted in later. It currently carries:
+//   - The shared log category (UnrealOpenMcpLog).
+//   - The game-thread dispatcher (P1.2) — packaging-safe, no editor hooks.
+//   - The self-contained SHA-256 + instance-port resolver (P1.4) — pure math
+//     + path handling, no editor APIs. The instance-lock file writer lives in
+//     the Editor module because it touches editor lifecycle (heartbeat
+//     ticker), but the formula + lock path derivation stay here so a future
+//     packaged commandlet can derive its port without editor code.
 
 using UnrealBuildTool;
 

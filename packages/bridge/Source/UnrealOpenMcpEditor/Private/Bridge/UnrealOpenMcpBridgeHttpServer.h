@@ -18,9 +18,10 @@
 // P1.3 scope: GET /ping only.
 //   - Tool dispatch (POST /tools/{name}) lands in P2.1.
 //   - Bearer auth (P5.6) is a later opt-in; not enforced here.
-//   - Instance lock + deterministic port resolver land in P1.4 — Start() takes
-//     a port resolved by the caller (env override > documented default today;
-//     the deterministic hash lands in P1.4).
+//   - Instance lock + deterministic port resolver landed in P1.4. The
+//     FUnrealOpenMcpInstancePortResolver (Runtime) owns the formula and the
+//     override precedence; this server delegates to it and no longer carries a
+//     DefaultPort constant of its own.
 //
 // Threading (see packages/bridge/AGENTS.md §Transport):
 //   - The server IS an FRunnable: Run() is the accept loop, on its own thread.
@@ -54,20 +55,24 @@ class FUnrealOpenMcpGameThreadDispatcher;
 class UNREALOPENMCPEDITOR_API FUnrealOpenMcpBridgeHttpServer : public FRunnable
 {
 public:
-	/** Bind port precedence (P1.3 stub — full resolver lands in P1.4):
-	 *  env `UNREAL_OPEN_MCP_BRIDGE_PORT` if a valid 1..65535 value, else the
-	 *  DefaultPort constant. */
-	static constexpr uint16 DefaultPort = 21111;
+	/**
+	 * Resolve the bind port from the environment. Public + static so the spec
+	 * can pin the env precedence without spinning a server. Delegates to
+	 * FUnrealOpenMcpInstancePortResolver (the deterministic-hash source of
+	 * truth) so the formula is shared across the bridge + the TS mirror.
+	 *
+	 * Precedence (Unity-parity):
+	 *   1. UNREAL_OPEN_MCP_BRIDGE_PORT env var (if a valid 1..65535 value)
+	 *   2. -UNREAL_OPEN_MCP_BRIDGE_PORT=<n> CLI arg
+	 *   3. deterministic hash of ProjectPath (20000 + sha256 % 10000)
+	 *
+	 * @param ProjectPath  the absolute project dir, used by the hash fallback.
+	 *                     Empty → falls back to the first valid override only.
+	 */
+	static uint16 ResolvePort(const FString& ProjectPath);
 
 	/** Env var name mirroring Unity's BridgeConstants.PortEnvVar. */
 	static const TCHAR* PortEnvVar();
-
-	/**
-	 * Resolve the bind port from the environment. Public + static so the P1.3
-	 * spec can pin the env precedence without spinning a server.
-	 * Returns DefaultPort when the env var is unset or invalid.
-	 */
-	static uint16 ResolvePort();
 
 	/** True only for the loopback literal 127.0.0.1 (the only address Start
 	 *  will bind). Pinning the bind-address contract at the type level. */

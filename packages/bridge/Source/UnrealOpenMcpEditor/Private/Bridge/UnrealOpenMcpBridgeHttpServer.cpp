@@ -4,6 +4,7 @@
 
 #include "Bridge/UnrealOpenMcpBridgeJson.h"
 #include "Bridge/UnrealOpenMcpBridgeSession.h"
+#include "Bridge/UnrealOpenMcpInstancePortResolver.h"
 #include "Dispatch/UnrealOpenMcpGameThreadDispatcher.h"
 #include "UnrealOpenMcpLog.h"
 
@@ -33,45 +34,54 @@ const TCHAR* FUnrealOpenMcpBridgeHttpServer::PortEnvVar()
 	return TEXT("UNREAL_OPEN_MCP_BRIDGE_PORT");
 }
 
-uint16 FUnrealOpenMcpBridgeHttpServer::ResolvePort()
+uint16 FUnrealOpenMcpBridgeHttpServer::ResolvePort(const FString& ProjectPath)
 {
-	// P1.3 stub of the precedence: env override > DefaultPort. The full
-	// resolver (env > arg > deterministic hash of projectPath) lands in P1.4
-	// and will share the IsValidPort check with the MCP server.
+	// P1.4: delegate to FUnrealOpenMcpInstancePortResolver so the port formula
+	// is shared across the bridge + the TS mirror (instance-discovery.ts).
 	//
-	// Two override sources are honored, mirroring Unity:
-	//   1. CLI arg  -UNREAL_OPEN_MCP_BRIDGE_PORT=<n>  (FParse::Value form)
-	//   2. process env UNREAL_OPEN_MCP_BRIDGE_PORT
-	// CLI wins when present; otherwise env wins; otherwise the documented
-	// default.
-	FString Override;
+	// Override sources are read here (process env + CLI arg) and handed to the
+	// resolver as parsed optionals; the resolver owns IsValidPort and the hash
+	// fallback so there is a single source of truth for the precedence.
+	TOptional<int32> EnvPort;
+	const FString EnvValue = FPlatformMisc::GetEnvironmentVariable(PortEnvVar());
+	if (!EnvValue.IsEmpty())
+	{
+		const int32 Parsed = FCString::Atoi(*EnvValue);
+		if (FUnrealOpenMcpInstancePortResolver::IsValidPort(Parsed))
+		{
+			EnvPort = Parsed;
+		}
+		else
+		{
+			UE_LOG(
+				LogUnrealOpenMcp,
+				Warning,
+				TEXT("[Unreal Open MCP] ignoring invalid %s='%s' (need 1..65535)"),
+				PortEnvVar(),
+				*EnvValue);
+		}
+	}
 
+	TOptional<int32> CliPort;
 	FString CliValue;
 	if (FParse::Value(FCommandLine::Get(), TEXT("UNREAL_OPEN_MCP_BRIDGE_PORT="), CliValue) && !CliValue.IsEmpty())
 	{
-		Override = CliValue;
-	}
-	else
-	{
-		Override = FPlatformMisc::GetEnvironmentVariable(PortEnvVar());
+		const int32 Parsed = FCString::Atoi(*CliValue);
+		if (FUnrealOpenMcpInstancePortResolver::IsValidPort(Parsed))
+		{
+			CliPort = Parsed;
+		}
+		else
+		{
+			UE_LOG(
+				LogUnrealOpenMcp,
+				Warning,
+				TEXT("[Unreal Open MCP] ignoring invalid -UNREAL_OPEN_MCP_BRIDGE_PORT='%s' (need 1..65535)"),
+				*CliValue);
+		}
 	}
 
-	if (!Override.IsEmpty())
-	{
-		const int32 Parsed = FCString::Atoi(*Override);
-		if (Parsed >= 1 && Parsed <= 65535)
-		{
-			return static_cast<uint16>(Parsed);
-		}
-		UE_LOG(
-			LogUnrealOpenMcp,
-			Warning,
-			TEXT("[Unreal Open MCP] ignoring invalid %s='%s' (need 1..65535); falling back to default %u"),
-			PortEnvVar(),
-			*Override,
-			static_cast<uint32>(DefaultPort));
-	}
-	return DefaultPort;
+	return static_cast<uint16>(FUnrealOpenMcpInstancePortResolver::ResolvePort(ProjectPath, EnvPort, CliPort));
 }
 
 bool FUnrealOpenMcpBridgeHttpServer::IsLoopbackAddress(const FString& Address)

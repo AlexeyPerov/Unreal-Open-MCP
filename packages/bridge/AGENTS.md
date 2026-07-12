@@ -43,15 +43,17 @@ Rules for `packages/bridge/` — the Unreal Editor HTTP bridge (`Plugins/UnrealO
 ## Auth
 
 - A per-session bearer token is minted into the instance lock on bridge start and mirrored as `authToken` in the lock JSON. The TS-side `InstanceLock` interface must carry the same field.
+- **P1.4 deferral:** `authToken` is NOT yet minted — the field is omitted from the lock JSON and its absence is pinned in `UnrealOpenMcpInstanceLockSpec`. When auth enforcement lands (later phase), add the field between `port` and `projectPath` (Unity's order) and update the TS reader + spec in the same task.
 - Enforcement is opt-in via `authMode` in project settings (`"none"` default | `"required"`).
 - Token comparison must be constant-time.
 
 ## Multi-instance port + discovery
 
-- The bridge port is **deterministic per project**: `20000 + (sha256(projectPath) % 10000)`, implemented in the bridge port resolver. Must match `mcp-server/src/instance-discovery.ts` byte-for-byte.
-- `UNREAL_OPEN_MCP_BRIDGE_PORT` (env) overrides the deterministic default.
-- Each running bridge writes a lock file at `~/.unreal-open-mcp/instances/<sha256(projectPath)>.json` via the instance lock module.
-- Stale locks (crashed editor) are swept on `Acquire` by PID-liveness. The MCP server is read-only on the lock.
+- The bridge port is **deterministic per project**: `20000 + (sha256(projectPath) % 10000)`, implemented in `FUnrealOpenMcpInstancePortResolver` (Runtime). Must match `mcp-server/src/instance-discovery.ts` byte-for-byte — cross-side consistency is pinned by golden vectors in `UnrealOpenMcpPortResolverSpec` and the TS `instance-discovery.test.ts` (P1.6). If either side changes, update both in the same task.
+- **SHA-256 source:** `FUnrealOpenMcpSha256` (Runtime, self-contained FIPS 180-4). `FSHA1` is SHA-1 and MUST NOT be used — using it would silently break parity with Node `crypto.createHash('sha256')`.
+- Port resolution precedence: `UNREAL_OPEN_MCP_BRIDGE_PORT` (env) → `-UNREAL_OPEN_MCP_BRIDGE_PORT=<n>` (CLI) → deterministic hash. Env wins over CLI.
+- Each running bridge writes a lock file at `~/.unreal-open-mcp/instances/<sha256(projectPath)>.json` via `FUnrealOpenMcpBridgeInstanceLock` (Editor). The resolver (formula + path) lives in Runtime so a future packaged commandlet can derive its port; the lock file writer lives in Editor because it owns the heartbeat lifecycle.
+- Stale locks (crashed editor) are swept on `Acquire` by PID-liveness (`FPlatformProcess::GetProcessIsAlive`). The MCP server is read-only on the lock.
 - Lock retention on hot reload: do not release the lock on module reload — stale heartbeat + live PID signals a dead bridge to the MCP server.
 
 ## UE version policy

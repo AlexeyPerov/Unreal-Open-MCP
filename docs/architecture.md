@@ -74,8 +74,10 @@ The bridge is authored under `packages/bridge/` and installed into an Unreal pro
 packages/bridge/
   UnrealOpenMCP.uplugin          # plugin descriptor (no EngineVersion pin, ADR-008)
   Source/
-    UnrealOpenMcpRuntime/        # Runtime module — shared types: log category, game-thread dispatcher
-    UnrealOpenMcpEditor/         # Editor module — bridge lifecycle, tool handlers
+    UnrealOpenMcpRuntime/        # Runtime module — shared types: log category, game-thread
+                                  # dispatcher, SHA-256, instance-port resolver
+    UnrealOpenMcpEditor/         # Editor module — bridge lifecycle, HTTP server, instance lock,
+                                  # tool handlers
     UnrealOpenMcpEditorTests/    # Automation specs (editor test runner; not packaged)
 ```
 
@@ -85,9 +87,17 @@ The Editor module also owns the loopback HTTP bridge (`FUnrealOpenMcpBridgeHttpS
 
 ## Multi-instance port + discovery
 
-Multiple Unreal projects can run bridges simultaneously without port collisions. The bridge port is **deterministic per project**: `20000 + (sha256(normalizedProjectPath) % 10000)`, where the hash uses the first 8 bytes of SHA256 as a big-endian `UInt64` so the C++ bridge and the TypeScript MCP server agree byte-for-byte. The `UNREAL_OPEN_MCP_BRIDGE_PORT` env var overrides the deterministic default.
+Multiple Unreal projects can run bridges simultaneously without port collisions. The bridge port is **deterministic per project**: `20000 + (sha256(normalizedProjectPath) % 10000)`, where the hash uses the first 8 bytes of SHA-256 as a big-endian `UInt64` so the C++ bridge and the TypeScript MCP server agree byte-for-byte. Path normalization (forward slashes, no trailing slash, case preserved) is applied before hashing. Port resolution precedence:
 
-Each running bridge owns a lock file at `~/.unreal-open-mcp/instances/<sha256(projectPath)>.json` carrying the PID, port, project path/hash, and editor state. The MCP server reads these to discover the right port per project without an HTTP round-trip. Stale locks (from a crashed editor) are swept on the next `Acquire` by PID-liveness; the MCP server is read-only on the lock.
+1. `UNREAL_OPEN_MCP_BRIDGE_PORT` env var (when a valid `1..65535` value)
+2. `-UNREAL_OPEN_MCP_BRIDGE_PORT=<n>` CLI arg
+3. deterministic hash fallback
+
+The formula and normalization live in `FUnrealOpenMcpInstancePortResolver` (Runtime module, packaging-safe) so a future packaged commandlet can derive its port without editor code. The SHA-256 implementation is a self-contained FIPS 180-4 port (`FUnrealOpenMcpSha256`) — `FSHA1` is SHA-1 and MUST NOT be used; the self-contained impl guarantees byte-for-byte parity with Node `crypto.createHash('sha256')`.
+
+Each running bridge owns a lock file at `~/.unreal-open-mcp/instances/<sha256(projectPath)>.json` (written by `FUnrealOpenMcpBridgeInstanceLock` in the Editor module) carrying: `pid`, `port`, `projectPath`, `projectHash`, `startedAt`, `updatedAt`, `heartbeatAt`, `state`, `isPlaying`, `isCompiling`, `bridgeVersion`, `unrealVersion`. The MCP server reads these to discover the right port per project without an HTTP round-trip. Stale locks (from a crashed editor) are swept on the next `Acquire` by PID-liveness (`FPlatformProcess::GetProcessIsAlive`); the MCP server is read-only on the lock.
+
+> **`authToken` note:** the bearer-token field is deferred to a later phase. It is omitted from the lock JSON today; its absence is pinned in the specs.
 
 ## Versioning
 

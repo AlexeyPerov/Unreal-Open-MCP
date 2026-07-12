@@ -2,9 +2,12 @@
 //
 // Per packages/bridge/AGENTS.md and docs/architecture.md (Editor / Runtime
 // boundary): this module depends on Runtime PUBLICLY so its public headers
-// (UnrealOpenMcpLog.h) are visible across the .dll boundary. In P1.1 the
-// editor module owned plugin boot logging only; P1.3 adds the loopback HTTP
-// server + /ping health surface; tool dispatch lands in P2.1.
+// (UnrealOpenMcpLog.h, Dispatch/UnrealOpenMcpGameThreadDispatcher.h,
+// Bridge/UnrealOpenMcpInstancePortResolver.h, Crypto/UnrealOpenMcpSha256.h)
+// are visible across the .dll boundary. In P1.1 the editor module owned
+// plugin boot logging only; P1.3 adds the loopback HTTP server + /ping health
+// surface; P1.4 adds the instance lock + wires the deterministic port
+// resolver into the HTTP server start; tool dispatch lands in P2.1.
 using UnrealBuildTool;
 
 public class UnrealOpenMcpEditor : ModuleRules

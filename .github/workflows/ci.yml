@@ -2,9 +2,9 @@
 #
 # - bootstrap: required repo paths present.
 # - version-sync: generated version targets match version.json.
+# - mcp-server: typecheck + test for the stdio MCP server package.
 #
-# UE plugin compile, mcp-server typecheck, and editor boundary guard
-# are added in Phase 1.
+# UE plugin compile and editor boundary guard are added in Phase 1.
 
 name: ci
 
@@ -62,3 +62,29 @@ jobs:
 
       - name: Verify trio targets match version.json
         run: node scripts/sync-version.mjs --check
+
+  mcp-server:
+    name: MCP server (typecheck + test)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mcp-server
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: mcp-server/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test

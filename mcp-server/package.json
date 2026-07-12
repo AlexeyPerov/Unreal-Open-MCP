@@ -14,8 +14,10 @@
   ],
   "scripts": {
     "build": "tsc",
+    "build:test": "tsc -p tsconfig.test.json",
     "typecheck": "tsc --noEmit",
-    "test": "node --test"
+    "test": "npm run build:test && node --test 'dist-test/**/*.test.js'",
+    "prepublishOnly": "npm run build"
   },
   "keywords": [
     "mcp",

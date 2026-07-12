@@ -36,6 +36,10 @@ public class UnrealOpenMcpEditorTests : ModuleRules
 			// Editor module: reach its private headers (e.g. BridgeSession.h
 			// under Private/Bridge/) for future specs.
 			"UnrealOpenMcpEditor",
+			// P1.3 — the ping spec drives the loopback HTTP listener (FTcpSocketBuilder,
+			// raw socket Recv) and reads the bound port back from FSocket.
+			"Sockets",
+			"Networking",
 		});
 
 		// Reach the editor module's PRIVATE headers so Automation specs can

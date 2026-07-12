@@ -6,10 +6,13 @@
 // the bridge's diagnostic proof of life — when triaging a missing /ping, the
 // absence of this line means the plugin never loaded.
 //
-// P1.2 scope: this module owns the GameThreadDispatcher lifecycle
-// (start/stop). All future UObject / editor API access routes through that one
-// dispatcher (packages/bridge/AGENTS.md §Transport). HTTP listener (P1.3),
-// instance lock, and tool dispatch land in later phases.
+// Lifecycle ownership:
+//   - GameThreadDispatcher (P1.2) — single marshaling path for UObject/editor
+//     access. Owned here; passed by reference into the HTTP server.
+//   - BridgeHttpServer (P1.3) — loopback HTTP listener with GET /ping. Owned
+//     here; started with a resolved port, stopped before the dispatcher so the
+//     server's pending /ping dispatch fails fast with DispatcherShutdown
+//     instead of a hang.
 //
 // Startup/shutdown are idempotent: ShutdownModule guards against
 // double-teardown and repeated module reloads (Live Coding / hot reload) never
@@ -17,8 +20,12 @@
 #include "Modules/ModuleManager.h"
 
 #include "UnrealOpenMcpLog.h"
+#include "Bridge/UnrealOpenMcpBridgeHttpServer.h"
 #include "Bridge/UnrealOpenMcpBridgeSession.h"
 #include "Dispatch/UnrealOpenMcpGameThreadDispatcher.h"
+
+#include "HAL/PlatformProcess.h"
+#include "Misc/Paths.h"
 
 class FUnrealOpenMcpEditorModule : public IModuleInterface
 {
@@ -42,20 +49,27 @@ public:
 		// construction is safe.
 		Dispatcher = MakeUnique<FUnrealOpenMcpGameThreadDispatcher>();
 
-		// Manual smoke (P1.2 verification plan: "log a dispatched lambda from
-		// Editor module boot"). Runs inline because we are on the game thread;
-		// the assertion inside proves the dispatch path works end-to-end
-		// before P1.3 hangs /ping off it. Fire-and-forget — the result is
-		// observed only via the Output Log line it emits.
-		Dispatcher->Enqueue([]()
+		// Start the loopback HTTP server. The dispatcher is passed by reference
+		// so the server's /ping handler can marshal its small body onto the
+		// game thread (packages/bridge/AGENTS.md §Transport — never call editor
+		// APIs from the listener worker thread). ResolvePort honors the
+		// UNREAL_OPEN_MCP_BRIDGE_PORT env override; the deterministic hash
+		// resolver lands in P1.4.
+		HttpServer = MakeUnique<FUnrealOpenMcpBridgeHttpServer>(*Dispatcher);
+		const uint16 Port = FUnrealOpenMcpBridgeHttpServer::ResolvePort();
+		const FString ProjectPath = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir());
+		if (!HttpServer->Start(Port, ProjectPath))
 		{
+			// A failed bind is logged but NOT fatal — the editor still runs,
+			// and the operator can free the port and reload the plugin. The
+			// dispatcher stays up so a later Start (hot reload after freeing
+			// the port) works without reconstructing it.
 			UE_LOG(
 				LogUnrealOpenMcp,
-				Log,
-				TEXT("[Unreal Open MCP] game-thread dispatcher ready (dispatch smoke: body ran %s)"),
-				IsInGameThread() ? TEXT("on the game thread") : TEXT("OFF the game thread")
-			);
-		});
+				Error,
+				TEXT("[Unreal Open MCP] bridge HTTP server failed to start: %s"),
+				*HttpServer->GetLastStartError());
+		}
 	}
 
 	virtual void ShutdownModule() override
@@ -64,11 +78,20 @@ public:
 		// editor teardown. Keep this path side-effect-free.
 		UE_LOG(LogUnrealOpenMcp, Log, TEXT("[Unreal Open MCP] plugin shutting down"));
 
-		// Tear down the dispatcher before the module goes away. After this,
-		// any racing EnqueueAsync resolves immediately with
-		// DispatcherShutdown instead of burning its timeout; Enqueue is a
-		// silent no-op. The unique ptr then drops the instance. Safe to call
-		// on the game thread during ShutdownModule.
+		// Tear down the HTTP server BEFORE the dispatcher: in-flight /ping
+		// dispatches must resolve with DispatcherShutdown (fail-fast) rather
+		// than hanging on a dispatcher that no longer exists. The HTTP server
+		// joins its listener thread inside Stop().
+		if (HttpServer.IsValid())
+		{
+			HttpServer->Stop();
+			HttpServer.Reset();
+		}
+
+		// Tear down the dispatcher. After this, any racing EnqueueAsync
+		// resolves immediately with DispatcherShutdown instead of burning its
+		// timeout; Enqueue is a silent no-op. The unique ptr then drops the
+		// instance. Safe to call on the game thread during ShutdownModule.
 		if (Dispatcher.IsValid())
 		{
 			Dispatcher->Shutdown();
@@ -83,11 +106,23 @@ public:
 	 */
 	FUnrealOpenMcpGameThreadDispatcher* GetDispatcher() const { return Dispatcher.Get(); }
 
+	/**
+	 * Access the bridge HTTP server. Returns null before StartupModule / after
+	 * ShutdownModule. Exposed for future editor UI (status panel) and tests.
+	 */
+	FUnrealOpenMcpBridgeHttpServer* GetHttpServer() const { return HttpServer.Get(); }
+
 private:
 	// Owned. Constructed in StartupModule, torn down in ShutdownModule. The
 	// dispatcher itself lives in the Runtime module (packaging-safe); only its
 	// lifecycle is owned here, preserving the Editor→Runtime boundary.
 	TUniquePtr<FUnrealOpenMcpGameThreadDispatcher> Dispatcher;
+
+	// Owned. Constructed after the dispatcher in StartupModule, torn down
+	// before it in ShutdownModule. The HTTP server holds a reference to the
+	// dispatcher, so the destruction order below (HttpServer first, Dispatcher
+	// second) is load-bearing.
+	TUniquePtr<FUnrealOpenMcpBridgeHttpServer> HttpServer;
 };
 
 IMPLEMENT_MODULE(FUnrealOpenMcpEditorModule, UnrealOpenMcpEditor)

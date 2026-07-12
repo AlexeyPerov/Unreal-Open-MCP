@@ -6,13 +6,13 @@ This file is the index for external interfaces and protocol contracts exposed by
 
 | Document | Covers | Status |
 |---|---|---|
-| `api/bridge-http.md` | Unreal bridge HTTP endpoints (`/ping`, `/tools/*`), envelopes, and errors. | TBD |
+| `api/bridge-http.md` | Unreal bridge HTTP endpoints (`/ping`, `/tools/*`), envelopes, and errors. | `/ping` shipped; `/tools/*` TBD |
 | `api/mcp-tools.md` | MCP tool catalog, tool families, route policy (live/offline/local/batch), `capabilities` surface, rule + fix catalog contract. | TBD |
 | `api/resources.md` | MCP resource URIs, payload shapes, and resource router behavior. | TBD |
 
 ## Contract boundaries
 
-- Bridge HTTP contract source: `packages/bridge/` (planned)
+- Bridge HTTP contract source: `packages/bridge/Source/UnrealOpenMcpEditor/Private/Bridge/` (`GET /ping` shipped)
 - MCP server routing/registry source: `mcp-server/src/index.ts`, `mcp-server/src/live-client.ts`, `mcp-server/src/tool-router.ts` (planned)
 - MCP capabilities surface (local rule/fix catalog + builder): `mcp-server/src/capabilities/` (planned)
 - MCP tool definitions source: `mcp-server/src/tools/` (planned)

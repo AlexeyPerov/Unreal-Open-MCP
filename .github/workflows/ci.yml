@@ -1,0 +1,64 @@
+# CI for Unreal Open MCP.
+#
+# - bootstrap: required repo paths present.
+# - version-sync: generated version targets match version.json.
+#
+# UE plugin compile, mcp-server typecheck, and editor boundary guard
+# are added in Phase 1.
+
+name: ci
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+
+jobs:
+  bootstrap:
+    name: Repo bootstrap check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify required paths exist
+        run: |
+          set -e
+          for path in \
+            mcp-server \
+            packages/bridge \
+            packages/verify \
+            cli \
+            skills \
+            demo \
+            scripts \
+            docs \
+            docs/api \
+            version.json \
+            scripts/sync-version.mjs \
+            README.md \
+            docs/architecture.md \
+            docs/api.md \
+            docs/porting-principles.md \
+            AGENTS.md; do
+            test -e "$path" || { echo "Missing required path: $path"; exit 1; }
+          done
+          echo "All required bootstrap paths present."
+
+  version-sync:
+    name: Version sync check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Verify trio targets match version.json
+        run: node scripts/sync-version.mjs --check

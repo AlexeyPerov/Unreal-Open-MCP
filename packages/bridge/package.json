@@ -1,0 +1,6 @@
+{
+  "name": "@unreal-open-mcp/bridge",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Unreal Editor C++ plugin bridge (shipped as Plugins/UnrealOpenMCP/)."
+}

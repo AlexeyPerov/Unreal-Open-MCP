@@ -1,0 +1,6 @@
+{
+  "private": true,
+  "name": "unreal-open-mcp-monorepo",
+  "version": "0.0.0",
+  "description": "Monorepo root marker for Unreal Open MCP. The publishable npm package lives in mcp-server/package.json; this file exists so future Hub Open-MCP project detection (mcp-server/ directory + root package.json) registers the checkout."
+}

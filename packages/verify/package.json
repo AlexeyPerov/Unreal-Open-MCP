@@ -1,0 +1,6 @@
+{
+  "name": "@unreal-open-mcp/verify",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Scoped health-check module for Unreal Open MCP gate/verify."
+}

@@ -1,0 +1,42 @@
+# version-sync — drift gate for the shared trio version file.
+#
+# Source of truth: version.json (npm MCP server + bridge plugin + verify module).
+# Generated targets are synced by scripts/sync-version.mjs.
+#
+# See docs/architecture.md §Versioning.
+
+name: version-sync
+
+on:
+  pull_request:
+    paths:
+      - version.json
+      - mcp-server/package.json
+      - packages/bridge/package.json
+      - packages/verify/package.json
+      - scripts/sync-version.mjs
+      - .github/workflows/version-sync.yml
+  push:
+    branches: [main, master]
+    paths:
+      - version.json
+      - mcp-server/package.json
+      - packages/bridge/package.json
+      - packages/verify/package.json
+      - scripts/sync-version.mjs
+
+jobs:
+  check-trio:
+    name: Check shared trio version sync
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Verify trio targets match version.json
+        run: node scripts/sync-version.mjs --check

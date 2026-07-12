@@ -1,0 +1,51 @@
+{
+  "name": "unreal-open-mcp",
+  "version": "0.0.1",
+  "description": "MCP server (stdio) routing tool calls to the live Unreal Open MCP bridge.",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "unreal-open-mcp": "dist/index.js"
+  },
+  "files": [
+    "dist/",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "unreal",
+    "unreal-engine",
+    "ai",
+    "agent",
+    "claude",
+    "cursor",
+    "stdio"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "typescript": "~5.6.2"
+  },
+  "license": "MIT",
+  "author": "Unreal Open MCP",
+  "homepage": "https://github.com/AlexeyPerov/Unreal-Open-MCP",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AlexeyPerov/Unreal-Open-MCP.git"
+  },
+  "bugs": {
+    "url": "https://github.com/AlexeyPerov/Unreal-Open-MCP/issues"
+  }
+}

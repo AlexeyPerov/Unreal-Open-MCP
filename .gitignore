@@ -1,0 +1,48 @@
+/specs/
+
+# ZCode local session state (plans, scratch)
+.zcode/
+
+# Node / TypeScript
+node_modules/
+dist/
+dist-test/
+*.tsbuildinfo
+
+# Unreal Engine
+Binaries/
+Intermediate/
+DerivedDataCache/
+Saved/
+.vs/
+*.sln.docstates
+*.VC.db
+*.opensdf
+*.sdf
+*.suo
+*.xcodeproj/*
+!*.xcodeproj/project.pbxproj
+!*.xcodeproj/xcshareddata/
+!*.xcodeproj/project.xcworkspace/
+!*.xcworkspace/contents.xcworkspacedata
+/[Bb]uild/
+/[Bb]uilds/
+/[Ll]ogs/
+/[Uu]ser[Ss]ettings/
+
+# .NET (CLI / sidecar tooling if added later)
+bin/
+obj/
+*.user
+*.suo
+*.userprefs
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+
+# Build artifacts
+*.log

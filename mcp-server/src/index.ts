@@ -25,6 +25,13 @@ import {
 import { pathToFileURL } from "node:url";
 import { ALL_TOOLS } from "./tools/index.js";
 import { readPackageVersion } from "./package-version.js";
+import {
+  resolvePort,
+  resolveAuthToken,
+  PORT_OVERRIDE_ENV_VAR,
+  readInstanceLock,
+  isPidAlive,
+} from "./instance-discovery.js";
 
 /** Name advertised in the MCP `initialize` response. */
 export const SERVER_NAME = "unreal-open-mcp";
@@ -106,10 +113,25 @@ export function createServer(): Server {
 /**
  * Resolve env for the MCP server. `UNREAL_PROJECT_PATH` is mandatory — without
  * a project there is nothing to route to. Exit 1 with a clear message if it is
- * missing. Port discovery is out of scope for P1.5 (the registry is empty);
- * the resolved project path is logged so users can confirm the binding.
+ * missing.
+ *
+ * Bridge port resolution uses P1.6 instance discovery:
+ *   1. UNREAL_OPEN_MCP_BRIDGE_PORT env var (override wins; users who pin a
+ *      port keep working as before)
+ *   2. ~/.unreal-open-mcp/instances/<hash>.json lock file (when its pid is alive)
+ *   3. deterministic hash of the project path (20000 + sha256 % 10000)
+ *
+ * The resolved port is logged with its source (override / lock / hash) so
+ * users can see which bridge was picked. The auth token is discovered from
+ * the same lock when present; until P5.6 the bridge omits it and the token
+ * resolves to undefined (the LiveClient wiring lands in P1.7).
  */
-function getEnv(): { projectPath: string } {
+function getEnv(): {
+  projectPath: string;
+  port: number;
+  authToken?: string;
+  envPort?: number;
+} {
   const projectPath = process.env[PROJECT_PATH_ENV_VAR];
   if (!projectPath) {
     console.error(
@@ -117,12 +139,55 @@ function getEnv(): { projectPath: string } {
     );
     process.exit(1);
   }
+
+  const rawEnvPort = process.env[PORT_OVERRIDE_ENV_VAR];
+  const parsedEnvPort = rawEnvPort ? parseInt(rawEnvPort, 10) : undefined;
+  const envPort =
+    rawEnvPort && Number.isInteger(parsedEnvPort) ? parsedEnvPort : undefined;
+
+  const port = resolvePort(projectPath, envPort);
+
+  // Surface which precedence branch supplied the port. The lock branch is only
+  // credited when the lock is actually live (pid alive) — resolvePort already
+  // validated that internally; we re-check here purely for the log label so
+  // the two code paths don't diverge on what "lock" means.
+  let source: string;
+  if (typeof envPort === "number") {
+    source = "env override";
+  } else {
+    const lock = readInstanceLock(projectPath);
+    if (lock && typeof lock.port === "number" && isPidAlive(lock.pid)) {
+      source = "instance lock";
+    } else {
+      source = "hash fallback";
+    }
+  }
+
   console.error(`[${SERVER_NAME}] Bound to project: ${projectPath}`);
-  return { projectPath };
+  console.error(
+    `[${SERVER_NAME}] Bridge port resolved to ${port} (${source})`,
+  );
+
+  const authToken = resolveAuthToken(
+    projectPath,
+    Number.isInteger(parsedEnvPort) ? parsedEnvPort : undefined,
+  );
+  if (authToken) {
+    console.error(`[${SERVER_NAME}] Bridge auth token discovered from instance lock.`);
+  } else {
+    console.error(
+      `[${SERVER_NAME}] No bridge auth token discovered (bridge authMode must be "none").`,
+    );
+  }
+
+  return { projectPath, port, authToken, envPort };
 }
 
 async function main(): Promise<void> {
-  getEnv();
+  // Resolve project + bridge port + auth token at startup. The port/token are
+  // not yet threaded into a LiveClient (the registry is empty in P1.5/P1.6);
+  // P1.7 wires the LiveClient + first live tool (unreal_open_mcp_ping).
+  const env = getEnv();
   const server = createServer();
   const transport = new StdioServerTransport();
   // StdioServerTransport closes when stdin EOFs (client disconnect). Once the
@@ -158,13 +223,16 @@ if (entrypointUrl === import.meta.url) {
 // Intentional deltas from Unity Open MCP (mcp-server/src/index.ts):
 //  - Server name `unreal-open-mcp` (not `unity-open-mcp`).
 //  - `UNREAL_PROJECT_PATH` env var (not `UNITY_PROJECT_PATH`).
-//  - No port resolution / instance discovery / auth token in P1.5 — the
-//    registry is empty; discovery lands in a later phase.
+//  - Port resolution + instance discovery + auth token wired in P1.6 (the
+//    registry is still empty; LiveClient routing lands in P1.7). The port
+//    source label is more granular than Unity's ("env override" / "instance
+//    lock" / "hash fallback" vs Unity's "env override" / "instance discovery")
+//    so users can tell whether a live lock supplied the port.
 //  - No LiveClient / BatchSpawn / ToolRouter / resources / CLI dispatch.
 //  - Handlers (`handleListTools`, `handleCallTool`) are exported standalone so
 //    tests can exercise them directly. Unity inlines them inside `createServer`
 //    and tests other modules; we export them because the registry is empty and
-//    these are the only meaningful units to test in P1.5.
+//    these are the only meaningful units to test in P1.5/P1.6.
 //  - Explicit `transport.onclose` → `server.close()` → `process.exit(0)` to
 //    make the "clean exit on disconnect" contract observable rather than
 //    relying solely on the event loop draining.

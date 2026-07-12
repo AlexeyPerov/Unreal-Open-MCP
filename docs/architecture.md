@@ -74,11 +74,12 @@ The bridge is authored under `packages/bridge/` and installed into an Unreal pro
 packages/bridge/
   UnrealOpenMCP.uplugin          # plugin descriptor (no EngineVersion pin, ADR-008)
   Source/
-    UnrealOpenMcpRuntime/        # Runtime module — shared types (log category today)
+    UnrealOpenMcpRuntime/        # Runtime module — shared types: log category, game-thread dispatcher
     UnrealOpenMcpEditor/         # Editor module — bridge lifecycle, tool handlers
+    UnrealOpenMcpEditorTests/    # Automation specs (editor test runner; not packaged)
 ```
 
-The Editor module owns bridge boot/shutdown via `IModuleInterface` and logs a proof-of-life line on startup. The bridge version advertised to MCP clients lives in `UnrealOpenMcpBridgeSession.h` and is synced from `version.json` by `scripts/sync-version.mjs`.
+The Editor module owns bridge boot/shutdown via `IModuleInterface` and logs a proof-of-life line on startup. It also owns the `FUnrealOpenMcpGameThreadDispatcher` lifecycle — the single marshaling path for all UObject / editor API access; every tool body routes through it so HTTP listener worker threads never call editor APIs directly. The dispatcher itself lives in the Runtime module (packaging-safe); the Editor module only starts/stops it. The bridge version advertised to MCP clients lives in `UnrealOpenMcpBridgeSession.h` and is synced from `version.json` by `scripts/sync-version.mjs`.
 
 ## Multi-instance port + discovery
 

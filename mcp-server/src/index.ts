@@ -1,14 +1,17 @@
 #!/usr/bin/env node
 
-// stdio MCP server scaffold for Unreal Open MCP.
+// stdio MCP server for Unreal Open MCP.
 //
-// P1.5 scope: boot a Model Context Protocol server over stdio, register the
-// tools/list and tools/call handlers against an (intentionally empty) tool
-// registry, and exit cleanly on disconnect. There is no bridge routing,
-// instance discovery, resource surface, or CLI dispatch in this task — those
-// land in later phases. The server is the stdio hop an AI client connects to;
-// it must boot and answer an empty tools/list before the first real tool
-// (`unreal_open_mcp_ping`) is wired in.
+// P1.7 scope: boot a Model Context Protocol server over stdio, expose the tool
+// registry (now containing `unreal_open_mcp_ping`), and dispatch tool calls
+// through the LiveClient into the live bridge's `GET /ping`. Instance discovery
+// (P1.6) resolves the bridge port + auth token at startup; the LiveClient (new
+// in P1.7) is the single HTTP hop for live-routed tools.
+//
+// There is no tool-group filtering, offline/local routing, or CLI dispatch in
+// this task — those land in later phases. The server is the stdio hop an AI
+// client connects to; `unreal_open_mcp_ping` is the first end-to-end probe
+// (stdio → instance discovery → HTTP → bridge).
 //
 // Adapted from Unity Open MCP's mcp-server/src/index.ts (copy fidelity), with
 // intentional deltas documented at the bottom of this file.
@@ -32,6 +35,7 @@ import {
   readInstanceLock,
   isPidAlive,
 } from "./instance-discovery.js";
+import { LiveClient, type Router } from "./live-client.js";
 
 /** Name advertised in the MCP `initialize` response. */
 export const SERVER_NAME = "unreal-open-mcp";
@@ -48,6 +52,35 @@ const PACKAGE_VERSION = readPackageVersion();
 const TOOL_BY_NAME = new Map(ALL_TOOLS.map((t) => [t.name, t]));
 
 /**
+ * Module-level live router. Installed once by `main()` after env/port/token
+ * resolution so the `tools/call` handler can dispatch live-routed tools without
+ * threading the client through every handler closure. When unset (no client
+ * installed — e.g. some unit tests exercise handlers directly without booting
+ * the full wiring), known tools fall back to a "not wired" error rather than
+ * crashing; unknown-tool handling is unaffected.
+ *
+ * Reset via {@link resetLiveRouterForTest} in tests so cases that assert the
+ * fallback path aren't poisoned by a previous test's install.
+ */
+let liveRouter: Router | null = null;
+
+/**
+ * Install the live router. Called once from `main()`. Exported so tests that
+ * want to drive `handleCallTool` against a stub bridge can install their own.
+ */
+export function setLiveRouter(router: Router | null): void {
+  liveRouter = router;
+}
+
+/**
+ * Test helper to clear the live router between cases. Not part of the runtime
+ * contract — exported only because the fallback-path test needs a clean slate.
+ */
+export function resetLiveRouterForTest(): void {
+  liveRouter = null;
+}
+
+/**
  * tools/list handler. Returns the visible tool set. The registry is empty in
  * P1.5; per-session group filtering lands later. Exported so unit tests can
  * call it directly without booting a stdio transport.
@@ -59,14 +92,15 @@ export async function handleListTools(_request?: ListToolsRequest) {
 /**
  * tools/call handler. Dispatches by name; an unknown name returns a structured
  * MCP error result (`isError: true`) listing the registered tool names so the
- * agent can self-correct. No tools are registered in P1.5, so every call is an
- * unknown-tool response until the registry is filled. Exported for direct unit
- * tests.
+ * agent can self-correct. A known name is routed through the installed
+ * {@link liveRouter} (LiveClient); when no router is installed (not yet wired
+ * by `main()`, or cleared in tests), known tools fall back to a "not wired"
+ * error instead of crashing. Exported for direct unit tests.
  */
 export async function handleCallTool(
   request: CallToolRequest,
 ): Promise<CallToolResult> {
-  const { name } = request.params;
+  const { name, arguments: args } = request.params;
   const tool = TOOL_BY_NAME.get(name);
   if (!tool) {
     const known = ALL_TOOLS.map((t) => t.name);
@@ -79,8 +113,11 @@ export async function handleCallTool(
       content: [{ type: "text", text: `Unknown tool: ${name}.${suffix}` }],
     };
   }
-  // Handler routing lands in a later phase. The registry is empty in P1.5 so
-  // this branch is unreachable today; the marker keeps the contract honest.
+  if (liveRouter) {
+    return liveRouter.route(name, args ?? {});
+  }
+  // No live router installed — e.g. a unit test exercising handlers directly.
+  // Keeps the call honest rather than silently succeeding.
   return {
     isError: true,
     content: [
@@ -184,10 +221,13 @@ function getEnv(): {
 }
 
 async function main(): Promise<void> {
-  // Resolve project + bridge port + auth token at startup. The port/token are
-  // not yet threaded into a LiveClient (the registry is empty in P1.5/P1.6);
-  // P1.7 wires the LiveClient + first live tool (unreal_open_mcp_ping).
+  // Resolve project + bridge port + auth token at startup, then install the
+  // LiveClient so the tools/call handler can dispatch live-routed tools
+  // (`unreal_open_mcp_ping` is the first; other tools land in later phases).
   const env = getEnv();
+  setLiveRouter(
+    new LiveClient(env.port, env.authToken, env.projectPath),
+  );
   const server = createServer();
   const transport = new StdioServerTransport();
   // StdioServerTransport closes when stdin EOFs (client disconnect). Once the
@@ -223,16 +263,21 @@ if (entrypointUrl === import.meta.url) {
 // Intentional deltas from Unity Open MCP (mcp-server/src/index.ts):
 //  - Server name `unreal-open-mcp` (not `unity-open-mcp`).
 //  - `UNREAL_PROJECT_PATH` env var (not `UNITY_PROJECT_PATH`).
-//  - Port resolution + instance discovery + auth token wired in P1.6 (the
-//    registry is still empty; LiveClient routing lands in P1.7). The port
-//    source label is more granular than Unity's ("env override" / "instance
-//    lock" / "hash fallback" vs Unity's "env override" / "instance discovery")
-//    so users can tell whether a live lock supplied the port.
-//  - No LiveClient / BatchSpawn / ToolRouter / resources / CLI dispatch.
+//  - Port resolution + instance discovery + auth token wired in P1.6; the
+//    LiveClient is installed in P1.7 so live-routed tools
+//    (`unreal_open_mcp_ping`) dispatch through it. The port source label is
+//    more granular than Unity's ("env override" / "instance lock" / "hash
+//    fallback" vs Unity's "env override" / "instance discovery") so users can
+//    tell whether a live lock supplied the port.
+//  - LiveClient is the minimal P1.7 surface (ping only; `tool_not_routed` for
+//    other names). No BatchSpawn / ToolRouter / offline / local routing /
+//    resources / CLI dispatch yet.
 //  - Handlers (`handleListTools`, `handleCallTool`) are exported standalone so
 //    tests can exercise them directly. Unity inlines them inside `createServer`
-//    and tests other modules; we export them because the registry is empty and
-//    these are the only meaningful units to test in P1.5/P1.6.
+//    and tests other modules; we export them so the dispatch + fallback paths
+//    are unit-testable without booting stdio. The live router is a module-level
+//    holder with a setter so `main()` installs the real client while tests can
+//    install a stub or clear it via `resetLiveRouterForTest`.
 //  - Explicit `transport.onclose` → `server.close()` → `process.exit(0)` to
 //    make the "clean exit on disconnect" contract observable rather than
 //    relying solely on the event loop draining.

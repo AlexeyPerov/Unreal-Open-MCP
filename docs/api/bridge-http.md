@@ -5,8 +5,10 @@ the MCP server's live entry point — every tool call eventually becomes a
 loopback HTTP request. The bridge binds `127.0.0.1` only; remote bind is an
 opt-in that lands later with bearer auth.
 
-The health endpoint (`GET /ping`) is the base readiness probe. Tool dispatch
-(`POST /tools/{name}`), the instance lock, and bearer auth land in later phases.
+The health endpoint (`GET /ping`) is the base readiness probe and is wrapped by
+the MCP `unreal_open_mcp_ping` tool (the first end-to-end live probe: stdio →
+instance discovery → HTTP). Tool dispatch (`POST /tools/{name}`), the instance
+lock, and bearer auth land in later phases.
 
 ## Bind surface
 
@@ -76,6 +78,21 @@ curl -s http://127.0.0.1:$UNREAL_OPEN_MCP_BRIDGE_PORT/ping | jq .
 The bridge logs `[Unreal Open MCP] bridge HTTP listening on http://127.0.0.1:<port>/ping`
 on the editor Output Log at startup — that line is the proof of life when
 triaging a missing /ping response.
+
+### MCP consumer
+
+The MCP server wraps `/ping` in the `unreal_open_mcp_ping` tool. An AI client
+calling that tool gets the `/ping` body back on success, or a structured error
+classifying the failure so the caller can branch on cause:
+
+| Bridge state | MCP result code |
+|---|---|
+| 200 OK | success (the `/ping` body verbatim) |
+| 503 not ready | `bridge_http_error` (carries the `connected:false` fallback body) |
+| other non-OK | `bridge_http_error` |
+| no listener / ECONNREFUSED | `bridge_offline` |
+| listener accepts but never responds | `bridge_timeout` |
+| 200 with non-JSON body | `bridge_response_unparsable` |
 
 ## Planned endpoints (not shipped)
 

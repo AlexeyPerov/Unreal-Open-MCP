@@ -22,12 +22,12 @@ A desktop **Hub** app for guided setup is planned but deferred.
 ## Runtime flow
 
 1. AI client calls an MCP tool.
-2. MCP server chooses route policy.
+2. MCP server resolves the tool in the registry and dispatches it.
 3. Call goes to:
-   - live bridge (preferred), or
-   - offline/local readers (supported tools), or
-   - local-only handlers (capabilities, manage_tools).
-4. Response includes route metadata.
+   - the live bridge via `LiveClient` (the ping health probe today; tool dispatch lands later), or
+   - offline/local readers (supported tools, planned), or
+   - local-only handlers (capabilities, manage_tools, planned).
+4. Response is a structured MCP `CallToolResult`; live errors are classified into `bridge_offline` / `bridge_timeout` / `bridge_http_error` so callers can branch on cause.
 
 ```mermaid
 flowchart LR
@@ -98,6 +98,19 @@ The formula and normalization live in `FUnrealOpenMcpInstancePortResolver` (Runt
 Each running bridge owns a lock file at `~/.unreal-open-mcp/instances/<sha256(projectPath)>.json` (written by `FUnrealOpenMcpBridgeInstanceLock` in the Editor module) carrying: `pid`, `port`, `projectPath`, `projectHash`, `startedAt`, `updatedAt`, `heartbeatAt`, `state`, `isPlaying`, `isCompiling`, `bridgeVersion`, `unrealVersion`. The MCP server reads these to discover the right port per project without an HTTP round-trip. Stale locks (from a crashed editor) are swept on the next `Acquire` by PID-liveness (`FPlatformProcess::GetProcessIsAlive`); the MCP server is read-only on the lock.
 
 > **`authToken` note:** the bearer-token field is deferred to a later phase. It is omitted from the lock JSON today; its absence is pinned in the specs.
+
+## Live routing (MCP → bridge)
+
+The MCP server holds one `LiveClient` per session, installed at startup once the bridge port + auth token are resolved. The client is the single HTTP hop for live-routed tools. Today it routes `unreal_open_mcp_ping` to the bridge's `GET /ping`; every other tool name returns a structured `tool_not_routed` error because the bridge has no tool-dispatch endpoint yet (`POST /tools/{name}` lands in a later phase).
+
+Failure classification is the load-bearing contract — an agent (or a human reading the result) must be able to tell *why* a ping failed:
+
+| Code | Cause |
+|---|---|
+| `bridge_offline` | No listener on the resolved port (ECONNREFUSED / DNS / socket reset before connect). The editor is not running, or the bridge is on a different port. The error message names this project's instance lock path. |
+| `bridge_timeout` | The listener accepted the connection but did not respond within the timeout (AbortController fired). The editor may be blocked (modal, heavy compile) or the game-thread dispatcher stalled. |
+| `bridge_http_error` | The bridge responded with an unexpected HTTP status (5xx / 4xx other than the documented 503). A 503 ("not ready") surfaces the bridge's fallback body here so the caller sees `connected:false` / `not_ready`. |
+| `bridge_response_unparsable` | The bridge returned HTTP 200 but the body was not valid JSON (e.g. the socket was torn down mid-response). |
 
 ## Versioning
 

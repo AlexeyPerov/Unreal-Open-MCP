@@ -8,25 +8,31 @@ import {
   createServer,
   handleCallTool,
   handleListTools,
+  setLiveRouter,
+  resetLiveRouterForTest,
   SERVER_NAME,
   PROJECT_PATH_ENV_VAR,
 } from "./index.js";
+import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 // dist-test layout: dist-test/index.js + dist-test/index.test.js. The compiled
 // server entrypoint under test is the sibling dist-test/index.js.
 const SERVER_ENTRY = resolve(here, "index.js");
 
-// Empty registry: tools/list returns no tools. This is the P1.5 contract —
-// the scaffold must boot and answer before any real tool is wired in.
-test("handleListTools returns the (empty) registry", async () => {
+// tools/list returns the registered tool set. P1.7 registers the first tool
+// (`unreal_open_mcp_ping`); subsequent tools land in later phases.
+test("handleListTools returns the registered tools", async () => {
   const result = await handleListTools();
-  assert.equal(result.tools.length, 0);
+  assert.equal(result.tools.length, 1);
+  assert.equal(result.tools[0].name, "unreal_open_mcp_ping");
 });
 
 // Unknown tool → structured MCP error with isError, listing registered names.
-// With an empty registry the suffix explicitly states no tools are registered.
+// P1.7 registers `unreal_open_mcp_ping`, so the suffix now names it.
 test("handleCallTool returns isError for an unknown tool", async () => {
+  // Clear any router a previous test installed so this case is isolated.
+  resetLiveRouterForTest();
   const result = await handleCallTool({
     params: { name: "unreal_open_mcp_does_not_exist", arguments: {} },
   } as unknown as Parameters<typeof handleCallTool>[0]);
@@ -34,7 +40,45 @@ test("handleCallTool returns isError for an unknown tool", async () => {
   assert.ok(Array.isArray(result.content));
   const text = (result.content[0] as { type: string; text: string }).text;
   assert.match(text, /Unknown tool:/);
-  assert.match(text, /No tools are registered yet/);
+  assert.match(text, /Registered tools: unreal_open_mcp_ping/);
+});
+
+// A known tool with no live router installed falls back to a "not wired" error
+// instead of crashing. This is the scaffold path (unit tests / pre-main wiring).
+test("handleCallTool returns a not-wired error for a known tool when no router is installed", async () => {
+  resetLiveRouterForTest();
+  const result = await handleCallTool({
+    params: { name: "unreal_open_mcp_ping", arguments: {} },
+  } as unknown as Parameters<typeof handleCallTool>[0]);
+  assert.equal(result.isError, true);
+  const text = (result.content[0] as { type: string; text: string }).text;
+  assert.match(text, /no handler wired/i);
+});
+
+// A known tool with a live router installed is routed through it. Proves the
+// handleCallTool → LiveClient dispatch wiring without booting stdio.
+test("handleCallTool dispatches a known tool through the installed live router", async () => {
+  const stubResult: CallToolResult = {
+    content: [{ type: "text", text: '{"connected":true}' }],
+    isError: false,
+  };
+  const routed: string[] = [];
+  setLiveRouter({
+    async route(name: string, args: Record<string, unknown>) {
+      routed.push(name);
+      assert.deepEqual(args, {});
+      return stubResult;
+    },
+  });
+  try {
+    const result = await handleCallTool({
+      params: { name: "unreal_open_mcp_ping", arguments: {} },
+    } as unknown as Parameters<typeof handleCallTool>[0]);
+    assert.deepEqual(routed, ["unreal_open_mcp_ping"]);
+    assert.equal(result, stubResult);
+  } finally {
+    resetLiveRouterForTest();
+  }
 });
 
 // createServer wires the handlers without booting stdio. The MCP initialize
@@ -57,7 +101,7 @@ test("createServer returns a Server with the published name", async () => {
  * tools/list → EOF handshake over stdio. Confirms:
  *  - the process boots with UNREAL_PROJECT_PATH set,
  *  - initialize reports the published server name,
- *  - tools/list returns an empty array,
+ *  - tools/list returns the registered tool set (ping in P1.7),
  *  - the process exits 0 after stdin EOF (clean disconnect).
  */
 test("subprocess: boots, answers initialize + tools/list, exits 0 on EOF", async () => {
@@ -112,10 +156,12 @@ test("subprocess: boots, answers initialize + tools/list, exits 0 on EOF", async
   assert.equal(init?.result?.serverInfo?.name, SERVER_NAME);
 
   const list = messages.find((m) => m.id === 2) as
-    | { result?: { tools?: unknown[] } }
+    | { result?: { tools?: Array<{ name: string }> } }
     | undefined;
   assert.ok(list, "tools/list response missing");
-  assert.deepEqual(list?.result?.tools, []);
+  const tools = list?.result?.tools ?? [];
+  assert.equal(tools.length, 1);
+  assert.equal(tools[0].name, "unreal_open_mcp_ping");
 });
 
 // Missing UNREAL_PROJECT_PATH → exit 1 with a clear stderr message.

@@ -3,8 +3,8 @@
 # - bootstrap: required repo paths present.
 # - version-sync: generated version targets match version.json.
 # - mcp-server: typecheck + test for the stdio MCP server package.
-#
-# UE plugin compile and editor boundary guard are added in Phase 1.
+# - editor-boundary: Editor/Runtime module boundary guard (Runtime must never
+#   reference Editor — see scripts/check-editor-boundary.py).
 
 name: ci
 
@@ -88,3 +88,23 @@ jobs:
 
       - name: Test
         run: npm test
+
+  editor-boundary:
+    name: Editor/Runtime boundary guard
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Verify detector self-test
+        # Proves the detector fires and that suppression works — guards
+        # against a regression in the guard itself.
+        run: python scripts/check-editor-boundary.py --self-test
+
+      - name: Boundary check (Runtime must not reference Editor)
+        run: python scripts/check-editor-boundary.py

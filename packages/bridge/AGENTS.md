@@ -11,6 +11,23 @@ Rules for `packages/bridge/` — the Unreal Editor HTTP bridge (`Plugins/UnrealO
 - Editor-only tool handlers must not compile into packaged game builds unless explicitly opted in.
 - Tests live under `Source/UnrealOpenMcpEditorTests/` (Automation specs).
 
+## Editor / Runtime boundary
+
+The load-bearing invariant is one-directional: **Editor code may reference Runtime code; Runtime code may NEVER reference Editor code.** Runtime must stay free of `UnrealEd.h`/`Editor.h` umbrella includes, editor module include roots (`"UnrealEd/"`, `"AssetTools/"`, `"Editor/"`, `"Subsystems/EditorSubsystem"`...), and editor-only `Build.cs` dependencies (`UnrealEd`, `Slate`, `AssetTools`, ...). ModuleRules enforce linking; the include/surface leak is enforced by `scripts/check-editor-boundary.py`, which runs as a **blocking CI guard** (the `editor-boundary` job) — it is advisory to ModuleRules, not a replacement. Both must hold.
+
+Run locally:
+
+```
+python scripts/check-editor-boundary.py            # scan the Runtime module
+python scripts/check-editor-boundary.py --self-test  # verify the detector itself
+```
+
+The deny-list of editor headers/modules lives in the script so the policy is readable in the PR that changes it. Start strict; narrow only on a justified false positive. To suppress a genuine, reviewed exception, add a comment carrying the marker **with a justification** on the offending line or the line above it — a bare marker is itself a violation:
+
+```cpp
+#include "UnrealEd.h"  // unreal-open-mcp:allow-editor-boundary: <why this is safe>
+```
+
 ## Tool registration
 
 - Tools are registered with the HTTP server and dispatched via `POST /tools/{name}`.

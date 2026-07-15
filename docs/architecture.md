@@ -64,7 +64,7 @@ Unreal separates editor and runtime modules at compile time:
 - `UnrealOpenMcpRuntime` — shared infra that may ship in packaged builds when explicitly opted in.
 - `UnrealOpenMcpVerify` — editor-only health checks.
 
-The load-bearing invariant is one-directional: **Editor code may reference Runtime code; Runtime code may NEVER reference Editor code.**
+The load-bearing invariant is one-directional: **Editor code may reference Runtime code; Runtime code may NEVER reference Editor code.** ModuleRules enforce linking; the include/surface leak (e.g. a stray `#include "UnrealEd.h"` or an editor-only `Build.cs` dependency) is enforced by `scripts/check-editor-boundary.py`, which runs as a blocking CI guard (`editor-boundary` job). See `packages/bridge/AGENTS.md` for the run command and suppression policy.
 
 ## Plugin layout
 

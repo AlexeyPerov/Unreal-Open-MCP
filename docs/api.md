@@ -19,6 +19,7 @@ This file is the index for external interfaces and protocol contracts exposed by
 - MCP capabilities surface (local rule/fix catalog + builder): `mcp-server/src/capabilities/` (planned)
 - MCP tool definitions source: `mcp-server/src/tools/` (`ping` shipped; the rest planned)
 - MCP resources source: `mcp-server/src/resources/` (when shipped)
+- Phase 1 parity smoke sources: `mcp-server/src/integration.test.ts` (in-process MCP client↔server over in-memory transport), `mcp-server/scripts/p1-parity-smoke.mjs` (scripted stdio smoke against the built `dist/index.js`)
 
 ## Contract documentation guidance
 

@@ -17,6 +17,7 @@
     "build:test": "tsc -p tsconfig.test.json",
     "typecheck": "tsc --noEmit",
     "test": "npm run build:test && node --test 'dist-test/**/*.test.js'",
+    "smoke:p1": "npm run build && node scripts/p1-parity-smoke.mjs",
     "prepublishOnly": "npm run build"
   },
   "keywords": [

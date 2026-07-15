@@ -112,6 +112,35 @@ Failure classification is the load-bearing contract — an agent (or a human rea
 | `bridge_http_error` | The bridge responded with an unexpected HTTP status (5xx / 4xx other than the documented 503). A 503 ("not ready") surfaces the bridge's fallback body here so the caller sees `connected:false` / `not_ready`. |
 | `bridge_response_unparsable` | The bridge returned HTTP 200 but the body was not valid JSON (e.g. the socket was torn down mid-response). |
 
+## Phase 1 parity smoke
+
+The phase-gate before Phase 2 begins. It exercises the canonical end-to-end route one time, against the **built** artifact:
+
+```
+stdio MCP client  →  unreal_open_mcp_ping  →  GET /ping  →  bridge health payload
+```
+
+Two layers guard the route:
+
+1. **In-process integration tests** — `mcp-server/src/integration.test.ts`. Wires a real MCP SDK `Client` to `createServer()` over an in-memory transport, with the live router pointed at a `LiveClient` aimed at a loopback HTTP stub. Pins three outcomes: healthy (200 PingResponse body survives the round-trip verbatim), bridge-down (`bridge_offline` + the instance-lock hint), and HTTP 500 (`bridge_http_error` carrying the bridge's own error body). Run via `npm test`.
+2. **Scripted stdio smoke** — `mcp-server/scripts/p1-parity-smoke.mjs` (`npm run smoke:p1`). Spawns the built `dist/index.js`, pins the server to an ephemeral stub via `UNREAL_OPEN_MCP_BRIDGE_PORT`, and drives `initialize → tools/list → tools/call ping` over stdio. This is the gate that catches packaging, transport, and instance-discovery wiring drift the in-process suite cannot see. Pass `--port <n> --project <path>` to run the same handshake against a live Unreal Editor (optional manual path).
+
+Both layers must be green before Phase 2 work starts. The integration suite runs in `npm test`; the stdio smoke is a separate `npm run smoke:p1` because it spawns the built server as a child process.
+
+### Failure-signature cheat sheet
+
+When the smoke (or a real ping) fails, the code / symptom points at the owner area:
+
+| Code / symptom | Likely cause | Owner area |
+|---|---|---|
+| `bridge_offline` | Editor down / wrong port / stale instance lock | Instance discovery + lock (Runtime resolver, Editor lock writer, TS discovery) |
+| `bridge_timeout` | Game thread blocked / hung handler | Game-thread dispatcher + HTTP server |
+| `bridge_http_error` | Unexpected HTTP status (5xx / non-503 4xx) / server bug | Bridge HTTP server |
+| `bridge_response_unparsable` | HTTP 200 with a non-JSON body (socket torn down mid-response) | Bridge HTTP server |
+| Wrong port / empty ping body | Port-formula drift (C++ resolver vs TS discovery hashing/normalization) | Runtime port resolver + TS instance-discovery |
+| Plugin won't load | `.uplugin` / module `Build.cs` mis-wired | Plugin scaffold + module structure |
+| CI boundary failure | Editor-only API referenced from Runtime code | Editor/Runtime boundary guard |
+
 ## Versioning
 
 The repo tracks a shared version for the npm MCP server, bridge plugin, and verify module from `version.json`. Generated version strings are synced by `scripts/sync-version.mjs`.

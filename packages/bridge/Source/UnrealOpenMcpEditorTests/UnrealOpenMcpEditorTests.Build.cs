@@ -34,12 +34,18 @@ public class UnrealOpenMcpEditorTests : ModuleRules
 			"CoreUObject",
 			"Engine",
 			// Editor module: reach its private headers (e.g. BridgeSession.h
-			// under Private/Bridge/) for future specs.
+			// under Private/Bridge/, Tools/UnrealOpenMcpActorTools.h under
+			// Private/Tools/) for specs.
 			"UnrealOpenMcpEditor",
 			// P1.3 — the ping spec drives the loopback HTTP listener (FTcpSocketBuilder,
 			// raw socket Recv) and reads the bound port back from FSocket.
 			"Sockets",
 			"Networking",
+			// P2.2 — the actor-find spec parses the tool's JSON output
+			// (FJsonObject / JsonReader) to assert on the actors[] payload, and
+			// drives the editor world (GEditor) to spawn test actors.
+			"Json",
+			"UnrealEd",
 		});
 
 		// Reach the editor module's PRIVATE headers so Automation specs can

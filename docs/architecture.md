@@ -24,7 +24,7 @@ A desktop **Hub** app for guided setup is planned but deferred.
 1. AI client calls an MCP tool.
 2. MCP server resolves the tool in the registry and dispatches it.
 3. Call goes to:
-   - the live bridge via `LiveClient` (the ping health probe today; tool dispatch lands later), or
+   - the live bridge via `LiveClient` — `unreal_open_mcp_ping` routes to `GET /ping`; every other tool routes to `POST /tools/{name}` (the first typed tool, `unreal_open_mcp_actor_find`, shipped in P2.2), or
    - offline/local readers (supported tools, planned), or
    - local-only handlers (capabilities, manage_tools, planned).
 4. Response is a structured MCP `CallToolResult`; live errors are classified into `bridge_offline` / `bridge_timeout` / `bridge_http_error` so callers can branch on cause.
@@ -101,7 +101,7 @@ Each running bridge owns a lock file at `~/.unreal-open-mcp/instances/<sha256(pr
 
 ## Live routing (MCP → bridge)
 
-The MCP server holds one `LiveClient` per session, installed at startup once the bridge port + auth token are resolved. The client is the single HTTP hop for live-routed tools. Today it routes `unreal_open_mcp_ping` to the bridge's `GET /ping`; every other tool name returns a structured `tool_not_routed` error because the bridge has no tool-dispatch endpoint yet (`POST /tools/{name}` lands in a later phase).
+The MCP server holds one `LiveClient` per session, installed at startup once the bridge port + auth token are resolved. The client is the single HTTP hop for live-routed tools. It routes `unreal_open_mcp_ping` to the bridge's `GET /ping`, and every other tool to `POST /tools/{name}` where the bridge resolves the handler and returns the canonical `{ok, result, error}` envelope. The first real typed tool — `unreal_open_mcp_actor_find` (read-only actor locator) — shipped in P2.2; the rest of the actor/level families land in later P2 tasks.
 
 Failure classification is the load-bearing contract — an agent (or a human reading the result) must be able to tell *why* a ping failed:
 

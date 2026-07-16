@@ -40,6 +40,7 @@
 #include "Bridge/UnrealOpenMcpInstancePortResolver.h"
 #include "Bridge/UnrealOpenMcpToolRegistry.h"
 #include "Dispatch/UnrealOpenMcpGameThreadDispatcher.h"
+#include "Tools/UnrealOpenMcpActorTools.h"
 
 #include "HAL/PlatformProcess.h"
 #include "Misc/EngineVersion.h"
@@ -186,12 +187,12 @@ public:
 
 private:
 	/**
-	 * Register the built-in (always-on) tools. P2.1 ships the echo stub only —
-	 * real typed tool families (actors, levels, etc.) land in later P2 tasks
-	 * and register themselves here (or via a per-family register call). The
-	 * echo stub verifies the full dispatch round-trip (POST → registry →
-	 * game-thread handler → {ok,result} envelope) before any real tool logic
-	 * exists.
+	 * Register the built-in (always-on) tools. P2.1 ships the echo stub; P2.2
+	 * adds the first real typed tool family — the actor tools
+	 * (`unreal_open_mcp_actor_find`). Each subsequent family (levels, etc.)
+	 * registers itself via its own Register(Registry) entry point so boot
+	 * wiring stays one line per family. The echo stub stays as a permanent
+	 * round-trip smoke (POST → registry → game-thread handler → {ok,result}).
 	 */
 	void RegisterBuiltinTools()
 	{
@@ -213,6 +214,9 @@ private:
 				Output += TEXT('}');
 				return FUnrealOpenMcpToolDispatchResult::Ok(Output);
 			});
+
+		// P2.2 — actor family (read-only find first; mutating tools land later).
+		FUnrealOpenMcpActorTools::Register(*ToolRegistry);
 	}
 
 	// Owned. Constructed in StartupModule, torn down in ShutdownModule. The

@@ -8,7 +8,10 @@
 // added the loopback HTTP server + /ping health surface; P1.4 added the
 // instance lock + wired the deterministic port resolver into the HTTP server
 // start; P2.1 added POST /tools/{name} dispatch (tool registry, fair request
-// queue, canonical {ok,result,error} envelope, echo stub tool).
+// queue, canonical {ok,result,error} envelope, echo stub tool); P2.2 added the
+// first real typed tool family (actor tools — read-only find), which pulls in
+// UnrealEd (GEditor/GetEditorWorldContext) and Json (FJsonObject arg parsing
+// inside the tool handlers).
 using UnrealBuildTool;
 
 public class UnrealOpenMcpEditor : ModuleRules
@@ -39,11 +42,22 @@ public class UnrealOpenMcpEditor : ModuleRules
 			// interfaces).
 			"Sockets",
 			"Networking",
+			// P2.2 — actor tools resolve the editor world via GEditor
+			// (GEditor->GetEditorWorldContext().World()). Editor.h lives in the
+			// UnrealEd module. This is an editor-only module (Type: Editor in
+			// the .uplugin), so the dependency does not run afoul of the
+			// Editor/Runtime boundary guard (P1.8 scans Runtime only).
+			"UnrealEd",
+			// P2.2 — typed tool handlers parse the raw POST body into an
+			// FJsonObject (TJsonReader + FJsonSerializer) and emit pre-serialized
+			// JSON results. The Json module supplies FJsonObject + the reader/
+			// writer; no FJsonObjectConverter dependency is needed.
+			"Json",
 		});
 
-		// P1.3 scope: HTTP server + /ping only. No Slate UI, no gate wiring.
-		// Keep the dependency surface minimal so the Editor/Runtime boundary
-		// guard (P1.8) stays green and later phases add deps as they add
-		// features.
+		// P2.2 scope: HTTP server + /ping + tool dispatch + read-only actor
+		// find. No Slate UI, no gate wiring. Keep the dependency surface minimal
+		// so the Editor/Runtime boundary guard (P1.8) stays green and later
+		// phases add deps as they add features.
 	}
 }

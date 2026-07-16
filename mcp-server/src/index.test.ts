@@ -20,16 +20,18 @@ const here = dirname(fileURLToPath(import.meta.url));
 // server entrypoint under test is the sibling dist-test/index.js.
 const SERVER_ENTRY = resolve(here, "index.js");
 
-// tools/list returns the registered tool set. P1.7 registers the first tool
-// (`unreal_open_mcp_ping`); subsequent tools land in later phases.
+// tools/list returns the registered tool set. P1.7 registered the first tool
+// (`unreal_open_mcp_ping`); P2.2 added `unreal_open_mcp_actor_find`. Further
+// tools land in later phases and append here.
 test("handleListTools returns the registered tools", async () => {
   const result = await handleListTools();
-  assert.equal(result.tools.length, 1);
+  assert.equal(result.tools.length, 2);
   assert.equal(result.tools[0].name, "unreal_open_mcp_ping");
+  assert.equal(result.tools[1].name, "unreal_open_mcp_actor_find");
 });
 
 // Unknown tool → structured MCP error with isError, listing registered names.
-// P1.7 registers `unreal_open_mcp_ping`, so the suffix now names it.
+// The suffix names every registered tool so the agent can self-correct.
 test("handleCallTool returns isError for an unknown tool", async () => {
   // Clear any router a previous test installed so this case is isolated.
   resetLiveRouterForTest();
@@ -40,7 +42,7 @@ test("handleCallTool returns isError for an unknown tool", async () => {
   assert.ok(Array.isArray(result.content));
   const text = (result.content[0] as { type: string; text: string }).text;
   assert.match(text, /Unknown tool:/);
-  assert.match(text, /Registered tools: unreal_open_mcp_ping/);
+  assert.match(text, /Registered tools: unreal_open_mcp_ping, unreal_open_mcp_actor_find/);
 });
 
 // A known tool with no live router installed falls back to a "not wired" error
@@ -101,7 +103,7 @@ test("createServer returns a Server with the published name", async () => {
  * tools/list → EOF handshake over stdio. Confirms:
  *  - the process boots with UNREAL_PROJECT_PATH set,
  *  - initialize reports the published server name,
- *  - tools/list returns the registered tool set (ping in P1.7),
+ *  - tools/list returns the registered tool set (ping + actor_find),
  *  - the process exits 0 after stdin EOF (clean disconnect).
  */
 test("subprocess: boots, answers initialize + tools/list, exits 0 on EOF", async () => {
@@ -160,8 +162,9 @@ test("subprocess: boots, answers initialize + tools/list, exits 0 on EOF", async
     | undefined;
   assert.ok(list, "tools/list response missing");
   const tools = list?.result?.tools ?? [];
-  assert.equal(tools.length, 1);
+  assert.equal(tools.length, 2);
   assert.equal(tools[0].name, "unreal_open_mcp_ping");
+  assert.equal(tools[1].name, "unreal_open_mcp_actor_find");
 });
 
 // Missing UNREAL_PROJECT_PATH → exit 1 with a clear stderr message.

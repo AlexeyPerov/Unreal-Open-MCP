@@ -21,13 +21,15 @@ const here = dirname(fileURLToPath(import.meta.url));
 const SERVER_ENTRY = resolve(here, "index.js");
 
 // tools/list returns the registered tool set. P1.7 registered the first tool
-// (`unreal_open_mcp_ping`); P2.2 added `unreal_open_mcp_actor_find`. Further
-// tools land in later phases and append here.
+// (`unreal_open_mcp_ping`); P2.2 added `unreal_open_mcp_actor_find`; P2.3 added
+// `unreal_open_mcp_actor_create`. Further tools land in later phases and
+// append here.
 test("handleListTools returns the registered tools", async () => {
   const result = await handleListTools();
-  assert.equal(result.tools.length, 2);
+  assert.equal(result.tools.length, 3);
   assert.equal(result.tools[0].name, "unreal_open_mcp_ping");
   assert.equal(result.tools[1].name, "unreal_open_mcp_actor_find");
+  assert.equal(result.tools[2].name, "unreal_open_mcp_actor_create");
 });
 
 // Unknown tool → structured MCP error with isError, listing registered names.
@@ -42,7 +44,7 @@ test("handleCallTool returns isError for an unknown tool", async () => {
   assert.ok(Array.isArray(result.content));
   const text = (result.content[0] as { type: string; text: string }).text;
   assert.match(text, /Unknown tool:/);
-  assert.match(text, /Registered tools: unreal_open_mcp_ping, unreal_open_mcp_actor_find/);
+  assert.match(text, /Registered tools: unreal_open_mcp_ping, unreal_open_mcp_actor_find, unreal_open_mcp_actor_create/);
 });
 
 // A known tool with no live router installed falls back to a "not wired" error
@@ -162,9 +164,10 @@ test("subprocess: boots, answers initialize + tools/list, exits 0 on EOF", async
     | undefined;
   assert.ok(list, "tools/list response missing");
   const tools = list?.result?.tools ?? [];
-  assert.equal(tools.length, 2);
+  assert.equal(tools.length, 3);
   assert.equal(tools[0].name, "unreal_open_mcp_ping");
   assert.equal(tools[1].name, "unreal_open_mcp_actor_find");
+  assert.equal(tools[2].name, "unreal_open_mcp_actor_create");
 });
 
 // Missing UNREAL_PROJECT_PATH → exit 1 with a clear stderr message.

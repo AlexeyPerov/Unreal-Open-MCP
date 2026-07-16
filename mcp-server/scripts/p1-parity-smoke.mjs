@@ -18,7 +18,8 @@
 //   3. Drive the MCP handshake over stdio: initialize → tools/list →
 //      tools/call(unreal_open_mcp_ping).
 //   4. Assert: initialize reports `unreal-open-mcp`; tools/list advertises
-//      exactly ping; the ping call returns the stub's health body verbatim.
+//      the registered tool set (ping + the actor tools landed so far); the
+//      ping call returns the stub's health body verbatim.
 //   5. EOF stdin, assert the process exits 0 (clean disconnect contract).
 //
 // Exit code: 0 on green, 1 on any failure. Each step prints ✓/✗ with a short
@@ -290,9 +291,15 @@ async function main() {
       tools.includes("unreal_open_mcp_ping"),
       `got [${tools.join(", ")}]`,
     );
+    // The registry grows each phase. Pin the full known set so accidental
+    // removal (or drift) is caught here rather than downstream. P2.3 added
+    // unreal_open_mcp_actor_create.
     check(
-      "tools/list advertises exactly ping (P1 registry)",
-      tools.length === 1 && tools[0] === "unreal_open_mcp_ping",
+      "tools/list advertises the full registered set",
+      tools.length === 3
+        && tools[0] === "unreal_open_mcp_ping"
+        && tools[1] === "unreal_open_mcp_actor_find"
+        && tools[2] === "unreal_open_mcp_actor_create",
       `got [${tools.join(", ")}]`,
     );
 

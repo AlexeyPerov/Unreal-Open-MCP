@@ -163,14 +163,24 @@ test("integration: tools/list advertises unreal_open_mcp_ping", async () => {
     );
     // P2 registry is ping + the actor/object tools landed so far (P2.2 added
     // actor_find; P2.3 added actor_create; P2.4 added actor_modify +
-    // object_modify). Guard against accidental registry drift silently changing
-    // what the phase-gate smoke covers.
+    // object_modify; P2.5 added actor_set_parent / actor_duplicate /
+    // actor_destroy + the five actor_component_* tools). Guard against
+    // accidental registry drift silently changing what the phase-gate smoke
+    // covers.
     assert.deepEqual(names, [
       "unreal_open_mcp_ping",
       "unreal_open_mcp_actor_find",
       "unreal_open_mcp_actor_create",
       "unreal_open_mcp_actor_modify",
       "unreal_open_mcp_object_modify",
+      "unreal_open_mcp_actor_set_parent",
+      "unreal_open_mcp_actor_duplicate",
+      "unreal_open_mcp_actor_destroy",
+      "unreal_open_mcp_actor_component_add",
+      "unreal_open_mcp_actor_component_destroy",
+      "unreal_open_mcp_actor_component_get",
+      "unreal_open_mcp_actor_component_modify",
+      "unreal_open_mcp_actor_component_list_all",
     ]);
   } finally {
     await cleanup();

@@ -21,11 +21,14 @@
 //     (targeted miss is NOT an error; it returns {ok:true,notFound:true}).
 // P2.4 adds ResolveObject (generic UObject by actor label, loaded-object path,
 // or asset soft path) — the addressing surface object_modify needs.
+// P2.5 adds ResolveComponent (component by name / readable-name / class on an
+// actor) — the addressing surface the component CRUD tools need.
 #pragma once
 
 #include "CoreMinimal.h"
 
 class AActor;
+class UActorComponent;
 class UClass;
 class UObject;
 class UWorld;
@@ -89,4 +92,26 @@ namespace FUnrealOpenMcpObjectRef
 	 * `actor_modify` also resolves in `object_modify`.
 	 */
 	UNREALOPENMCPEDITOR_API UObject* ResolveObject(const FString& ObjectRef, UWorld* World = nullptr);
+
+	/**
+	 * Resolve a component on @p Actor by name / readable-name / class. The
+	 * addressing surface the P2.5 component CRUD tools (component_get /
+	 * component_modify / component_destroy) need. Matches, in order:
+	 *   - The component's UObject name (GetName) — case-insensitive.
+	 *   - The component's readable name (GetReadableName) — case-insensitive.
+	 *   - A class ref resolved via ResolveClass: returns the FIRST component on
+	 *     the actor whose class IsA the resolved class (matching Unity's
+	 *     GetComponent(type) first-match semantics). Mirrors Unity's
+	 *     "When a type allows multiples, only the first match is removed" rule.
+	 * Returns null when @p Actor is null, @p ComponentRef is empty, or nothing
+	 * on the actor matches.
+	 *
+	 * Adapted (read-only) from Unreal-MCP's FUnrealMcpObjectRef::ResolveComponent
+	 * (the GetName / GetReadableName iteration); the class-ref branch is added
+	 * here to cover Unity's class-name component targeting without a second
+	 * helper.
+	 */
+	UNREALOPENMCPEDITOR_API UActorComponent* ResolveComponent(
+		AActor* Actor,
+		const FString& ComponentRef);
 }

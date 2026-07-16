@@ -27,19 +27,32 @@
 #include "Components/ActorComponent.h"
 // P2.3 — FAttachmentTransformRules for AttachToActor (KeepWorldTransform keeps
 // the spawn pose stable across the reparent, matching the behavior reference).
+// P2.5 reuses them for actor_set_parent (KeepWorld vs KeepRelative on request).
 #include "Components/SceneComponent.h"
 // P2.3 — actor_create wraps the spawn in FScopedTransaction so the new actor
 // is undoable from the editor (Ctrl+Z). Mirrors Unity's
 // Undo.RegisterCreatedObjectUndo at the transaction granularity. P2.4 reuses
 // it for actor_modify / object_modify so property writes group as one undo.
+// P2.5 reuses it for the tree ops + component mutators.
 #include "ScopedTransaction.h"
 // P2.3 — SetActorLabelUnique avoids label collisions that would make two
 // actors ambiguous to ResolveActor (label → name → path). Lives in UnrealEd.
+// P2.5 reuses it for actor_duplicate.
 #include "ActorEditorUtils.h"
+// P2.5 — StaticFindObjectFast (UObjectGlobals) + MakeUniqueObjectName guard
+// component_add against a name collision that would otherwise trip a
+// StaticAllocateObject fatal assert inside NewObject (behavior reference:
+// UnrealMcpActorTools.cpp).
+#include "UObject/UObjectGlobals.h"
+#include "UObject/Object.h"             // UObject base for StaticFindObjectFast
 
 #include "Dom/JsonObject.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
+// P2.5 — component_get reflects the component's Edit/Blueprint-visible
+// FProperties into a JSON object via UStructToJsonObject (the read counterpart
+// of the JsonValueToUProperty writes the mutate helper performs).
+#include "JsonObjectConverter.h"
 
 namespace
 {
@@ -255,6 +268,88 @@ namespace
 			return Out;
 		}
 		return TEXT("null");
+	}
+
+	/**
+	 * Serialize one component into the `ComponentData` payload documented in the
+	 * P2.5 contract: { name, class, properties? }. The properties object is the
+	 * UScriptStruct→JSON reflection of the component's Edit/Blueprint-visible
+	 * FProperties (FJsonObjectConverter::UStructToJsonObject), so a component_get
+	 * result carries the values an agent would write back via component_modify.
+	 * Omitted when @p bIncludeProperties is false (saves tokens for list_all).
+	 *
+	 * Mirrors Unity's component-get field dump (ComponentsTools.Get), adapted to
+	 * Unreal's FProperty reflection (UStructToJsonObject instead of
+	 * SerializedObject iteration).
+	 */
+	TSharedRef<FJsonObject> ToComponentData(UActorComponent* Component, bool bIncludeProperties)
+	{
+		TSharedRef<FJsonObject> Json = MakeShared<FJsonObject>();
+		Json->SetStringField(TEXT("name"), Component->GetName());
+		Json->SetStringField(
+			TEXT("class"),
+			Component->GetClass() ? Component->GetClass()->GetPathName() : FString());
+
+		if (bIncludeProperties)
+		{
+			// UStructToJsonObject reflects the component's Edit/Blueprint-visible
+			// FProperties into a JSON object (the read counterpart of the
+			// FJsonObjectConverter::JsonValueToUProperty writes the mutate helper
+			// performs). CheckFlags=0 + SkipFlags=0 mirrors ApplyProperties'
+			// permissiveness so a get+modify round-trip is symmetric.
+			TSharedPtr<FJsonObject> Props;
+			if (FJsonObjectConverter::UStructToJsonObject(
+					Component->GetClass(), Component, Props,
+					/*CheckFlags*/ 0, /*SkipFlags*/ 0))
+			{
+				Json->SetObjectField(TEXT("properties"), Props);
+			}
+		}
+		return Json;
+	}
+
+	/**
+	 * Resolve a component class ref and validate it for the component_add /
+	 * component_destroy surface. Returns the UClass on success; on failure sets
+	 * @p OutCode + @p OutMessage to a structured error and returns null.
+	 * Validation mirrors actor_create's class gate: must resolve, must be a
+	 * UActorComponent subclass, must not be abstract (a CreateComponent on an
+	 * abstract class would assert or return null at runtime).
+	 */
+	UClass* ResolveComponentClass(const FString& ClassRef, FString& OutCode, FString& OutMessage)
+	{
+		if (ClassRef.IsEmpty())
+		{
+			OutCode = TEXT("missing_parameter");
+			OutMessage = TEXT("'componentClass' is required and must be a non-empty string.");
+			return nullptr;
+		}
+		UClass* Class = FUnrealOpenMcpObjectRef::ResolveClass(ClassRef);
+		if (Class == nullptr)
+		{
+			OutCode = TEXT("class_not_found");
+			OutMessage = FString::Printf(
+				TEXT("componentClass '%s' did not resolve to a class."),
+				*ClassRef);
+			return nullptr;
+		}
+		if (!Class->IsChildOf(UActorComponent::StaticClass()))
+		{
+			OutCode = TEXT("invalid_parameter");
+			OutMessage = FString::Printf(
+				TEXT("'%s' resolved but is not a UActorComponent class."),
+				*ClassRef);
+			return nullptr;
+		}
+		if (Class->HasAnyClassFlags(CLASS_Abstract))
+		{
+			OutCode = TEXT("invalid_parameter");
+			OutMessage = FString::Printf(
+				TEXT("'%s' is abstract and cannot be instantiated."),
+				*ClassRef);
+			return nullptr;
+		}
+		return Class;
 	}
 }
 
@@ -805,8 +900,914 @@ void FUnrealOpenMcpActorTools::Register(FUnrealOpenMcpToolRegistry& Registry)
 				WriteJson(MakeShared<FJsonValueObject>(Result)));
 		});
 
+	// =====================================================================
+	// P2.5 — actor tree ops + component CRUD tools.
+	// =====================================================================
+
+	// unreal_open_mcp_actor_set_parent — reparent an actor under another actor
+	// in the current editor level. AttachToActor attaches the child's root
+	// component to the parent actor; KeepWorldTransform (default) preserves the
+	// world transform across the reparent (matches Unity's
+	// world_position_stays=true). Cycle-safe: self-parent is rejected, and an
+	// attach that would form a cycle (parent is already a descendant of child)
+	// is rejected up front via IsAttachedTo before the attach runs (the engine
+	// would otherwise silently drop the attach). Resolve-before-attach ordering:
+	// both actors resolve BEFORE the transaction opens so a miss returns
+	// actor_not_found / parent_not_found with nothing mutated.
+	//
+	// Wrapped in FScopedTransaction for editor Undo. `paths_hint` + `gate` are
+	// accepted on the schema for forward-compat but NOT enforced until P3.5
+	// (documented P2.5 deferral). Structured errors:
+	//   - missing_parameter — neither `actor` nor `parent` supplied
+	//   - no_editor_world   — no GEditor / editor world
+	//   - actor_not_found   — child ref did not resolve (nothing mutated)
+	//   - parent_not_found  — parent ref did not resolve (nothing mutated)
+	//   - would_create_cycle — parent == child, or parent is a descendant of child
+	//   - missing_root_component — the child or parent has no root component, so
+	//                              AttachToActor would silently no-op
+	Registry.Register(
+		TEXT("unreal_open_mcp_actor_set_parent"),
+		[](const FString& Body) -> FUnrealOpenMcpToolDispatchResult
+		{
+			TSharedPtr<FJsonObject> Args = ParseBody(Body);
+			if (!Args.IsValid())
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("invalid_parameter"),
+					TEXT("Request body was not a valid JSON object."));
+			}
+
+			const FString ChildRef = Args->HasTypedField<EJson::String>(TEXT("actor"))
+				? Args->GetStringField(TEXT("actor"))
+				: FString();
+			const FString ParentRef = Args->HasTypedField<EJson::String>(TEXT("parent"))
+				? Args->GetStringField(TEXT("parent"))
+				: FString();
+			if (ChildRef.IsEmpty() || ParentRef.IsEmpty())
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("missing_parameter"),
+					TEXT("Both 'actor' (child) and 'parent' are required."));
+			}
+			const bool bKeepWorld = Args->HasTypedField<EJson::Boolean>(TEXT("keepWorldTransform"))
+				? Args->GetBoolField(TEXT("keepWorldTransform"))
+				: true;
+
+			UWorld* World = FUnrealOpenMcpObjectRef::GetEditorWorld();
+			if (World == nullptr)
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("no_editor_world"),
+					TEXT("No editor world is available. Open a level in the Unreal Editor."));
+			}
+
+			// Resolve both actors BEFORE the transaction so a miss leaves no undo
+			// entry (same resolve-before-mutate invariant as actor_create's parent).
+			AActor* Child = FUnrealOpenMcpObjectRef::ResolveActor(ChildRef, World);
+			if (Child == nullptr)
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("actor_not_found"),
+					FString::Printf(
+						TEXT("Actor '%s' was not found; nothing was modified."),
+						*ChildRef));
+			}
+			AActor* Parent = FUnrealOpenMcpObjectRef::ResolveActor(ParentRef, World);
+			if (Parent == nullptr)
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("parent_not_found"),
+					FString::Printf(
+						TEXT("Parent actor '%s' was not found; nothing was modified."),
+						*ParentRef));
+			}
+
+			// Self-parent and cycle guard up front. AttachToActor would silently
+			// drop a cycle-forming attach (the engine's attachment graph rejects
+			// it), so we reject explicitly with a structured code an agent can
+			// branch on. IsAttachedTo walks the attachment ancestry of Parent; if
+			// Child is an ancestor of Parent, attaching Parent-under-Child's-new-
+			// child-slot would form a cycle. (Mirrors Unity's upward-walk cycle
+			// detection, adapted to Unreal's IsAttachedTo helper.)
+			if (Parent == Child)
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("would_create_cycle"),
+					TEXT("Cannot attach an actor to itself."));
+			}
+			if (Parent->IsAttachedTo(Child))
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("would_create_cycle"),
+					FString::Printf(
+						TEXT("Cannot attach '%s' under '%s': the parent is already a descendant of the child (would create a cycle)."),
+						*Child->GetActorLabel(), *Parent->GetActorLabel()));
+			}
+
+			// Root-component gate: AttachToActor routes through the child's root
+			// scene component and attaches to the parent actor (which itself
+			// attaches the parent's root). Either side missing a root silently
+			// no-ops, so surface it up front rather than report success.
+			if (Child->GetRootComponent() == nullptr || Parent->GetRootComponent() == nullptr)
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("missing_root_component"),
+					TEXT("Both the child and the parent must have a root component to attach."));
+			}
+
+			const FScopedTransaction Transaction(
+				NSLOCTEXT("UnrealOpenMcp", "ActorSetParent", "MCP: Set Actor Parent"));
+
+			Child->AttachToActor(
+				Parent,
+				bKeepWorld ? FAttachmentTransformRules::KeepWorldTransform : FAttachmentTransformRules::KeepRelativeTransform);
+
+			// Verify the attach took. AttachToActor returns void and can silently
+			// no-op on an engine-side rejection; cancel the (otherwise empty)
+			// transaction and surface a structured error so a false success is
+			// never reported. (Behavior reference: UnrealMcpActorTools.cpp.)
+			if (Child->GetAttachParentActor() != Parent)
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("attach_failed"),
+					FString::Printf(
+						TEXT("Engine rejected attaching '%s' to '%s'."),
+						*Child->GetActorLabel(), *Parent->GetActorLabel()));
+			}
+
+			// Dirty the level so the editor's save prompt fires.
+			if (ULevel* Level = Child->GetLevel())
+			{
+				Level->MarkPackageDirty();
+			}
+
+			TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+			Result->SetObjectField(TEXT("actor"), ToActorData(Child, /*bIncludeComponents=*/true));
+			return FUnrealOpenMcpToolDispatchResult::Ok(
+				WriteJson(MakeShared<FJsonValueObject>(Result)));
+		});
+
+	// unreal_open_mcp_actor_duplicate — duplicate an actor in the current editor
+	// level. Re-spawns via SpawnActor with the source as the template (the
+	// behavior reference's chosen path — it stays headless-safe and copies the
+	// source's component state into the clone). Optionally renames the clone and
+	// attaches it to a parent. Returns the clone's ActorData so the agent can
+	// chain modify / tree tools without a second lookup.
+	//
+	// Wrapped in FScopedTransaction for editor Undo. `paths_hint` + `gate` are
+	// forward-compat (no-op until P3.5). Structured errors:
+	//   - missing_parameter — `actor` absent/empty
+	//   - no_editor_world   — no GEditor / editor world
+	//   - actor_not_found   — source ref did not resolve (nothing spawned)
+	//   - parent_not_found  — parent ref did not resolve (nothing spawned)
+	//   - spawn_failed      — SpawnActor returned null
+	Registry.Register(
+		TEXT("unreal_open_mcp_actor_duplicate"),
+		[](const FString& Body) -> FUnrealOpenMcpToolDispatchResult
+		{
+			TSharedPtr<FJsonObject> Args = ParseBody(Body);
+			if (!Args.IsValid())
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("invalid_parameter"),
+					TEXT("Request body was not a valid JSON object."));
+			}
+
+			const FString SourceRef = Args->HasTypedField<EJson::String>(TEXT("actor"))
+				? Args->GetStringField(TEXT("actor"))
+				: FString();
+			if (SourceRef.IsEmpty())
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("missing_parameter"),
+					TEXT("'actor' (the source to duplicate) is required."));
+			}
+
+			UWorld* World = FUnrealOpenMcpObjectRef::GetEditorWorld();
+			if (World == nullptr)
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("no_editor_world"),
+					TEXT("No editor world is available. Open a level in the Unreal Editor."));
+			}
+
+			// Resolve source + parent BEFORE spawning. A miss returns a structured
+			// error with nothing spawned (no orphan actor, no undo entry).
+			AActor* Source = FUnrealOpenMcpObjectRef::ResolveActor(SourceRef, World);
+			if (Source == nullptr)
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("actor_not_found"),
+					FString::Printf(
+						TEXT("Source actor '%s' was not found; nothing was duplicated."),
+						*SourceRef));
+			}
+			const FString ParentRef = Args->HasTypedField<EJson::String>(TEXT("parent"))
+				? Args->GetStringField(TEXT("parent"))
+				: FString();
+			AActor* Parent = nullptr;
+			if (!ParentRef.IsEmpty())
+			{
+				Parent = FUnrealOpenMcpObjectRef::ResolveActor(ParentRef, World);
+				if (Parent == nullptr)
+				{
+					return FUnrealOpenMcpToolDispatchResult::Fail(
+						TEXT("parent_not_found"),
+						FString::Printf(
+							TEXT("Parent actor '%s' was not found; nothing was duplicated."),
+							*ParentRef));
+				}
+			}
+
+			const FString Label = Args->HasTypedField<EJson::String>(TEXT("name"))
+				? Args->GetStringField(TEXT("name"))
+				: FString();
+			// An optional world-space offset applied to the clone's location. The
+			// behavior reference duplicates in-place (offset 0); exposing it as an
+			// arg lets an agent avoid stacking the clone on the source without a
+			// second actor_modify call. Defaults to a small +Z nudge so the clone
+			// is visible in the viewport even when the caller omitted it.
+			const FVector Offset = ReadVectorField(Args, TEXT("offset"), FVector(0.0, 0.0, 0.0));
+
+			const FScopedTransaction Transaction(
+				NSLOCTEXT("UnrealOpenMcp", "ActorDuplicate", "MCP: Duplicate Actor"));
+
+			// Spawn-from-template: SpawnParams.Template = Source makes SpawnActor
+			// copy the source's component state into the clone (the behavior
+			// reference's chosen duplication path — stays headless-safe and avoids
+			// the EditorActorSubsystem dependency). RF_Transactional makes the
+			// clone undo-trackable.
+			FActorSpawnParameters SpawnParams;
+			SpawnParams.Template = Source;
+			SpawnParams.ObjectFlags |= RF_Transactional;
+			const FTransform DupTransform(
+				Source->GetActorRotation(),
+				Source->GetActorLocation() + Offset,
+				Source->GetActorScale3D());
+			AActor* Clone = World->SpawnActor<AActor>(Source->GetClass(), DupTransform, SpawnParams);
+			if (Clone == nullptr)
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("spawn_failed"),
+					FString::Printf(
+						TEXT("SpawnActor returned null while duplicating '%s'."),
+						*Source->GetActorLabel()));
+			}
+
+			// SetActorLabelUnique (not SetActorLabel): a user-supplied label that
+			// collides with the source's label (the default!) would otherwise make
+			// both ambiguous to ResolveActor. Empty label → keep the engine's
+			// auto-generated copy (which is the source label verbatim), so we
+			// force uniqueness even then.
+			FActorLabelUtilities::SetActorLabelUnique(
+				Clone,
+				Label.IsEmpty() ? Source->GetActorLabel() : Label);
+
+			// Optional parent attach. Same warning contract as actor_create: if
+			// the attach silently no-ops (rootless clone), surface a warning in
+			// the result rather than fail and leak the clone.
+			FString AttachWarning;
+			if (Parent != nullptr)
+			{
+				Clone->AttachToActor(Parent, FAttachmentTransformRules::KeepWorldTransform);
+				if (Clone->GetAttachParentActor() != Parent)
+				{
+					AttachWarning = FString::Printf(
+						TEXT(" (warning: could not attach to parent '%s' — the clone has no root component)"),
+						*Parent->GetActorLabel());
+				}
+			}
+
+			if (ULevel* Level = Clone->GetLevel())
+			{
+				Level->MarkPackageDirty();
+			}
+
+			TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+			Result->SetObjectField(TEXT("actor"), ToActorData(Clone, /*bIncludeComponents=*/true));
+			if (!AttachWarning.IsEmpty())
+			{
+				Result->SetStringField(TEXT("warning"), AttachWarning);
+			}
+			return FUnrealOpenMcpToolDispatchResult::Ok(
+				WriteJson(MakeShared<FJsonValueObject>(Result)));
+		});
+
+	// unreal_open_mcp_actor_destroy — destroy one or more actors in the current
+	// editor level. Single (`actor`) or batch (`actors` array); the batch path
+	// resolves every target BEFORE opening the transaction so a miss returns
+	// actor_not_found with nothing destroyed (no partial batch). Each destroy
+	// goes through EditorDestroyActor (the editor path — records into the
+	// transaction buffer and updates the level's actor list); World->DestroyActor
+	// would bypass the editor's selection/outliner bookkeeping.
+	//
+	// Wrapped in FScopedTransaction for editor Undo. `paths_hint` + `gate` are
+	// forward-compat (no-op until P3.5). Structured errors:
+	//   - missing_parameter — neither `actor` nor `actors` supplied
+	//   - no_editor_world   — no GEditor / editor world
+	//   - actor_not_found   — a ref did not resolve (nothing destroyed)
+	//   - destroy_failed    — EditorDestroyActor returned false for a target
+	Registry.Register(
+		TEXT("unreal_open_mcp_actor_destroy"),
+		[](const FString& Body) -> FUnrealOpenMcpToolDispatchResult
+		{
+			TSharedPtr<FJsonObject> Args = ParseBody(Body);
+			if (!Args.IsValid())
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("invalid_parameter"),
+					TEXT("Request body was not a valid JSON object."));
+			}
+
+			// Collect target refs. `actor` (single) and `actors` (batch) mirror
+			// actor_modify's targeting pair. An empty set is missing_parameter.
+			TArray<FString> Refs;
+			if (Args->HasTypedField<EJson::String>(TEXT("actor")))
+			{
+				Refs.Add(Args->GetStringField(TEXT("actor")));
+			}
+			if (Args->HasTypedField<EJson::Array>(TEXT("actors")))
+			{
+				const TArray<TSharedPtr<FJsonValue>>* Arr = nullptr;
+				Args->TryGetArrayField(TEXT("actors"), Arr);
+				if (Arr != nullptr)
+				{
+					for (const TSharedPtr<FJsonValue>& V : *Arr)
+					{
+						if (V.IsValid() && V->Type == EJson::String)
+						{
+							const FString S = V->AsString();
+							if (!S.IsEmpty())
+							{
+								Refs.Add(S);
+							}
+						}
+					}
+				}
+			}
+			if (Refs.Num() == 0)
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("missing_parameter"),
+					TEXT("Either 'actor' (string) or 'actors' (array of strings) is required."));
+			}
+
+			UWorld* World = FUnrealOpenMcpObjectRef::GetEditorWorld();
+			if (World == nullptr)
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("no_editor_world"),
+					TEXT("No editor world is available. Open a level in the Unreal Editor."));
+			}
+
+			// Resolve every target BEFORE the transaction (resolve-before-mutate).
+			// A miss returns actor_not_found with nothing destroyed — opening the
+			// transaction first would push an empty entry onto the undo stack and
+			// a later miss would leave a partial destroy with no clean rollback.
+			TArray<AActor*> Targets;
+			Targets.Reserve(Refs.Num());
+			for (const FString& Ref : Refs)
+			{
+				AActor* Resolved = FUnrealOpenMcpObjectRef::ResolveActor(Ref, World);
+				if (Resolved == nullptr)
+				{
+					return FUnrealOpenMcpToolDispatchResult::Fail(
+						TEXT("actor_not_found"),
+						FString::Printf(
+							TEXT("Actor '%s' was not found; nothing was destroyed."),
+							*Ref));
+				}
+				Targets.Add(Resolved);
+			}
+
+			const FScopedTransaction Transaction(
+				NSLOCTEXT("UnrealOpenMcp", "ActorDestroy", "MCP: Destroy Actor"));
+
+			TArray<FString> DestroyedLabels;
+			for (AActor* Actor : Targets)
+			{
+				const FString Label = Actor->GetActorLabel();
+				// EditorDestroyActor is the editor path: it records the destroy
+				// into the transaction buffer, updates the level's actor list, and
+				// fires the editor's selection/outliner refresh hooks. The
+				// bShouldModifyLevel=true flag propagates the dirty bit. Returns
+				// false on rejection (e.g. an actor the editor refuses to remove).
+				if (World->EditorDestroyActor(Actor, /*bShouldModifyLevel*/ true))
+				{
+					DestroyedLabels.Add(Label);
+				}
+				else
+				{
+					return FUnrealOpenMcpToolDispatchResult::Fail(
+						TEXT("destroy_failed"),
+						FString::Printf(
+							TEXT("EditorDestroyActor returned false for '%s'."),
+							*Label));
+				}
+			}
+
+			TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+			TArray<TSharedPtr<FJsonValue>> DestroyedValues;
+			DestroyedValues.Reserve(DestroyedLabels.Num());
+			for (const FString& L : DestroyedLabels)
+			{
+				DestroyedValues.Add(MakeShared<FJsonValueString>(L));
+			}
+			Result->SetArrayField(TEXT("destroyed"), DestroyedValues);
+			Result->SetNumberField(TEXT("count"), DestroyedLabels.Num());
+			return FUnrealOpenMcpToolDispatchResult::Ok(
+				WriteJson(MakeShared<FJsonValueObject>(Result)));
+		});
+
+	// unreal_open_mcp_actor_component_add — add a component to an actor in the
+	// current editor level. Resolves the component class (same ResolveClass
+	// surface as actor_create), validates it is a non-abstract UActorComponent,
+	// creates it via NewObject, and runs the registration sequence
+	// (AddInstanceComponent → scene attach/root-set → OnComponentCreated →
+	// RegisterComponent) so the new component is live in the editor. Returns the
+	// new component's ComponentData (name + class + properties) so the agent can
+	// chain component_modify without a second lookup.
+	//
+	// Wrapped in FScopedTransaction for editor Undo. `paths_hint` + `gate` are
+	// forward-compat (no-op until P3.5). Structured errors:
+	//   - missing_parameter — `actor` or `componentClass` absent/empty
+	//   - no_editor_world   — no GEditor / editor world
+	//   - actor_not_found   — actor ref did not resolve (nothing added)
+	//   - class_not_found   — componentClass did not resolve to a UClass
+	//   - invalid_parameter — resolved class is not a UActorComponent / abstract
+	//   - name_conflict     — a component with the requested name already exists
+	//   - create_failed     — NewObject returned null
+	Registry.Register(
+		TEXT("unreal_open_mcp_actor_component_add"),
+		[](const FString& Body) -> FUnrealOpenMcpToolDispatchResult
+		{
+			TSharedPtr<FJsonObject> Args = ParseBody(Body);
+			if (!Args.IsValid())
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("invalid_parameter"),
+					TEXT("Request body was not a valid JSON object."));
+			}
+
+			const FString ActorRef = Args->HasTypedField<EJson::String>(TEXT("actor"))
+				? Args->GetStringField(TEXT("actor"))
+				: FString();
+			if (ActorRef.IsEmpty())
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("missing_parameter"),
+					TEXT("'actor' is required."));
+			}
+			const FString ClassRef = Args->HasTypedField<EJson::String>(TEXT("componentClass"))
+				? Args->GetStringField(TEXT("componentClass"))
+				: FString();
+			FString Code;
+			FString Message;
+			UClass* Class = ResolveComponentClass(ClassRef, Code, Message);
+			if (Class == nullptr)
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(Code, Message);
+			}
+			const FString NameArg = Args->HasTypedField<EJson::String>(TEXT("name"))
+				? Args->GetStringField(TEXT("name"))
+				: FString();
+
+			UWorld* World = FUnrealOpenMcpObjectRef::GetEditorWorld();
+			if (World == nullptr)
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("no_editor_world"),
+					TEXT("No editor world is available. Open a level in the Unreal Editor."));
+			}
+
+			AActor* Actor = FUnrealOpenMcpObjectRef::ResolveActor(ActorRef, World);
+			if (Actor == nullptr)
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("actor_not_found"),
+					FString::Printf(
+						TEXT("Actor '%s' was not found; nothing was added."),
+						*ActorRef));
+			}
+
+			// Resolve the component name BEFORE NewObject. A user-supplied name
+			// that collides with an existing component under the actor would trip
+			// a StaticAllocateObject fatal assert inside NewObject; resolve it up
+			// front and return a structured name_conflict. (Behavior reference:
+			// UnrealMcpActorTools.cpp.) An empty NameArg → a unique object name
+			// derived from the class name (the engine default).
+			FName CompName;
+			if (NameArg.IsEmpty())
+			{
+				CompName = MakeUniqueObjectName(Actor, Class, Class->GetFName());
+			}
+			else
+			{
+				CompName = FName(*NameArg);
+				if (StaticFindObjectFast(nullptr, Actor, CompName) != nullptr)
+				{
+					return FUnrealOpenMcpToolDispatchResult::Fail(
+						TEXT("name_conflict"),
+						FString::Printf(
+							TEXT("A component named '%s' already exists on actor '%s'."),
+							*NameArg, *Actor->GetActorLabel()));
+				}
+			}
+
+			const FScopedTransaction Transaction(
+				NSLOCTEXT("UnrealOpenMcp", "ComponentAdd", "MCP: Add Component"));
+
+			// Snapshot the actor's component list BEFORE mutating it so the add
+			// is undo-able as a single step with the NewObject allocation.
+			Actor->Modify();
+			UActorComponent* NewComp = NewObject<UActorComponent>(Actor, Class, CompName, RF_Transactional);
+			if (NewComp == nullptr)
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("create_failed"),
+					FString::Printf(
+						TEXT("NewObject returned null for componentClass '%s'."),
+						*ClassRef));
+			}
+
+			// Registration sequence (behavior reference: UnrealMcpActorTools.cpp):
+			// AddInstanceComponent makes the component visible in the editor's
+			// component tree; a USceneComponent attaches to the actor's root (or
+			// becomes the root when the actor has none); OnComponentCreated +
+			// RegisterComponent bring it live. Order matters — attaching before
+			// RegisterComponent lets the registration pick up the attachment.
+			Actor->AddInstanceComponent(NewComp);
+			if (USceneComponent* SceneComp = Cast<USceneComponent>(NewComp))
+			{
+				if (USceneComponent* Root = Actor->GetRootComponent())
+				{
+					SceneComp->AttachToComponent(Root, FAttachmentTransformRules::KeepRelativeTransform);
+				}
+				else
+				{
+					Actor->SetRootComponent(SceneComp);
+				}
+			}
+			NewComp->OnComponentCreated();
+			NewComp->RegisterComponent();
+			Actor->MarkPackageDirty();
+
+			TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+			Result->SetObjectField(
+				TEXT("component"), ToComponentData(NewComp, /*bIncludeProperties=*/true));
+			return FUnrealOpenMcpToolDispatchResult::Ok(
+				WriteJson(MakeShared<FJsonValueObject>(Result)));
+		});
+
+	// unreal_open_mcp_actor_component_destroy — destroy a component on an actor
+	// in the current editor level. Only INSTANCE components (the ones the editor
+	// added at edit time, surfaced via AddInstanceComponent) can be destroyed
+	// cleanly; native/archetype components are rejected explicitly so the caller
+	// gets a clear reason, not a half-removed component. The destroy runs
+	// RemoveInstanceComponent → DestroyComponent and dirties the actor's package.
+	//
+	// Wrapped in FScopedTransaction for editor Undo. `paths_hint` + `gate` are
+	// forward-compat (no-op until P3.5). Structured errors:
+	//   - missing_parameter — `actor` or `component` absent/empty
+	//   - no_editor_world   — no GEditor / editor world
+	//   - actor_not_found   — actor ref did not resolve (nothing destroyed)
+	//   - component_not_found — component ref did not resolve on the actor
+	//   - not_instance_component — the component is native/archetype and cannot
+	//                              be destroyed through this path
+	Registry.Register(
+		TEXT("unreal_open_mcp_actor_component_destroy"),
+		[](const FString& Body) -> FUnrealOpenMcpToolDispatchResult
+		{
+			TSharedPtr<FJsonObject> Args = ParseBody(Body);
+			if (!Args.IsValid())
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("invalid_parameter"),
+					TEXT("Request body was not a valid JSON object."));
+			}
+
+			const FString ActorRef = Args->HasTypedField<EJson::String>(TEXT("actor"))
+				? Args->GetStringField(TEXT("actor"))
+				: FString();
+			const FString CompRef = Args->HasTypedField<EJson::String>(TEXT("component"))
+				? Args->GetStringField(TEXT("component"))
+				: FString();
+			if (ActorRef.IsEmpty() || CompRef.IsEmpty())
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("missing_parameter"),
+					TEXT("Both 'actor' and 'component' are required."));
+			}
+
+			UWorld* World = FUnrealOpenMcpObjectRef::GetEditorWorld();
+			if (World == nullptr)
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("no_editor_world"),
+					TEXT("No editor world is available. Open a level in the Unreal Editor."));
+			}
+
+			AActor* Actor = FUnrealOpenMcpObjectRef::ResolveActor(ActorRef, World);
+			if (Actor == nullptr)
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("actor_not_found"),
+					FString::Printf(
+						TEXT("Actor '%s' was not found; nothing was destroyed."),
+						*ActorRef));
+			}
+			UActorComponent* Component = FUnrealOpenMcpObjectRef::ResolveComponent(Actor, CompRef);
+			if (Component == nullptr)
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("component_not_found"),
+					FString::Printf(
+						TEXT("Component '%s' was not found on actor '%s'."),
+						*CompRef, *Actor->GetActorLabel()));
+			}
+
+			// Instance-component gate: only components the editor added at edit
+			// time (surfaced via AddInstanceComponent, visible in the editor's
+			// component tree) can be destroyed cleanly. A native/archetype
+			// component (the root of a StaticMeshActor, a Character's Movement
+			// component) would leave the actor in a broken half-state; reject
+			// explicitly with a structured code.
+			if (!Actor->GetInstanceComponents().Contains(Component))
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("not_instance_component"),
+					FString::Printf(
+						TEXT("Component '%s' on actor '%s' is not an instance component (native/archetype components cannot be destroyed this way)."),
+						*Component->GetName(), *Actor->GetActorLabel()));
+			}
+
+			const FScopedTransaction Transaction(
+				NSLOCTEXT("UnrealOpenMcp", "ComponentDestroy", "MCP: Destroy Component"));
+
+			// RemoveInstanceComponent detaches the component from the editor's
+			// component tree BEFORE DestroyComponent tears it down — the order
+			// avoids a dangling pointer in the editor's instance-components array.
+			Actor->Modify();
+			Actor->RemoveInstanceComponent(Component);
+			Component->DestroyComponent();
+			Actor->MarkPackageDirty();
+
+			TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+			Result->SetBoolField(TEXT("destroyed"), true);
+			return FUnrealOpenMcpToolDispatchResult::Ok(
+				WriteJson(MakeShared<FJsonValueObject>(Result)));
+		});
+
+	// unreal_open_mcp_actor_component_get — read a single component on an actor.
+	// Read-only (no gate, no transaction). Returns the component's ComponentData
+	// (name + class + a properties object reflected from the component's Edit/
+	// Blueprint-visible FProperties) so an agent can inspect state before
+	// modifying it. The properties object is the read counterpart of the
+	// component_modify write bag (UStructToJsonObject vs JsonValueToUProperty).
+	//
+	// Structured errors:
+	//   - missing_parameter — `actor` or `component` absent/empty
+	//   - no_editor_world   — no GEditor / editor world
+	//   - actor_not_found   — actor ref did not resolve
+	//   - component_not_found — component ref did not resolve on the actor
+	Registry.Register(
+		TEXT("unreal_open_mcp_actor_component_get"),
+		[](const FString& Body) -> FUnrealOpenMcpToolDispatchResult
+		{
+			TSharedPtr<FJsonObject> Args = ParseBody(Body);
+			if (!Args.IsValid())
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("invalid_parameter"),
+					TEXT("Request body was not a valid JSON object."));
+			}
+
+			const FString ActorRef = Args->HasTypedField<EJson::String>(TEXT("actor"))
+				? Args->GetStringField(TEXT("actor"))
+				: FString();
+			const FString CompRef = Args->HasTypedField<EJson::String>(TEXT("component"))
+				? Args->GetStringField(TEXT("component"))
+				: FString();
+			if (ActorRef.IsEmpty() || CompRef.IsEmpty())
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("missing_parameter"),
+					TEXT("Both 'actor' and 'component' are required."));
+			}
+
+			UWorld* World = FUnrealOpenMcpObjectRef::GetEditorWorld();
+			if (World == nullptr)
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("no_editor_world"),
+					TEXT("No editor world is available. Open a level in the Unreal Editor."));
+			}
+
+			AActor* Actor = FUnrealOpenMcpObjectRef::ResolveActor(ActorRef, World);
+			if (Actor == nullptr)
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("actor_not_found"),
+					FString::Printf(
+						TEXT("Actor '%s' was not found."),
+						*ActorRef));
+			}
+			UActorComponent* Component = FUnrealOpenMcpObjectRef::ResolveComponent(Actor, CompRef);
+			if (Component == nullptr)
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("component_not_found"),
+					FString::Printf(
+						TEXT("Component '%s' was not found on actor '%s'."),
+						*CompRef, *Actor->GetActorLabel()));
+			}
+
+			TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+			Result->SetObjectField(
+				TEXT("component"), ToComponentData(Component, /*bIncludeProperties=*/true));
+			return FUnrealOpenMcpToolDispatchResult::Ok(
+				WriteJson(MakeShared<FJsonValueObject>(Result)));
+		});
+
+	// unreal_open_mcp_actor_component_modify — write reflected FProperty values
+	// on a resolved component. Same flat `properties` bag + same shared
+	// ApplyProperties helper as actor_modify / object_modify; the scene-component
+	// relative-transform shortcuts (relativeLocation / relativeRotation /
+	// relativeScale3D) are routed to the component's SetRelative* APIs by the
+	// helper. Per-field errors accumulate in `errors[]` and do NOT abort the
+	// batch (partial success is the norm).
+	//
+	// Wrapped in FScopedTransaction for editor Undo. `paths_hint` + `gate` are
+	// forward-compat (no-op until P3.5). Structured errors:
+	//   - missing_parameter — `actor`, `component`, or `properties` absent
+	//   - no_editor_world   — no GEditor / editor world
+	//   - actor_not_found   — actor ref did not resolve (nothing mutated)
+	//   - component_not_found — component ref did not resolve (nothing mutated)
+	Registry.Register(
+		TEXT("unreal_open_mcp_actor_component_modify"),
+		[](const FString& Body) -> FUnrealOpenMcpToolDispatchResult
+		{
+			TSharedPtr<FJsonObject> Args = ParseBody(Body);
+			if (!Args.IsValid())
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("invalid_parameter"),
+					TEXT("Request body was not a valid JSON object."));
+			}
+
+			const FString ActorRef = Args->HasTypedField<EJson::String>(TEXT("actor"))
+				? Args->GetStringField(TEXT("actor"))
+				: FString();
+			const FString CompRef = Args->HasTypedField<EJson::String>(TEXT("component"))
+				? Args->GetStringField(TEXT("component"))
+				: FString();
+			if (ActorRef.IsEmpty() || CompRef.IsEmpty())
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("missing_parameter"),
+					TEXT("Both 'actor' and 'component' are required."));
+			}
+			if (!Args->HasTypedField<EJson::Object>(TEXT("properties")))
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("missing_parameter"),
+					TEXT("'properties' object is required."));
+			}
+			const TSharedPtr<FJsonObject>* PropsPtr = nullptr;
+			Args->TryGetObjectField(TEXT("properties"), PropsPtr);
+			if (PropsPtr == nullptr || !PropsPtr->IsValid())
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("invalid_parameter"),
+					TEXT("'properties' must be a JSON object of name -> value pairs."));
+			}
+			const TSharedPtr<FJsonObject>& Properties = *PropsPtr;
+
+			UWorld* World = FUnrealOpenMcpObjectRef::GetEditorWorld();
+			if (World == nullptr)
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("no_editor_world"),
+					TEXT("No editor world is available. Open a level in the Unreal Editor."));
+			}
+
+			AActor* Actor = FUnrealOpenMcpObjectRef::ResolveActor(ActorRef, World);
+			if (Actor == nullptr)
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("actor_not_found"),
+					FString::Printf(
+						TEXT("Actor '%s' was not found; nothing was modified."),
+						*ActorRef));
+			}
+			UActorComponent* Component = FUnrealOpenMcpObjectRef::ResolveComponent(Actor, CompRef);
+			if (Component == nullptr)
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("component_not_found"),
+					FString::Printf(
+						TEXT("Component '%s' was not found on actor '%s'; nothing was modified."),
+						*CompRef, *Actor->GetActorLabel()));
+			}
+
+			const FScopedTransaction Transaction(
+				NSLOCTEXT("UnrealOpenMcp", "ComponentModify", "MCP: Modify Component"));
+
+			TArray<FString> Errors;
+			const int32 Applied = FUnrealOpenMcpPropertyJson::ApplyProperties(Component, Properties, Errors);
+
+			TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+			Result->SetNumberField(TEXT("applied"), Applied);
+			Result->SetStringField(TEXT("actor"), Actor->GetActorLabel());
+			Result->SetStringField(TEXT("component"), Component->GetName());
+			if (Errors.Num() > 0)
+			{
+				TArray<TSharedPtr<FJsonValue>> ErrorValues;
+				ErrorValues.Reserve(Errors.Num());
+				for (const FString& E : Errors)
+				{
+					ErrorValues.Add(MakeShared<FJsonValueString>(E));
+				}
+				Result->SetArrayField(TEXT("errors"), ErrorValues);
+			}
+			return FUnrealOpenMcpToolDispatchResult::Ok(
+				WriteJson(MakeShared<FJsonValueObject>(Result)));
+		});
+
+	// unreal_open_mcp_actor_component_list_all — list every component on an
+	// actor. Read-only (no gate, no transaction). Returns a components[] array
+	// of ComponentData (name + class; properties omitted to save tokens — use
+	// component_get for the full property dump of one component). Mirrors
+	// Unity's component-list surface (the host-bound variant; the engine-wide
+	// type catalog is a later-phase tool).
+	//
+	// Structured errors:
+	//   - missing_parameter — `actor` absent/empty
+	//   - no_editor_world   — no GEditor / editor world
+	//   - actor_not_found   — actor ref did not resolve
+	Registry.Register(
+		TEXT("unreal_open_mcp_actor_component_list_all"),
+		[](const FString& Body) -> FUnrealOpenMcpToolDispatchResult
+		{
+			TSharedPtr<FJsonObject> Args = ParseBody(Body);
+			if (!Args.IsValid())
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("invalid_parameter"),
+					TEXT("Request body was not a valid JSON object."));
+			}
+
+			const FString ActorRef = Args->HasTypedField<EJson::String>(TEXT("actor"))
+				? Args->GetStringField(TEXT("actor"))
+				: FString();
+			if (ActorRef.IsEmpty())
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("missing_parameter"),
+					TEXT("'actor' is required."));
+			}
+
+			UWorld* World = FUnrealOpenMcpObjectRef::GetEditorWorld();
+			if (World == nullptr)
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("no_editor_world"),
+					TEXT("No editor world is available. Open a level in the Unreal Editor."));
+			}
+
+			AActor* Actor = FUnrealOpenMcpObjectRef::ResolveActor(ActorRef, World);
+			if (Actor == nullptr)
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("actor_not_found"),
+					FString::Printf(
+						TEXT("Actor '%s' was not found."),
+						*ActorRef));
+			}
+
+			TArray<TSharedPtr<FJsonValue>> Components;
+			for (UActorComponent* Component : Actor->GetComponents())
+			{
+				if (Component == nullptr)
+				{
+					continue;
+				}
+				// Properties omitted per entry — a full property dump of every
+				// component would blow the token budget on a complex actor. Use
+				// component_get for the full property object of one component.
+				Components.Add(MakeShared<FJsonValueObject>(
+					ToComponentData(Component, /*bIncludeProperties=*/false)));
+			}
+
+			TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+			Result->SetArrayField(TEXT("components"), Components);
+			Result->SetNumberField(TEXT("count"), Components.Num());
+			return FUnrealOpenMcpToolDispatchResult::Ok(
+				WriteJson(MakeShared<FJsonValueObject>(Result)));
+		});
+
 	UE_LOG(
 		LogUnrealOpenMcp,
 		Log,
-		TEXT("[Unreal Open MCP] actor tools registered: unreal_open_mcp_actor_find, unreal_open_mcp_actor_create, unreal_open_mcp_actor_modify, unreal_open_mcp_object_modify"));
+		TEXT("[Unreal Open MCP] actor tools registered: unreal_open_mcp_actor_find, unreal_open_mcp_actor_create, unreal_open_mcp_actor_modify, unreal_open_mcp_object_modify, unreal_open_mcp_actor_set_parent, unreal_open_mcp_actor_duplicate, unreal_open_mcp_actor_destroy, unreal_open_mcp_actor_component_add, unreal_open_mcp_actor_component_destroy, unreal_open_mcp_actor_component_get, unreal_open_mcp_actor_component_modify, unreal_open_mcp_actor_component_list_all"));
 }

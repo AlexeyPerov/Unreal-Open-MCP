@@ -23,16 +23,25 @@ const SERVER_ENTRY = resolve(here, "index.js");
 // tools/list returns the registered tool set. P1.7 registered the first tool
 // (`unreal_open_mcp_ping`); P2.2 added `unreal_open_mcp_actor_find`; P2.3 added
 // `unreal_open_mcp_actor_create`; P2.4 added `unreal_open_mcp_actor_modify` +
-// `unreal_open_mcp_object_modify`. Further tools land in later phases and
-// append here.
+// `unreal_open_mcp_object_modify`; P2.5 added actor_set_parent /
+// actor_duplicate / actor_destroy + the five actor_component_* tools. Further
+// tools land in later phases and append here.
 test("handleListTools returns the registered tools", async () => {
   const result = await handleListTools();
-  assert.equal(result.tools.length, 5);
+  assert.equal(result.tools.length, 13);
   assert.equal(result.tools[0].name, "unreal_open_mcp_ping");
   assert.equal(result.tools[1].name, "unreal_open_mcp_actor_find");
   assert.equal(result.tools[2].name, "unreal_open_mcp_actor_create");
   assert.equal(result.tools[3].name, "unreal_open_mcp_actor_modify");
   assert.equal(result.tools[4].name, "unreal_open_mcp_object_modify");
+  assert.equal(result.tools[5].name, "unreal_open_mcp_actor_set_parent");
+  assert.equal(result.tools[6].name, "unreal_open_mcp_actor_duplicate");
+  assert.equal(result.tools[7].name, "unreal_open_mcp_actor_destroy");
+  assert.equal(result.tools[8].name, "unreal_open_mcp_actor_component_add");
+  assert.equal(result.tools[9].name, "unreal_open_mcp_actor_component_destroy");
+  assert.equal(result.tools[10].name, "unreal_open_mcp_actor_component_get");
+  assert.equal(result.tools[11].name, "unreal_open_mcp_actor_component_modify");
+  assert.equal(result.tools[12].name, "unreal_open_mcp_actor_component_list_all");
 });
 
 // Unknown tool → structured MCP error with isError, listing registered names.
@@ -167,12 +176,20 @@ test("subprocess: boots, answers initialize + tools/list, exits 0 on EOF", async
     | undefined;
   assert.ok(list, "tools/list response missing");
   const tools = list?.result?.tools ?? [];
-  assert.equal(tools.length, 5);
+  assert.equal(tools.length, 13);
   assert.equal(tools[0].name, "unreal_open_mcp_ping");
   assert.equal(tools[1].name, "unreal_open_mcp_actor_find");
   assert.equal(tools[2].name, "unreal_open_mcp_actor_create");
   assert.equal(tools[3].name, "unreal_open_mcp_actor_modify");
   assert.equal(tools[4].name, "unreal_open_mcp_object_modify");
+  assert.equal(tools[5].name, "unreal_open_mcp_actor_set_parent");
+  assert.equal(tools[6].name, "unreal_open_mcp_actor_duplicate");
+  assert.equal(tools[7].name, "unreal_open_mcp_actor_destroy");
+  assert.equal(tools[8].name, "unreal_open_mcp_actor_component_add");
+  assert.equal(tools[9].name, "unreal_open_mcp_actor_component_destroy");
+  assert.equal(tools[10].name, "unreal_open_mcp_actor_component_get");
+  assert.equal(tools[11].name, "unreal_open_mcp_actor_component_modify");
+  assert.equal(tools[12].name, "unreal_open_mcp_actor_component_list_all");
 });
 
 // Missing UNREAL_PROJECT_PATH → exit 1 with a clear stderr message.

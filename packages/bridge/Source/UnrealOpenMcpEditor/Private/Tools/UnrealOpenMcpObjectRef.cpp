@@ -11,6 +11,7 @@
 #include "Tools/UnrealOpenMcpObjectRef.h"
 
 #include "GameFramework/Actor.h"
+#include "Components/ActorComponent.h"   // UActorComponent for ResolveComponent
 
 #include "Engine/Blueprint.h"
 #include "EngineUtils.h"            // TActorIterator
@@ -170,5 +171,47 @@ namespace FUnrealOpenMcpObjectRef
 		return StaticLoadObject(
 			UObject::StaticClass(), nullptr, *ObjectRef, nullptr,
 			LOAD_NoWarn | LOAD_Quiet);
+	}
+
+	UActorComponent* ResolveComponent(AActor* Actor, const FString& ComponentRef)
+	{
+		if (Actor == nullptr || ComponentRef.IsEmpty())
+		{
+			return nullptr;
+		}
+
+		// Pass 1 — match by name or readable name. FString::operator== is
+		// case-insensitive in UE, so a loosely-cased component name resolves.
+		// Adapted (read-only) from Unreal-MCP's FUnrealMcpObjectRef::
+		// ResolveComponent (the GetName / GetReadableName iteration).
+		for (UActorComponent* Component : Actor->GetComponents())
+		{
+			if (Component == nullptr)
+			{
+				continue;
+			}
+			if (Component->GetName() == ComponentRef
+				|| Component->GetReadableName() == ComponentRef)
+			{
+				return Component;
+			}
+		}
+
+		// Pass 2 — treat ComponentRef as a class ref and return the FIRST
+		// component on the actor whose class IsA the resolved class. Mirrors
+		// Unity's GetComponent(type) first-match semantics (and the
+		// "first match is removed per call" rule on component-destroy).
+		if (UClass* RefClass = ResolveClass(ComponentRef))
+		{
+			for (UActorComponent* Component : Actor->GetComponents())
+			{
+				if (Component != nullptr && Component->IsA(RefClass))
+				{
+					return Component;
+				}
+			}
+		}
+
+		return nullptr;
 	}
 }

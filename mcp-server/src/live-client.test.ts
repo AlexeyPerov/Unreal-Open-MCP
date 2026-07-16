@@ -238,22 +238,149 @@ test("ping: 200 with non-JSON body classifies as bridge_response_unparsable", as
   }
 });
 
-// --- non-ping route --------------------------------------------------------
+// --- non-ping route (POST /tools/{name}) -----------------------------------
 
-test("route: a non-ping tool name returns tool_not_routed (no HTTP)", async () => {
-  // No bridge stub at all — the call must not attempt HTTP because the bridge
-  // has no tool-dispatch endpoint yet. A tool_not_routed result returns
-  // synchronously without touching the network.
+test("postTool: success envelope {ok,result} is unwrapped into a text content block", async () => {
+  // Bridge returns {ok:true,result:{echo:123}} — the LiveClient must unwrap
+  // `result` as the text content block with isError:false.
+  const bridge = await startBridgeStub((_req, res) => {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: true, result: { echo: 123 } }));
+  });
+  try {
+    const client = new LiveClient(bridge.port);
+    const result = await client.route("unreal_open_mcp_echo", { foo: 1 });
+    assert.equal(result.isError, false);
+    assert.deepEqual(bodyOf(result), { echo: 123 });
+  } finally {
+    await bridge.close();
+  }
+});
+
+test("postTool: {ok:false} structured failure surfaces the tool error code", async () => {
+  // Bridge returns {ok:false,error:{code,message}} — the LiveClient must map
+  // it to a CallToolResult error carrying the bridge's code/message.
+  const bridge = await startBridgeStub((_req, res) => {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({
+      ok: false,
+      error: { code: "invalid_request", message: "missing paths_hint" },
+    }));
+  });
+  try {
+    const client = new LiveClient(bridge.port);
+    const result = await client.route("unreal_open_mcp_some_tool", {});
+    assert.equal(result.isError, true);
+    const body = bodyOf(result) as { error: { code: string; message: string } };
+    assert.equal(body.error.code, "invalid_request");
+    assert.equal(body.error.message, "missing paths_hint");
+  } finally {
+    await bridge.close();
+  }
+});
+
+test("postTool: HTTP 404 tool_not_found surfaces the bridge error code", async () => {
+  const bridge = await startBridgeStub((_req, res) => {
+    res.writeHead(404, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({
+      error: { code: "tool_not_found", message: "Unknown tool: nope" },
+    }));
+  });
+  try {
+    const client = new LiveClient(bridge.port);
+    const result = await client.route("unreal_open_mcp_nope", {});
+    assert.equal(result.isError, true);
+    const body = bodyOf(result) as { error: { code: string; message: string } };
+    assert.equal(body.error.code, "tool_not_found");
+  } finally {
+    await bridge.close();
+  }
+});
+
+test("postTool: no listener classifies as bridge_offline", async () => {
+  // Port 1 — ECONNREFUSED on connect.
   const client = new LiveClient(1);
-  const result = await client.route("unreal_open_mcp_some_future_tool", { foo: 1 });
+  const result = await client.route("unreal_open_mcp_echo", {});
   assert.equal(result.isError, true);
-  const body = bodyOf(result) as { error: { code: string; message: string } };
-  assert.equal(body.error.code, "tool_not_routed");
-  assert.match(
-    body.error.message,
-    /unreal_open_mcp_some_future_tool/,
-    "message names the tool that was not routed",
-  );
+  const body = bodyOf(result) as { error: { code: string } };
+  assert.equal(body.error.code, "bridge_offline");
+});
+
+test("postTool: a bridge that never responds classifies as bridge_timeout", async () => {
+  const bridge = await startBridgeStub((_req, _res) => {
+    // Never respond.
+  });
+  try {
+    const fastClient = new (class extends LiveClient {
+      protected getToolTimeoutMs(): number {
+        return 150;
+      }
+    })(bridge.port);
+    const result = await fastClient.route("unreal_open_mcp_echo", {});
+    assert.equal(result.isError, true);
+    const body = bodyOf(result) as { error: { code: string } };
+    assert.equal(body.error.code, "bridge_timeout");
+  } finally {
+    await bridge.close();
+  }
+});
+
+test("postTool: 200 with non-JSON body classifies as bridge_response_unparsable", async () => {
+  const bridge = await startBridgeStub((_req, res) => {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end("<<<not json>>>");
+  });
+  try {
+    const client = new LiveClient(bridge.port);
+    const result = await client.route("unreal_open_mcp_echo", {});
+    assert.equal(result.isError, true);
+    const body = bodyOf(result) as { error: { code: string } };
+    assert.equal(body.error.code, "bridge_response_unparsable");
+  } finally {
+    await bridge.close();
+  }
+});
+
+test("postTool: ok:true with a null result returns null verbatim", async () => {
+  // A tool that returns nothing → {ok:true,result:null}. The MCP result must
+  // carry the null value (isError:false), not treat it as a failure.
+  const bridge = await startBridgeStub((_req, res) => {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: true, result: null }));
+  });
+  try {
+    const client = new LiveClient(bridge.port);
+    const result = await client.route("unreal_open_mcp_echo", {});
+    assert.equal(result.isError, false);
+    assert.equal(bodyOf(result), null);
+  } finally {
+    await bridge.close();
+  }
+});
+
+test("postTool: sends the tool args as the POST body", async () => {
+  // Capture the POST body the LiveClient sends and assert it is JSON.stringify(args).
+  const seen: { body?: string } = {};
+  const bridge = await startBridgeStub((req, res) => {
+    if (req.url === "/tools/unreal_open_mcp_echo") {
+      let chunks = "";
+      req.on("data", (c) => (chunks += c));
+      req.on("end", () => {
+        seen.body = chunks;
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true, result: {} }));
+      });
+    } else {
+      res.writeHead(404).end();
+    }
+  });
+  try {
+    const client = new LiveClient(bridge.port);
+    await client.route("unreal_open_mcp_echo", { foo: "bar", n: 42 });
+    assert.deepEqual(JSON.parse(seen.body ?? "{}"), { foo: "bar", n: 42 });
+  } finally {
+    await bridge.close();
+  }
 });
 
 // --- bearer token header ---------------------------------------------------

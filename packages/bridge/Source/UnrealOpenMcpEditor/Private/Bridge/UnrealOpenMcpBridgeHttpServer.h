@@ -23,6 +23,11 @@
 //     override precedence; this server delegates to it and no longer carries a
 //     DefaultPort constant of its own.
 //
+// P2.1 adds POST /tools/{name}: the server reads the request headers + body
+// (the P1.3 reader only needed the request line), routes to the tool registry,
+// and marshals handler execution onto the game thread via the dispatcher. The
+// fair request queue keys on the X-Agent-Id header.
+//
 // Threading (see packages/bridge/AGENTS.md §Transport):
 //   - The server IS an FRunnable: Run() is the accept loop, on its own thread.
 //     Accepted connections are served inline on the SAME thread (HTTP/1.0, no
@@ -34,6 +39,9 @@
 //     returned when the dispatch fails (game thread blocked or dispatcher shut
 //     down) so the MCP server can classify the bridge as unreachable instead of
 //     waiting on a hung socket.
+//   - Tool dispatch (P2.1) also marshals the handler onto the game thread. The
+//     handler NEVER runs on the listener thread — game-thread dispatch is a
+//     pinned acceptance criterion.
 //   - Never call a UObject / editor API on the listener thread.
 #pragma once
 
@@ -42,6 +50,8 @@
 
 class FSocket;
 class FUnrealOpenMcpGameThreadDispatcher;
+class FUnrealOpenMcpToolRegistry;
+class FUnrealOpenMcpBridgeRequestQueue;
 
 /**
  * Loopback HTTP bridge server (P1.3: GET /ping).
@@ -78,7 +88,10 @@ public:
 	 *  will bind). Pinning the bind-address contract at the type level. */
 	static bool IsLoopbackAddress(const FString& Address);
 
-	FUnrealOpenMcpBridgeHttpServer(FUnrealOpenMcpGameThreadDispatcher& InDispatcher);
+	FUnrealOpenMcpBridgeHttpServer(
+		FUnrealOpenMcpGameThreadDispatcher& InDispatcher,
+		FUnrealOpenMcpToolRegistry& InToolRegistry,
+		FUnrealOpenMcpBridgeRequestQueue& InRequestQueue);
 	virtual ~FUnrealOpenMcpBridgeHttpServer();
 
 	/** Not copyable — owns a listener socket + worker thread. */
@@ -131,13 +144,22 @@ private:
 	 *  response, close. HTTP/1.0 no keep-alive. */
 	void HandleConnection(FSocket* Client);
 
-	/** Route a parsed method + path. Dispatches to the /ping handler or writes
-	 *  the right error body (404 / 405). */
+	/** Route a parsed method + path. Dispatches to the /ping handler, the tool
+	 *  dispatch handler, or writes the right error body (404 / 405). */
 	void RouteRequest(const FString& Method, const FString& Path, FSocket& Client);
 
 	/** Build the /ping payload on the game thread via the dispatcher and write
 	 *  the 200 or 503 response. */
 	void HandlePing(FSocket& Client);
+
+	/**
+	 * Handle POST /tools/{name}. Reads the request body, resolves the handler
+	 * from the registry, marshals it onto the game thread via the dispatcher,
+	 * and writes the canonical {ok,result,error} envelope (HTTP 200) or the
+	 * tool_not_found body (HTTP 404). Captures the X-Agent-Id header for the
+	 * fair queue.
+	 */
+	void HandleToolDispatch(FSocket& Client, const FString& ToolName, const FString& Body, const FString& AgentId);
 
 	/** Write a status line + JSON body with the standard JSON content-type
 	 *  header, then close the socket. UTF-8 conversion happens here. */
@@ -147,14 +169,27 @@ private:
 	 *  closed); callers ignore — we close regardless. */
 	static bool WriteAll(FSocket& Client, const uint8* Data, int32 Size);
 
-	/** Read up to the request headers from Client into OutMethod / OutPath.
-	 *  Returns false if no complete request line arrived within the receive
-	 *  window. */
-	bool ReadRequestLine(FSocket& Client, FString& OutMethod, FString& OutPath);
+	/** Read the full HTTP request (request line + headers + optional body) from
+	 *  Client. Parses the method, path, and the small set of headers the bridge
+	 *  needs (Content-Length, X-Agent-Id) and returns the raw body bytes.
+	 *  Returns false if no complete request arrived within the receive window.
+	 *  Serves both /ping (no body) and /tools/{name} (with body). */
+	bool ReadRequest(
+		FSocket& Client,
+		FString& OutMethod,
+		FString& OutPath,
+		FString& OutAgentId,
+		TArray<uint8>& OutBody);
 
 	/** Dispatcher reference (not owned — owned by FUnrealOpenMcpEditorModule).
-	 *  Every UObject touch in the /ping path goes through this. */
+	 *  Every UObject touch in the /ping + tool paths goes through this. */
 	FUnrealOpenMcpGameThreadDispatcher& Dispatcher;
+
+	/** Tool registry (not owned — owned by FUnrealOpenMcpEditorModule). */
+	FUnrealOpenMcpToolRegistry& ToolRegistry;
+
+	/** Fair request queue (not owned — owned by FUnrealOpenMcpEditorModule). */
+	FUnrealOpenMcpBridgeRequestQueue& RequestQueue;
 
 	/** Bound loopback listener. nullptr before Start / after Stop. */
 	FSocket* ListenSocket = nullptr;

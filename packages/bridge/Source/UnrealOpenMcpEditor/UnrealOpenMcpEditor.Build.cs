@@ -4,10 +4,11 @@
 // boundary): this module depends on Runtime PUBLICLY so its public headers
 // (UnrealOpenMcpLog.h, Dispatch/UnrealOpenMcpGameThreadDispatcher.h,
 // Bridge/UnrealOpenMcpInstancePortResolver.h, Crypto/UnrealOpenMcpSha256.h)
-// are visible across the .dll boundary. In P1.1 the editor module owned
-// plugin boot logging only; P1.3 adds the loopback HTTP server + /ping health
-// surface; P1.4 adds the instance lock + wires the deterministic port
-// resolver into the HTTP server start; tool dispatch lands in P2.1.
+// are visible across the .dll boundary. P1.1 added plugin boot logging; P1.3
+// added the loopback HTTP server + /ping health surface; P1.4 added the
+// instance lock + wired the deterministic port resolver into the HTTP server
+// start; P2.1 added POST /tools/{name} dispatch (tool registry, fair request
+// queue, canonical {ok,result,error} envelope, echo stub tool).
 using UnrealBuildTool;
 
 public class UnrealOpenMcpEditor : ModuleRules

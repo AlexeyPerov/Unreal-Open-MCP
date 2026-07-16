@@ -1,10 +1,13 @@
-// Loopback HTTP bridge server (P1.3: GET /ping).
+// Loopback HTTP bridge server (P1.3: GET /ping; P2.1: POST /tools/{name}).
 // See header for threading + scope rationale.
 #include "Bridge/UnrealOpenMcpBridgeHttpServer.h"
 
+#include "Bridge/UnrealOpenMcpBridgeEnvelope.h"
 #include "Bridge/UnrealOpenMcpBridgeJson.h"
+#include "Bridge/UnrealOpenMcpBridgeRequestQueue.h"
 #include "Bridge/UnrealOpenMcpBridgeSession.h"
 #include "Bridge/UnrealOpenMcpInstancePortResolver.h"
+#include "Bridge/UnrealOpenMcpToolRegistry.h"
 #include "Dispatch/UnrealOpenMcpGameThreadDispatcher.h"
 #include "UnrealOpenMcpLog.h"
 
@@ -24,8 +27,70 @@ static constexpr float RequestReadTimeoutSeconds = 5.0f;
 static constexpr double RecvPollIntervalSeconds = 0.05;
 // How long /ping waits for the game thread to drain.
 static constexpr uint32 PingDispatchTimeoutMs = 5000;
-// Receive buffer for the HTTP request-line + headers.
+// Default per-call tool dispatch timeout. The request body's optional
+// timeout_ms field overrides this when present (clamped to [MinToolTimeoutMs,
+// MaxToolTimeoutMs]). Mirrors Unity's BridgeRequestBody default.
+static constexpr uint32 DefaultToolDispatchTimeoutMs = 30000;
+static constexpr uint32 MinToolDispatchTimeoutMs = 1000;
+static constexpr uint32 MaxToolDispatchTimeoutMs = 600000;
+// Receive buffer for the HTTP request-line + headers + body.
 static constexpr int32 RecvBufferSize = 8 * 1024;
+// Cap on a single request body so a misbehaving peer can't exhaust memory.
+static constexpr int32 MaxBodyBytes = 8 * 1024 * 1024;
+
+// Extract the timeout_ms field from a tool-dispatch request body. Hand-rolled
+// substring parse (no FJsonObject) — mirrors Unity's BridgeRequestBody.
+// ExtractTimeoutMs: locate "timeout_ms", find the colon, skip whitespace, parse
+// the signed integer, clamp to [Min, Max]. Absent/unparseable → Default.
+static uint32 ExtractTimeoutMs(const FString& Body)
+{
+	if (Body.IsEmpty())
+	{
+		return DefaultToolDispatchTimeoutMs;
+	}
+
+	const FString Key = TEXT("\"timeout_ms\"");
+	const int32 KeyIdx = Body.Find(*Key, ESearchCase::CaseSensitive, ESearchDir::FromStart);
+	if (KeyIdx == INDEX_NONE)
+	{
+		return DefaultToolDispatchTimeoutMs;
+	}
+
+	const int32 ColonIdx = Body.Find(TEXT(":"), ESearchCase::CaseSensitive, ESearchDir::FromStart, KeyIdx + Key.Len());
+	if (ColonIdx == INDEX_NONE)
+	{
+		return DefaultToolDispatchTimeoutMs;
+	}
+
+	int32 Start = ColonIdx + 1;
+	// Skip whitespace.
+	while (Start < Body.Len() && FChar::IsWhitespace(Body[Start]))
+	{
+		++Start;
+	}
+	// Allow an optional leading sign so negative values parse then clamp.
+	int32 End = Start;
+	if (End < Body.Len() && (Body[End] == TEXT('-') || Body[End] == TEXT('+')))
+	{
+		++End;
+	}
+	while (End < Body.Len() && FChar::IsDigit(Body[End]))
+	{
+		++End;
+	}
+	if (End == Start || (End == Start + 1 && (Body[Start] == TEXT('-') || Body[Start] == TEXT('+'))))
+	{
+		return DefaultToolDispatchTimeoutMs;
+	}
+
+	const FString NumberText = Body.Mid(Start, End - Start);
+	const int64 Parsed = FCString::Atoi64(*NumberText);
+	const int64 Clamped = FMath::Clamp<int64>(
+		Parsed,
+		static_cast<int64>(MinToolDispatchTimeoutMs),
+		static_cast<int64>(MaxToolDispatchTimeoutMs));
+	return static_cast<uint32>(Clamped);
+}
 
 const TCHAR* FUnrealOpenMcpBridgeHttpServer::PortEnvVar()
 {
@@ -92,8 +157,12 @@ bool FUnrealOpenMcpBridgeHttpServer::IsLoopbackAddress(const FString& Address)
 }
 
 FUnrealOpenMcpBridgeHttpServer::FUnrealOpenMcpBridgeHttpServer(
-	FUnrealOpenMcpGameThreadDispatcher& InDispatcher)
+	FUnrealOpenMcpGameThreadDispatcher& InDispatcher,
+	FUnrealOpenMcpToolRegistry& InToolRegistry,
+	FUnrealOpenMcpBridgeRequestQueue& InRequestQueue)
 	: Dispatcher(InDispatcher)
+	, ToolRegistry(InToolRegistry)
+	, RequestQueue(InRequestQueue)
 {
 }
 
@@ -267,42 +336,49 @@ void FUnrealOpenMcpBridgeHttpServer::HandleConnection(FSocket* Client)
 
 	FString Method;
 	FString Path;
-	const bool bParsed = ReadRequestLine(*Client, Method, Path);
+	FString AgentId;
+	TArray<uint8> Body;
+	const bool bParsed = ReadRequest(*Client, Method, Path, AgentId, Body);
 
 	if (!bParsed)
 	{
-		// Peer sent no complete request line within the window — close.
+		// Peer sent no complete request within the window — close.
 		Client->Close();
 		ISocketSubsystem::Get(PLATFORM_SOCKETSUBSYSTEM)->DestroySocket(Client);
 		return;
 	}
 
-	RouteRequest(Method, Path, *Client);
+	RouteRequest(Method, Path, AgentId, Body, *Client);
 
 	// HTTP/1.0 no keep-alive: always close after one request.
 	Client->Close();
 	ISocketSubsystem::Get(PLATFORM_SOCKETSUBSYSTEM)->DestroySocket(Client);
 }
 
-bool FUnrealOpenMcpBridgeHttpServer::ReadRequestLine(FSocket& Client, FString& OutMethod, FString& OutPath)
+bool FUnrealOpenMcpBridgeHttpServer::ReadRequest(
+	FSocket& Client, FString& OutMethod, FString& OutPath, FString& OutAgentId, TArray<uint8>& OutBody)
 {
-	// Minimal HTTP/1.1 request-line reader. Accumulates bytes until either the
-	// end of the request line (\r\n) or the timeout. We do not parse headers
-	// beyond the request line — /ping needs nothing from them, and P2.1's tool
-	// dispatch will grow a Content-Length reader when it actually needs a body.
+	// P2.1 full request reader. Accumulates bytes until the header terminator
+	// (\r\n\r\n), parses the request line + the two headers the bridge needs
+	// (Content-Length, X-Agent-Id), then reads the body. Serves both /ping
+	// (no body — Content-Length defaults to 0) and /tools/{name} (with body).
+	//
+	// All recv is on a non-blocking socket with a deadline, so a stalled peer
+	// can't hang the accept loop.
 	TArray<uint8> Accumulated;
 	Accumulated.Reserve(RecvBufferSize);
 
 	const double Deadline = FPlatformTime::Seconds() + RequestReadTimeoutSeconds;
 	uint8 Byte[1];
+	int32 HeaderEnd = INDEX_NONE;
 
+	// Phase 1: read until \r\n\r\n (end of headers).
 	while (FPlatformTime::Seconds() < Deadline)
 	{
 		int32 BytesRead = 0;
 		const bool bOk = Client.Recv(Byte, 1, BytesRead);
 		if (!bOk || BytesRead == 0)
 		{
-			// Non-blocking socket: keep polling while there is time left.
 			if (Client.GetConnectionState() == SCS_CONNECTION_ERROR)
 			{
 				return false;
@@ -313,55 +389,140 @@ bool FUnrealOpenMcpBridgeHttpServer::ReadRequestLine(FSocket& Client, FString& O
 
 		Accumulated.Add(Byte[0]);
 
-		// End of request line? (\r\n)
 		const int32 N = Accumulated.Num();
-		if (N >= 2 && Accumulated[N - 2] == '\r' && Accumulated[N - 1] == '\n')
+		if (N >= 4 && Accumulated[N - 4] == '\r' && Accumulated[N - 3] == '\n' &&
+			Accumulated[N - 2] == '\r' && Accumulated[N - 1] == '\n')
 		{
+			HeaderEnd = N;
 			break;
 		}
-		if (N >= RecvBufferSize)
+		if (N >= MaxBodyBytes)
 		{
-			// Request line too long — bail. A real /ping request is ~20 bytes.
-			return false;
+			return false; // headers alone exceed the cap — bail.
 		}
 	}
 
-	if (Accumulated.Num() < 2)
+	if (HeaderEnd == INDEX_NONE)
+	{
+		return false; // no complete header block within the window.
+	}
+
+	// Parse the header block as ASCII. Headers are ISO-8859-1/ASCII in
+	// practice; the body (read separately below) carries the UTF-8.
+	const FString HeaderBlock = FString(
+		UE_PTRDIFF_TO_INT32(HeaderEnd),
+		reinterpret_cast<const ANSICHAR*>(Accumulated.GetData()));
+
+	// Split into lines on CRLF. Line 0 is the request line; the rest are
+	// "Name: Value" headers until the trailing blank line.
+	TArray<FString> Lines;
+	HeaderBlock.ParseIntoArrayLines(Lines, false);
+	if (Lines.Num() < 1)
 	{
 		return false;
 	}
 
-	// Convert to a UTF-8 string and strip the trailing CRLF. Request lines are
-	// ASCII in practice.
-	const int32 LineLen = Accumulated.Num() - 2;
-	const FString RequestLine = FString(UE_PTRDIFF_TO_INT32(LineLen), reinterpret_cast<const ANSICHAR*>(Accumulated.GetData()));
-
-	// "METHOD SP request-target SP HTTP-version" (RFC 7230 §3.1.1). We split on
-	// spaces and ignore the HTTP-version token; the request-target is what we
-	// route on.
-	TArray<FString> Tokens;
-	RequestLine.ParseIntoArrayWS(Tokens);
-
-	if (Tokens.Num() < 2)
+	// Request line: "METHOD SP request-target SP HTTP-version".
+	TArray<FString> ReqTokens;
+	Lines[0].ParseIntoArrayWS(ReqTokens);
+	if (ReqTokens.Num() < 2)
 	{
 		return false;
 	}
+	OutMethod = ReqTokens[0];
+	OutPath = ReqTokens[1];
 
-	OutMethod = Tokens[0];
-	OutPath = Tokens[1];
+	// Walk the headers. Case-insensitive name match per RFC 7230 §3.2.
+	int32 ContentLength = 0;
+	OutAgentId.Reset();
+	for (int32 i = 1; i < Lines.Num(); ++i)
+	{
+		const FString& Line = Lines[i];
+		if (Line.IsEmpty())
+		{
+			continue;
+		}
+		const int32 ColonIdx = Line.Find(TEXT(":"), ESearchCase::CaseSensitive);
+		if (ColonIdx == INDEX_NONE)
+		{
+			continue;
+		}
+		FString Name = Line.Left(ColonIdx).TrimStartAndEnd();
+		FString Value = Line.Mid(ColonIdx + 1).TrimStartAndEnd();
+
+		if (Name.Equals(TEXT("Content-Length"), ESearchCase::IgnoreCase))
+		{
+			ContentLength = FCString::Atoi(*Value);
+		}
+		else if (Name.Equals(TEXT("X-Agent-Id"), ESearchCase::IgnoreCase))
+		{
+			OutAgentId = Value;
+		}
+	}
+
+	// Phase 2: read the body (Content-Length bytes). Bytes already buffered
+	// past the header terminator count toward the body.
+	OutBody.Reset();
+	const int32 AlreadyBuffered = Accumulated.Num() - HeaderEnd;
+	if (AlreadyBuffered > 0)
+	{
+		OutBody.Append(Accumulated.GetData() + HeaderEnd, AlreadyBuffered);
+	}
+
+	if (ContentLength < 0)
+	{
+		ContentLength = 0;
+	}
+	if (ContentLength > MaxBodyBytes)
+	{
+		return false; // refuse oversized bodies.
+	}
+
+	while (OutBody.Num() < ContentLength && FPlatformTime::Seconds() < Deadline)
+	{
+		int32 BytesRead = 0;
+		const int32 Want = FMath::Min<int32>(ContentLength - OutBody.Num(), RecvBufferSize);
+		TArray<uint8> Chunk;
+		Chunk.SetNumUninitialized(Want);
+		if (!Client.Recv(Chunk.GetData(), Want, BytesRead) || BytesRead == 0)
+		{
+			if (Client.GetConnectionState() == SCS_CONNECTION_ERROR)
+			{
+				return false;
+			}
+			FPlatformProcess::Sleep(RecvPollIntervalSeconds);
+			continue;
+		}
+		OutBody.Append(Chunk.GetData(), BytesRead);
+	}
+
+	if (OutBody.Num() < ContentLength)
+	{
+		return false; // body incomplete within the window.
+	}
+
+	// Anonymous agent fallback — mirrors Unity's ExtractAgentId synthetic id
+	// so hand-rolled curl traffic flows through the queue's single-agent path.
+	if (OutAgentId.IsEmpty())
+	{
+		OutAgentId = TEXT("agent-anon");
+	}
+
 	return true;
 }
 
-void FUnrealOpenMcpBridgeHttpServer::RouteRequest(const FString& Method, const FString& Path, FSocket& Client)
+void FUnrealOpenMcpBridgeHttpServer::RouteRequest(
+	const FString& Method, const FString& Path, const FString& AgentId,
+	const TArray<uint8>& Body, FSocket& Client)
 {
-	// P1.3 routing: /ping only. 405 for wrong-method /ping, 404 for everything
-	// else. Mirrors Unity's HandleRequest switch (case "/ping" default branch).
+	// Routing: /ping (P1.3) + /tools/{name} (P2.1). 405 for wrong-method on a
+	// known path, 404 for unknown paths. Mirrors Unity's HandleRequest switch.
 
-	// Trim a trailing slash so /ping and /ping/ both hit the ping handler.
+	// Trim trailing slashes so /ping and /ping/ both hit the ping handler.
 	FString NormalizedPath = Path;
 	while (NormalizedPath.Len() > 1 && NormalizedPath.EndsWith(TEXT("/")))
 	{
-		NormalizedPath.LeftChop(1);
+		NormalizedPath = NormalizedPath.LeftChop(1);
 	}
 
 	if (NormalizedPath == TEXT("/ping"))
@@ -375,6 +536,43 @@ void FUnrealOpenMcpBridgeHttpServer::RouteRequest(const FString& Method, const F
 			SendJson(Client, 405, FUnrealOpenMcpBridgeJson::BuildErrorJson(
 				TEXT("method_not_allowed"), TEXT("GET required for /ping")));
 		}
+		return;
+	}
+
+	// P2.1: POST /tools/{name} → tool dispatch. The tool name is the path
+	// segment after /tools/. Mirrors Unity's path.StartsWith("/tools/") branch.
+	if (NormalizedPath.StartsWith(TEXT("/tools/")))
+	{
+		FString ToolName = NormalizedPath.Mid(static_cast<int32>(FString(TEXT("/tools/")).Len()));
+		// Strip a trailing slash from the tool name too (/tools/echo/ → echo).
+		while (ToolName.EndsWith(TEXT("/")))
+		{
+			ToolName = ToolName.LeftChop(1);
+		}
+
+		if (Method != TEXT("POST"))
+		{
+			SendJson(Client, 405, FUnrealOpenMcpBridgeJson::BuildErrorJson(
+				TEXT("method_not_allowed"), TEXT("POST required for tool endpoints")));
+			return;
+		}
+
+		if (ToolName.IsEmpty())
+		{
+			// /tools/ with no name — route-level 404 (no tool to look up).
+			SendJson(Client, 404, FUnrealOpenMcpBridgeEnvelope::BuildToolNotFound(TEXT("")));
+			return;
+		}
+
+		if (!ToolRegistry.Contains(ToolName))
+		{
+			SendJson(Client, 404, FUnrealOpenMcpBridgeEnvelope::BuildToolNotFound(ToolName));
+			return;
+		}
+
+		// Decode the body to UTF-8 FString for the handler + JSON arg extraction.
+		const FString BodyText = FString(UE_PTRDIFF_TO_INT32(Body.Num()), reinterpret_cast<const ANSICHAR*>(Body.GetData()));
+		HandleToolDispatch(Client, ToolName, BodyText, AgentId);
 		return;
 	}
 
@@ -440,6 +638,129 @@ void FUnrealOpenMcpBridgeHttpServer::HandlePing(FSocket& Client)
 	SendJson(Client, 503, BodyJson);
 }
 
+void FUnrealOpenMcpBridgeHttpServer::HandleToolDispatch(
+	FSocket& Client, const FString& ToolName, const FString& Body, const FString& AgentId)
+{
+	// P2.1 tool dispatch. The handler runs on the GAME THREAD via the
+	// dispatcher — this is a pinned acceptance criterion (game-thread dispatch
+	// enforced). The HTTP listener worker thread blocks on the future here,
+	// same shape as HandlePing, but with a tool-specific timeout.
+	//
+	// Timeout resolution mirrors Unity's BridgeRequestBody.ExtractTimeoutMs:
+	//   request body timeout_ms → clamped to [Min, Max] → DefaultToolDispatchTimeoutMs
+	// when the field is absent. Hand-rolled substring parse (no FJsonObject) —
+	// consistent with the rest of the bridge's JSON philosophy.
+	const uint32 TimeoutMs = ExtractTimeoutMs(Body);
+
+	// Resolve the handler out here (registry lookup is cheap and does not need
+	// the game thread) so the dispatched body can capture it by value. If the
+	// tool vanished between RouteRequest's Contains check and here (registry
+	// mutated), fall back to tool_not_found.
+	FUnrealOpenMcpToolHandler Handler;
+	if (!ToolRegistry.TryGet(ToolName, Handler) || !Handler)
+	{
+		SendJson(Client, 404, FUnrealOpenMcpBridgeEnvelope::BuildToolNotFound(ToolName));
+		return;
+	}
+
+	// Marshal the handler onto the game thread via the dispatcher — pinned
+	// acceptance criterion (game-thread dispatch enforced). The dispatched body
+	// captures ONLY by value (Handler, Body) — never `this` — so it is safe
+	// even if the server is torn down between EnqueueAsync and the game thread
+	// draining the body. The dispatcher's single-completion guard absorbs a
+	// late body without a crash; reading through a dead `this` would be UB.
+	//
+	// The fair request queue (RequestQueue) is available on the listener thread
+	// for X-Agent-Id-keyed fairness accounting; in P2.1's single-stream
+	// listener every dispatch is serialized so the queue is exercised by its
+	// own spec and wired here for the concurrent-dispatch path a later phase
+	// adds. Capturing the agent id + tool name into the queue before dispatch
+	// keeps the bookkeeping on the listener thread (where `this` is alive),
+	// while the handler runs on the game thread with no `this` dependency.
+	RequestQueue.Submit(AgentId, ToolName, []() -> FUnrealOpenMcpToolDispatchResult
+	{
+		// Bookkeeping-only entry: Submit enqueues, picks, and runs this lambda
+		// inline on the listener thread. The real handler runs separately on
+		// the game thread (below). This exercises the queue's fairness path on
+		// every dispatch so the structure is live; when a concurrent dispatch
+		// path lands, the handler will run through Submit directly.
+		return FUnrealOpenMcpToolDispatchResult::Ok();
+	});
+
+	auto GameThreadBody = [Handler = MoveTemp(Handler), Body = Body]() -> FUnrealOpenMcpToolDispatchResult
+	{
+		return Handler(Body);
+	};
+
+	TFuture<TUnrealOpenMcpDispatchResult<FUnrealOpenMcpToolDispatchResult>> Future =
+		Dispatcher.EnqueueAsync<FUnrealOpenMcpToolDispatchResult>(MoveTemp(GameThreadBody), TimeoutMs);
+
+	const TUnrealOpenMcpDispatchResult<FUnrealOpenMcpToolDispatchResult> Result = Future.Get();
+
+	// Map the dispatcher outcome to the canonical envelope. A Success means the
+	// body ran (the handler returned its own Ok/Fail); every other outcome is a
+	// dispatch-level failure mapped to a distinct error code.
+	if (Result.Result == EUnrealOpenMcpDispatchResult::Success)
+	{
+		const FUnrealOpenMcpToolDispatchResult& ToolResult = Result.Value.Get(FUnrealOpenMcpToolDispatchResult::Fail(
+			TEXT("empty_output"), TEXT("Tool returned no result.")));
+
+		if (ToolResult.bOk)
+		{
+			SendJson(Client, 200, FUnrealOpenMcpBridgeEnvelope::BuildSuccess(ToolResult.Output));
+		}
+		else
+		{
+			// Tool ran and returned a structured failure (e.g. invalid_request,
+			// execution_error). HTTP 200 with {ok:false} — structured tool
+			// outcomes are never transport failures (mirrors Unity's envelope
+			// discipline).
+			SendJson(Client, 200, FUnrealOpenMcpBridgeEnvelope::BuildError(ToolResult.Code, ToolResult.Message));
+		}
+		return;
+	}
+
+	// Dispatch-level failure: game thread blocked, timeout, faulted body, or
+	// dispatcher shutdown. Each maps to a distinct error code so an agent can
+	// branch on the cause. All return HTTP 200 with {ok:false} — structured
+	// outcomes ride 200, never transport-error status codes.
+	switch (Result.Result)
+	{
+		case EUnrealOpenMcpDispatchResult::GameThreadBlocked:
+			SendJson(Client, 200, FUnrealOpenMcpBridgeEnvelope::BuildError(
+				TEXT("game_thread_blocked"),
+				FString::Printf(
+					TEXT("Tool '%s' could not run — the Unreal game thread is blocked (a modal dialog or long editor operation)."),
+					*ToolName)));
+			return;
+		case EUnrealOpenMcpDispatchResult::Timeout:
+			SendJson(Client, 200, FUnrealOpenMcpBridgeEnvelope::BuildError(
+				TEXT("timeout"),
+				FString::Printf(TEXT("Tool '%s' timed out after %u ms."), *ToolName, TimeoutMs)));
+			return;
+		case EUnrealOpenMcpDispatchResult::Faulted:
+			SendJson(Client, 200, FUnrealOpenMcpBridgeEnvelope::BuildError(
+				TEXT("execution_error"),
+				Result.Message.IsEmpty()
+					? FString::Printf(TEXT("Tool '%s' faulted during execution."), *ToolName)
+					: Result.Message));
+			return;
+		case EUnrealOpenMcpDispatchResult::DispatcherShutdown:
+			SendJson(Client, 200, FUnrealOpenMcpBridgeEnvelope::BuildError(
+				TEXT("dispatcher_shutdown"),
+				FString::Printf(
+					TEXT("Tool '%s' could not run — the game-thread dispatcher is shutting down (editor teardown)."),
+					*ToolName)));
+			return;
+		default:
+			// Unknown dispatcher state — internal bridge error (HTTP 500).
+			SendJson(Client, 500, FUnrealOpenMcpBridgeJson::BuildErrorJson(
+				TEXT("bridge_internal_error"),
+				TEXT("Unhandled dispatch state for tool.")));
+			return;
+	}
+}
+
 bool FUnrealOpenMcpBridgeHttpServer::WriteAll(FSocket& Client, const uint8* Data, int32 Size)
 {
 	int32 Sent = 0;
@@ -473,8 +794,10 @@ void FUnrealOpenMcpBridgeHttpServer::SendJson(FSocket& Client, uint16 StatusCode
 	switch (StatusCode)
 	{
 		case 200: Reason = TEXT("OK"); break;
+		case 400: Reason = TEXT("Bad Request"); break;
 		case 404: Reason = TEXT("Not Found"); break;
 		case 405: Reason = TEXT("Method Not Allowed"); break;
+		case 500: Reason = TEXT("Internal Server Error"); break;
 		case 503: Reason = TEXT("Service Unavailable"); break;
 		default:  Reason = TEXT("OK"); break;
 	}

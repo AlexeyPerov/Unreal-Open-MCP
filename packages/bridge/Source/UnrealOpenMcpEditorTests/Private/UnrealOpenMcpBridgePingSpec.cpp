@@ -25,8 +25,10 @@
 
 #include "Bridge/UnrealOpenMcpBridgeHttpServer.h"
 #include "Bridge/UnrealOpenMcpBridgeJson.h"
+#include "Bridge/UnrealOpenMcpBridgeRequestQueue.h"
 #include "Bridge/UnrealOpenMcpBridgeSession.h"
 #include "Bridge/UnrealOpenMcpInstancePortResolver.h"
+#include "Bridge/UnrealOpenMcpToolRegistry.h"
 #include "Dispatch/UnrealOpenMcpGameThreadDispatcher.h"
 
 #include "Common/TcpSocketBuilder.h"
@@ -121,17 +123,34 @@ namespace
 
 	// Spin an HTTP server on a kernel-assigned ephemeral port. Returns null on
 	// failure. Caller owns the lifetime.
-	FUnrealOpenMcpBridgeHttpServer* StartEphemeralServer(
-		FUnrealOpenMcpGameThreadDispatcher& Dispatcher, const FString& ProjectPath)
+	//
+	// P2.1: the server now takes a registry + queue alongside the dispatcher.
+	// The ping tests don't exercise tools, so empty registry/queue are fine —
+	// they just need to outlive the server. The harness struct owns all three
+	// so the caller deletes only the harness and the destruction order
+	// (server-first) is correct.
+	struct FPingHarness
 	{
-		auto* Server = new FUnrealOpenMcpBridgeHttpServer(Dispatcher);
-		if (!Server->Start(/*Port*/ 0, ProjectPath))
+		FUnrealOpenMcpGameThreadDispatcher Dispatcher;
+		FUnrealOpenMcpToolRegistry Registry;
+		FUnrealOpenMcpBridgeRequestQueue Queue;
+		FUnrealOpenMcpBridgeHttpServer* Server = nullptr;
+
+		bool Start(const FString& ProjectPath)
 		{
-			delete Server;
-			return nullptr;
+			Server = new FUnrealOpenMcpBridgeHttpServer(Dispatcher, Registry, Queue);
+			return Server->Start(0, ProjectPath);
 		}
-		return Server;
-	}
+
+		~FPingHarness()
+		{
+			if (Server)
+			{
+				Server->Stop();
+				delete Server;
+			}
+		}
+	};
 }
 
 void FUnrealOpenMcpBridgePingSpec::Define()
@@ -193,15 +212,14 @@ void FUnrealOpenMcpBridgePingSpec::Define()
 			{
 				Async(EAsyncExecution::Thread, [this, Done]()
 				{
-					FUnrealOpenMcpGameThreadDispatcher Dispatcher;
-					FUnrealOpenMcpBridgeHttpServer* Server = StartEphemeralServer(Dispatcher, TEXT("/tmp/test-project"));
-					if (!TestNotNull(TEXT("ephemeral server started"), Server))
+					FPingHarness Harness;
+					if (!TestTrue(TEXT("ephemeral server started"), Harness.Start(TEXT("/tmp/test-project"))))
 					{
 						Done.Execute();
 						return;
 					}
 
-					const uint16 Port = Server->GetPort();
+					const uint16 Port = Harness.Server->GetPort();
 					TestTrue(TEXT("ephemeral port assigned"), Port > 0);
 
 					const FString Response = SendRawHttpRequest(Port, TEXT("GET"), TEXT("/ping"));
@@ -240,8 +258,6 @@ void FUnrealOpenMcpBridgePingSpec::Define()
 						TEXT("port echoed"),
 						Body.Contains(FString::Printf(TEXT("\"port\":%u"), static_cast<uint32>(Port))));
 
-					Server->Stop();
-					delete Server;
 					Done.Execute();
 				});
 			});
@@ -256,20 +272,17 @@ void FUnrealOpenMcpBridgePingSpec::Define()
 			{
 				Async(EAsyncExecution::Thread, [this, Done]()
 				{
-					FUnrealOpenMcpGameThreadDispatcher Dispatcher;
-					FUnrealOpenMcpBridgeHttpServer* Server = StartEphemeralServer(Dispatcher, TEXT("/tmp/test-project"));
-					if (!TestNotNull(TEXT("ephemeral server started"), Server))
+					FPingHarness Harness;
+					if (!TestTrue(TEXT("ephemeral server started"), Harness.Start(TEXT("/tmp/test-project"))))
 					{
 						Done.Execute();
 						return;
 					}
 
-					const FString Response = SendRawHttpRequest(Server->GetPort(), TEXT("POST"), TEXT("/ping"));
+					const FString Response = SendRawHttpRequest(Harness.Server->GetPort(), TEXT("POST"), TEXT("/ping"));
 					TestEqual(TEXT("HTTP 405"), ExtractHttpStatus(Response), uint16(405));
 					TestTrue(TEXT("method_not_allowed code"), ExtractHttpBody(Response).Contains(TEXT("\"method_not_allowed\"")));
 
-					Server->Stop();
-					delete Server;
 					Done.Execute();
 				});
 			});
@@ -283,20 +296,17 @@ void FUnrealOpenMcpBridgePingSpec::Define()
 			{
 				Async(EAsyncExecution::Thread, [this, Done]()
 				{
-					FUnrealOpenMcpGameThreadDispatcher Dispatcher;
-					FUnrealOpenMcpBridgeHttpServer* Server = StartEphemeralServer(Dispatcher, TEXT("/tmp/test-project"));
-					if (!TestNotNull(TEXT("ephemeral server started"), Server))
+					FPingHarness Harness;
+					if (!TestTrue(TEXT("ephemeral server started"), Harness.Start(TEXT("/tmp/test-project"))))
 					{
 						Done.Execute();
 						return;
 					}
 
-					const FString Response = SendRawHttpRequest(Server->GetPort(), TEXT("GET"), TEXT("/nope"));
+					const FString Response = SendRawHttpRequest(Harness.Server->GetPort(), TEXT("GET"), TEXT("/nope"));
 					TestEqual(TEXT("HTTP 404"), ExtractHttpStatus(Response), uint16(404));
 					TestTrue(TEXT("not_found code"), ExtractHttpBody(Response).Contains(TEXT("\"not_found\"")));
 
-					Server->Stop();
-					delete Server;
 					Done.Execute();
 				});
 			});
@@ -310,19 +320,16 @@ void FUnrealOpenMcpBridgePingSpec::Define()
 			{
 				Async(EAsyncExecution::Thread, [this, Done]()
 				{
-					FUnrealOpenMcpGameThreadDispatcher Dispatcher;
-					FUnrealOpenMcpBridgeHttpServer* Server = StartEphemeralServer(Dispatcher, TEXT("/tmp/test-project"));
-					if (!TestNotNull(TEXT("ephemeral server started"), Server))
+					FPingHarness Harness;
+					if (!TestTrue(TEXT("ephemeral server started"), Harness.Start(TEXT("/tmp/test-project"))))
 					{
 						Done.Execute();
 						return;
 					}
 
-					const FString Response = SendRawHttpRequest(Server->GetPort(), TEXT("GET"), TEXT("/ping/"));
+					const FString Response = SendRawHttpRequest(Harness.Server->GetPort(), TEXT("GET"), TEXT("/ping/"));
 					TestEqual(TEXT("HTTP 200"), ExtractHttpStatus(Response), uint16(200));
 
-					Server->Stop();
-					delete Server;
 					Done.Execute();
 				});
 			});
@@ -335,7 +342,9 @@ void FUnrealOpenMcpBridgePingSpec::Define()
 		It("survives Start/Stop/Start without leaking or crashing", [this]()
 		{
 			FUnrealOpenMcpGameThreadDispatcher Dispatcher;
-			FUnrealOpenMcpBridgeHttpServer Server(Dispatcher);
+			FUnrealOpenMcpToolRegistry Registry;
+			FUnrealOpenMcpBridgeRequestQueue Queue;
+			FUnrealOpenMcpBridgeHttpServer Server(Dispatcher, Registry, Queue);
 
 			TestTrue(TEXT("first Start"), Server.Start(0, TEXT("/tmp/lifecycle")));
 			TestTrue(TEXT("running after first Start"), Server.IsRunning());
@@ -362,7 +371,9 @@ void FUnrealOpenMcpBridgePingSpec::Define()
 		It("treats Start on a running server as a no-op", [this]()
 		{
 			FUnrealOpenMcpGameThreadDispatcher Dispatcher;
-			FUnrealOpenMcpBridgeHttpServer Server(Dispatcher);
+			FUnrealOpenMcpToolRegistry Registry;
+			FUnrealOpenMcpBridgeRequestQueue Queue;
+			FUnrealOpenMcpBridgeHttpServer Server(Dispatcher, Registry, Queue);
 
 			TestTrue(TEXT("first Start"), Server.Start(0, TEXT("/tmp/idempotent")));
 			const uint16 FirstPort = Server.GetPort();

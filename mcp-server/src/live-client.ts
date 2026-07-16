@@ -1,14 +1,22 @@
 // LiveClient — routes MCP tool calls to the live Unreal bridge over loopback HTTP.
 //
-// P1.7 scope: the `unreal_open_mcp_ping` round-trip only.
-//   route("unreal_open_mcp_ping", {}) → handlePing() → GET /ping
+// P2.1 scope: `unreal_open_mcp_ping` → GET /ping, and every other tool →
+// POST /tools/{name} with the canonical {ok, result, error} envelope.
+//   route("unreal_open_mcp_ping", {})   → handlePing()    → GET /ping
+//   route("unreal_open_mcp_<other>", {}) → postTool()     → POST /tools/<other>
 //
-// Every other tool name returns a structured `tool_not_routed` error. Tool
-// dispatch (`POST /tools/{name}`), the compile-wait/503 retry loop, gate
-// envelopes, PingCache, and endpoint-refresh all land in later phases — the
-// bridge itself does not serve `/tools/*` yet (P2.1). Keeping this surface
-// narrow now means a single, honest E2E probe that the P1.9 smoke baseline can
-// rely on.
+// The bridge's POST /tools/{name} dispatch returns one of:
+//   - HTTP 200 {"ok":true,"result":<value>}    → success (result verbatim)
+//   - HTTP 200 {"ok":false,"error":{code,msg}} → structured tool failure
+//   - HTTP 404 {"error":{code:"tool_not_found",...}} → unknown tool (routing)
+//   - HTTP 405 {"error":{code:"method_not_allowed",...}} → wrong method
+//   - HTTP 500 {"error":{code:"bridge_internal_error",...}} → bridge fault
+//
+// postTool unwraps the {ok,result} success body as the tool output and maps
+// {ok:false} + HTTP error bodies to a structured MCP error result carrying the
+// bridge's own error code/message. The bridge envelope and the MCP
+// CallToolResult are distinct shapes — the bridge owns ok/error, the MCP
+// wrapper owns content[]/isError.
 //
 // Failure classification (the load-bearing contract):
 //   - bridge_offline     → the bridge is not reachable. ECONNREFUSED, DNS, or a
@@ -24,15 +32,15 @@
 //                          Carries the bridge's own error body when it sent one.
 //
 // Adapted from Unity Open MCP's mcp-server/src/live-client.ts (copy fidelity,
-// P1.7). Intentional deltas:
+// P1.7 + P2.1). Intentional deltas:
 //   - `unrealVersion` in PingResponse (not `unityVersion`), plus `status` /
 //     `port` fields the Unreal bridge emits.
 //   - Minimal class: no PingCache, no compile-wait, no gate envelopes, no
 //     endpoint-refresh. The Unity client grew those over many milestones; this
 //     port adds them as later phases require.
-//   - `tool_not_routed` for non-ping tools is explicit and terminal here (the
-//     Unity client falls through to POST /tools/{name}); the Unreal bridge has
-//     no tool-dispatch endpoint until P2.1.
+//   - Canonical {ok,result,error} envelope (P2.1) instead of Unity's
+//     {mutation,gate} — simpler for P2.1, widens in P3.5 but ok+error.code
+//     stay stable.
 //   - Offline hint points at `~/.unreal-open-mcp/instances/...`.
 
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
@@ -43,8 +51,8 @@ export type { CallToolResult };
 
 /**
  * Live tool router. The MCP server holds one instance per session and dispatches
- * `unreal_open_mcp_*` tool calls through it. Only `unreal_open_mcp_ping` is
- * routed in P1.7; other names return `tool_not_routed`.
+ * `unreal_open_mcp_*` tool calls through it. `unreal_open_mcp_ping` routes to
+ * GET /ping; every other tool routes to POST /tools/{name} (P2.1).
  */
 export interface Router {
   route(
@@ -52,6 +60,28 @@ export interface Router {
     args: Record<string, unknown>,
   ): Promise<CallToolResult>;
 }
+
+/**
+ * Bridge tool-dispatch success envelope (HTTP 200 from POST /tools/{name}):
+ *   {"ok":true,"result":<value>}
+ * `result` is a raw JSON value (object, array, string, number, bool, null).
+ */
+interface ToolDispatchOk {
+  ok: true;
+  result: unknown;
+}
+
+/**
+ * Bridge tool-dispatch failure envelope (HTTP 200 from POST /tools/{name}):
+ *   {"ok":false,"error":{"code":"...","message":"..."}}
+ */
+interface ToolDispatchErr {
+  ok: false;
+  error: { code: string; message: string };
+}
+
+/** Union of the two P2.1 tool-dispatch envelopes. */
+type ToolDispatchEnvelope = ToolDispatchOk | ToolDispatchErr;
 
 /**
  * /ping response body shape emitted by the Unreal bridge
@@ -94,6 +124,16 @@ interface HttpErrorBody {
 
 /** Default /ping fetch timeout. Short because /ping is a readiness probe. */
 export const PING_TIMEOUT_MS = 5_000;
+
+/** Default tool-dispatch fetch timeout (POST /tools/{name}). Mirrors the
+ *  bridge's DefaultToolDispatchTimeoutMs (30s). A request's optional timeout_ms
+ *  overrides this when present. */
+export const TOOL_TIMEOUT_MS = 30_000;
+
+/** Floor for a per-request tool timeout so a sub-second value never aborts
+ *  before the bridge has a chance to respond. Mirrors the bridge's
+ *  MinToolDispatchTimeoutMs. */
+export const MIN_TOOL_TIMEOUT_MS = 1_000;
 
 /** Loopback host the Unreal bridge binds. Mirrors the C++ Loopback constant. */
 export const LOOPBACK_HOST = "127.0.0.1";
@@ -158,26 +198,143 @@ export class LiveClient implements Router {
   }
 
   /**
-   * Route a tool call. P1.7 routes `unreal_open_mcp_ping` to `GET /ping`; every
-   * other name returns a structured `tool_not_routed` error. The error is
-   * terminal (no fallback) because the Unreal bridge has no tool-dispatch
-   * endpoint yet — that lands in P2.1.
+   * Route a tool call. `unreal_open_mcp_ping` routes to GET /ping (P1.7);
+   * every other tool routes to POST /tools/{name} (P2.1) where the bridge
+   * resolves the handler and returns the canonical {ok,result,error} envelope.
    */
   async route(
     toolName: string,
-    _args: Record<string, unknown>,
+    args: Record<string, unknown>,
   ): Promise<CallToolResult> {
     if (toolName === "unreal_open_mcp_ping") {
       return this.handlePing();
     }
+    return this.postTool(toolName, args);
+  }
+
+  /**
+   * POST a tool call to the bridge's /tools/{name} endpoint and unwrap the
+   * canonical {ok, result, error} envelope into an MCP CallToolResult.
+   *
+   * Success (HTTP 200 + ok:true) → the `result` value is returned verbatim as
+   * a text content block (isError:false). Failure is split by where it
+   * originates:
+   *   - HTTP 200 + ok:false → the bridge ran the tool and it returned a
+   *     structured failure; the error code/message ride through as a
+   *     CallToolResult error so an agent sees the tool-specific cause.
+   *   - HTTP 404 (tool_not_found) / 405 (method_not_allowed) → bridge-level
+   *     routing errors; surfaced as bridge_http_error carrying the body.
+   *   - connect/timeout/abort → bridge_offline / bridge_timeout (same
+   *     classification as /ping).
+   */
+  private async postTool(
+    toolName: string,
+    args: Record<string, unknown>,
+  ): Promise<CallToolResult> {
+    let res: Response;
+    try {
+      res = await this.fetchWithTimeout(
+        `/tools/${toolName}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json; charset=utf-8" },
+          body: JSON.stringify(args),
+        },
+        this.getToolTimeoutMs(args),
+      );
+    } catch (err) {
+      if (isAbortError(err)) {
+        return makeErrorResult({
+          code: "bridge_timeout",
+          message:
+            `Bridge did not respond to POST /tools/${toolName} within the ` +
+            `timeout. The bridge listener at ${this.baseUrl} accepted the ` +
+            `connection but did not return — the editor may be blocked (modal ` +
+            `dialog, heavy compile) or the tool handler ran past the timeout. ` +
+            `${buildOfflineHint(this.projectPath)}`,
+        });
+      }
+      return makeErrorResult({
+        code: "bridge_offline",
+        message:
+          `Bridge is not reachable at ${this.baseUrl} for POST /tools/${toolName}. ` +
+          `The editor may not be running, or the bridge is on a different port. ` +
+          `${buildOfflineHint(this.projectPath)}`,
+      });
+    }
+
+    // Non-OK HTTP status → bridge-level routing/transport error (404
+    // tool_not_found, 405 method_not_allowed, 500 bridge_internal_error).
+    // Surface the bridge's own error body so the agent sees the specific code.
+    if (!res.ok) {
+      const body = (await res.json().catch(() => null)) as
+        | { error?: { code?: string; message?: string } }
+        | null;
+      const code = body?.error?.code ?? "bridge_http_error";
+      const message =
+        body?.error?.message ??
+        `Bridge POST /tools/${toolName} returned HTTP ${res.status}.`;
+      return makeErrorResult({
+        code,
+        message:
+          `${message} Endpoint: ${this.baseUrl}. ` +
+          `${buildOfflineHint(this.projectPath)}`,
+        detail: body ?? {
+          error: { code: "bridge_http_error", message: `HTTP ${res.status}` },
+        },
+      });
+    }
+
+    // HTTP 200 → parse the {ok, result, error} envelope.
+    let envelope: ToolDispatchEnvelope | null = null;
+    try {
+      envelope = (await res.json()) as ToolDispatchEnvelope;
+    } catch {
+      return makeErrorResult({
+        code: "bridge_response_unparsable",
+        message:
+          `Bridge POST /tools/${toolName} returned HTTP 200 but the response ` +
+          `body was not valid JSON. The bridge may have been torn down ` +
+          `mid-response (editor shutdown / reload). Endpoint: ${this.baseUrl}.`,
+      });
+    }
+
+    if (envelope == null || typeof envelope !== "object") {
+      return makeErrorResult({
+        code: "bridge_response_unparsable",
+        message:
+          `Bridge POST /tools/${toolName} returned a non-object envelope. ` +
+          `Endpoint: ${this.baseUrl}.`,
+      });
+    }
+
+    // ok:true → success. Return the `result` value verbatim as a text block.
+    if (envelope.ok === true) {
+      return {
+        content: [{ type: "text", text: JSON.stringify(envelope.result) }],
+        isError: false,
+      };
+    }
+
+    // ok:false → structured tool failure. The bridge ran the tool and it
+    // returned its own error code/message; surface both so an agent can branch
+    // on the tool-specific cause (e.g. invalid_request, execution_error).
+    const err = envelope.error ?? { code: "unknown", message: "No error detail." };
     return makeErrorResult({
-      code: "tool_not_routed",
-      message:
-        `Tool '${toolName}' is not routed to the live bridge. The bridge does ` +
-        `not serve tool dispatch yet (POST /tools/{name} lands in a later ` +
-        `phase); only 'unreal_open_mcp_ping' is live-routed today. Endpoint: ` +
-        `${this.baseUrl}.`,
+      code: err.code,
+      message: err.message,
     });
+  }
+
+  /**
+   * Per-tool fetch timeout. Honors the request's optional timeout_ms (floored
+   * at a minimum so a sub-second value never aborts before the bridge can
+   * respond), falling back to the default tool timeout. Protected so tests can
+   * drive a fast abort.
+   */
+  protected getToolTimeoutMs(args: Record<string, unknown>): number {
+    const requested = typeof args.timeout_ms === "number" ? args.timeout_ms : TOOL_TIMEOUT_MS;
+    return Math.max(requested, MIN_TOOL_TIMEOUT_MS);
   }
 
   /**

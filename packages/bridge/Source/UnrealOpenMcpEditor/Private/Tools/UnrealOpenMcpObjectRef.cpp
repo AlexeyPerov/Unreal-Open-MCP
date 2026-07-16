@@ -128,4 +128,47 @@ namespace FUnrealOpenMcpObjectRef
 
 		return FindFirstObject<UClass>(*ClassRef, EFindFirstObjectOptions::None);
 	}
+
+	UObject* ResolveObject(const FString& ObjectRef, UWorld* World)
+	{
+		if (ObjectRef.IsEmpty())
+		{
+			return nullptr;
+		}
+
+		// 1. A live actor (by label/name/path) takes precedence so `object_*`
+		//    can target scene actors just like the actor tools. ResolveActor
+		//    sweeps the editor world, so a ref that resolves in actor_modify
+		//    also resolves here.
+		if (AActor* Actor = ResolveActor(ObjectRef, World))
+		{
+			return Actor;
+		}
+
+		// 2. Already-loaded object by path. FindFirstObject is the UE5
+		//    non-deprecated lookup (FindObject is deprecated); EFindFirstObject
+		//    options = None matches ResolveClass's last-resort lookup.
+		if (UObject* Found = FindFirstObject<UObject>(*ObjectRef, EFindFirstObjectOptions::None))
+		{
+			return Found;
+		}
+
+		// 3. Soft path load — an asset on disk not yet in memory. TryLoad
+		//    returns a UObject* (any class); null when the path is malformed
+		//    or points at nothing.
+		if (UObject* Loaded = FSoftObjectPath(ObjectRef).TryLoad())
+		{
+			return Loaded;
+		}
+
+		// 4. Last-resort fallback for refs that FSoftObjectPath's strict
+		//    parsing rejects (e.g. legacy `Package.Object` short forms).
+		//    Overlaps TryLoad for well-formed paths; kept for that long tail.
+		//    LOAD_NoWarn | LOAD_Quiet (matching ResolveClass): every
+		//    object-modify miss funnels through here, so without the flags a
+		//    legitimate "not found" emits a spurious LogUObjectGlobals warning.
+		return StaticLoadObject(
+			UObject::StaticClass(), nullptr, *ObjectRef, nullptr,
+			LOAD_NoWarn | LOAD_Quiet);
+	}
 }

@@ -1,7 +1,8 @@
 // Actor-tool family — see header for the find/resolve contract and the
-// targeted-miss-vs-error semantics. This file owns the `actor_find` and
-// `actor_create` handlers plus the shared actor-data serializer (`ToActorData`)
-// that later actor tools (modify / tree ops) will reuse for consistent output.
+// targeted-miss-vs-error semantics. This file owns the `actor_find`,
+// `actor_create`, `actor_modify`, and `object_modify` handlers plus the shared
+// actor-data serializer (`ToActorData`) that later actor tools (tree ops) will
+// reuse for consistent output.
 //
 // Arg parsing: each handler receives the raw POST body FString (the registry
 // contract is raw-body; each tool owns its arg extraction). The handlers parse
@@ -17,6 +18,8 @@
 
 #include "Bridge/UnrealOpenMcpToolRegistry.h"
 #include "Tools/UnrealOpenMcpObjectRef.h"
+// P2.4 — shared FProperty write helper used by actor_modify + object_modify.
+#include "Tools/UnrealOpenMcpPropertyJson.h"
 #include "UnrealOpenMcpLog.h"
 
 #include "GameFramework/Actor.h"
@@ -27,7 +30,8 @@
 #include "Components/SceneComponent.h"
 // P2.3 — actor_create wraps the spawn in FScopedTransaction so the new actor
 // is undoable from the editor (Ctrl+Z). Mirrors Unity's
-// Undo.RegisterCreatedObjectUndo at the transaction granularity.
+// Undo.RegisterCreatedObjectUndo at the transaction granularity. P2.4 reuses
+// it for actor_modify / object_modify so property writes group as one undo.
 #include "ScopedTransaction.h"
 // P2.3 — SetActorLabelUnique avoids label collisions that would make two
 // actors ambiguous to ResolveActor (label → name → path). Lives in UnrealEd.
@@ -551,8 +555,258 @@ void FUnrealOpenMcpActorTools::Register(FUnrealOpenMcpToolRegistry& Registry)
 				WriteJson(MakeShared<FJsonValueObject>(Result)));
 		});
 
+	// unreal_open_mcp_actor_modify — FProperty writes on resolved actor(s).
+	// Two targeting shapes:
+	//   (a) single: `actor` ref string (label → name → path).
+	//   (b) batch:  `actors` array of refs → apply the same patches to each.
+	// Each actor is resolved BEFORE the transaction opens so a bad ref returns
+	// actor_not_found with nothing mutated (resolve-before-mutate, the same
+	// leak-prevention invariant as actor_create's parent resolution). The
+	// `properties` object is a flat name→value bag; per-field errors accumulate
+	// in `errors[]` and do NOT abort the batch (partial success is the norm).
+	// Transform shortcuts (location/rotation/scale) live INSIDE `properties`
+	// and are routed to the actor transform APIs by the shared helper — they
+	// are not top-level args (matches the behavior reference's single bag).
+	//
+	// Wrapped in FScopedTransaction for editor Undo. `paths_hint` + `gate` are
+	// accepted on the schema for forward-compat but NOT enforced until P3.5
+	// (documented P2.4 deferral).
+	// Structured errors:
+	//   - missing_parameter — neither `actor` nor `actors` supplied
+	//   - no_editor_world   — no GEditor / editor world
+	//   - actor_not_found   — a ref did not resolve (nothing mutated)
+	Registry.Register(
+		TEXT("unreal_open_mcp_actor_modify"),
+		[](const FString& Body) -> FUnrealOpenMcpToolDispatchResult
+		{
+			TSharedPtr<FJsonObject> Args = ParseBody(Body);
+			if (!Args.IsValid())
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("invalid_parameter"),
+					TEXT("Request body was not a valid JSON object."));
+			}
+
+			// Collect target refs. `actor` (single) and `actors` (array) are
+			// mutually informative: a single `actor` is the common case; an
+			// `actors` array fans the same patches out to each. An empty set is
+			// a structured missing_parameter so an agent can tell it forgot the
+			// target from "the ref didn't resolve".
+			TArray<FString> Refs;
+			if (Args->HasTypedField<EJson::String>(TEXT("actor")))
+			{
+				Refs.Add(Args->GetStringField(TEXT("actor")));
+			}
+			if (Args->HasTypedField<EJson::Array>(TEXT("actors")))
+			{
+				const TArray<TSharedPtr<FJsonValue>>* Arr = nullptr;
+				Args->TryGetArrayField(TEXT("actors"), Arr);
+				if (Arr != nullptr)
+				{
+					for (const TSharedPtr<FJsonValue>& V : *Arr)
+					{
+						if (V.IsValid() && V->Type == EJson::String)
+						{
+							const FString S = V->AsString();
+							if (!S.IsEmpty())
+							{
+								Refs.Add(S);
+							}
+						}
+					}
+				}
+			}
+			if (Refs.Num() == 0)
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("missing_parameter"),
+					TEXT("Either 'actor' (string) or 'actors' (array of strings) is required."));
+			}
+
+			UWorld* World = FUnrealOpenMcpObjectRef::GetEditorWorld();
+			if (World == nullptr)
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("no_editor_world"),
+					TEXT("No editor world is available. Open a level in the Unreal Editor."));
+			}
+
+			// Resolve every target BEFORE opening the transaction. A miss returns
+			// actor_not_found with nothing mutated — opening the transaction first
+			// would push an empty/partial entry onto the undo stack.
+			TArray<AActor*> Targets;
+			Targets.Reserve(Refs.Num());
+			for (const FString& Ref : Refs)
+			{
+				AActor* Resolved = FUnrealOpenMcpObjectRef::ResolveActor(Ref, World);
+				if (Resolved == nullptr)
+				{
+					return FUnrealOpenMcpToolDispatchResult::Fail(
+						TEXT("actor_not_found"),
+						FString::Printf(
+							TEXT("Actor '%s' was not found; nothing was modified."),
+							*Ref));
+				}
+				Targets.Add(Resolved);
+			}
+
+			// The properties bag is required — without it the call is a no-op
+			// and almost certainly a caller mistake. An empty object {} is
+			// valid (applies nothing, returns applied:0) so an agent can probe
+			// resolution; only a missing/non-object field is an error.
+			if (!Args->HasTypedField<EJson::Object>(TEXT("properties")))
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("missing_parameter"),
+					TEXT("'properties' object is required (use an empty object {} to probe resolution)."));
+			}
+			const TSharedPtr<FJsonObject>* PropsPtr = nullptr;
+			Args->TryGetObjectField(TEXT("properties"), PropsPtr);
+			if (PropsPtr == nullptr || !PropsPtr->IsValid())
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("invalid_parameter"),
+					TEXT("'properties' must be a JSON object of name -> value pairs."));
+			}
+			const TSharedPtr<FJsonObject>& Properties = *PropsPtr;
+
+			const FScopedTransaction Transaction(
+				NSLOCTEXT("UnrealOpenMcp", "ActorModify", "MCP: Modify Actor"));
+
+			int32 TotalApplied = 0;
+			TArray<FString> Errors;
+			TArray<TSharedPtr<FJsonValue>> ActorResults;
+			for (AActor* Actor : Targets)
+			{
+				TArray<FString> PerActorErrors;
+				const int32 Applied = FUnrealOpenMcpPropertyJson::ApplyProperties(Actor, Properties, PerActorErrors);
+				TotalApplied += Applied;
+				Errors.Append(PerActorErrors);
+
+				// Per-actor entry so a batch result stays attributable: the
+				// agent can see which actor got which applied count and errors.
+				// A single-actor call still emits the array (length 1) so the
+				// shape is uniform across single/batch.
+				TSharedRef<FJsonObject> Entry = MakeShared<FJsonObject>();
+				Entry->SetStringField(TEXT("label"), Actor->GetActorLabel());
+				Entry->SetStringField(TEXT("path"), Actor->GetPathName());
+				Entry->SetNumberField(TEXT("applied"), Applied);
+				Entry->SetObjectField(TEXT("actor"), ToActorData(Actor, /*bIncludeComponents=*/false));
+				ActorResults.Add(MakeShared<FJsonValueObject>(Entry));
+			}
+
+			TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+			Result->SetNumberField(TEXT("applied"), TotalApplied);
+			Result->SetArrayField(TEXT("actors"), ActorResults);
+			if (Errors.Num() > 0)
+			{
+				TArray<TSharedPtr<FJsonValue>> ErrorValues;
+				ErrorValues.Reserve(Errors.Num());
+				for (const FString& E : Errors)
+				{
+					ErrorValues.Add(MakeShared<FJsonValueString>(E));
+				}
+				Result->SetArrayField(TEXT("errors"), ErrorValues);
+			}
+			return FUnrealOpenMcpToolDispatchResult::Ok(
+				WriteJson(MakeShared<FJsonValueObject>(Result)));
+		});
+
+	// unreal_open_mcp_object_modify — FProperty writes on any resolved UObject
+	// (actor, component, asset instance). Uses ResolveObject (actor → loaded →
+	// soft-path → StaticLoadObject) so the same ref surface as actor_modify
+	// works for components and asset instances too. Same flat `properties` bag,
+	// same per-field error accumulation, same FScopedTransaction Undo bracket.
+	//
+	// `paths_hint` + `gate` are forward-compat (no-op until P3.5).
+	// Structured errors:
+	//   - missing_parameter — `object` absent/empty, or `properties` absent
+	//   - no_editor_world   — no GEditor / editor world (ResolveObject needs it
+	//                         for the actor sweep)
+	//   - object_not_found  — ref did not resolve (nothing mutated)
+	Registry.Register(
+		TEXT("unreal_open_mcp_object_modify"),
+		[](const FString& Body) -> FUnrealOpenMcpToolDispatchResult
+		{
+			TSharedPtr<FJsonObject> Args = ParseBody(Body);
+			if (!Args.IsValid())
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("invalid_parameter"),
+					TEXT("Request body was not a valid JSON object."));
+			}
+
+			const FString ObjectRef = Args->HasTypedField<EJson::String>(TEXT("object"))
+				? Args->GetStringField(TEXT("object"))
+				: FString();
+			if (ObjectRef.IsEmpty())
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("missing_parameter"),
+					TEXT("'object' is required (actor label/name/path or object/asset path)."));
+			}
+
+			UWorld* World = FUnrealOpenMcpObjectRef::GetEditorWorld();
+			if (World == nullptr)
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("no_editor_world"),
+					TEXT("No editor world is available. Open a level in the Unreal Editor."));
+			}
+
+			UObject* Object = FUnrealOpenMcpObjectRef::ResolveObject(ObjectRef, World);
+			if (Object == nullptr)
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("object_not_found"),
+					FString::Printf(
+						TEXT("Object '%s' was not found; nothing was modified."),
+						*ObjectRef));
+			}
+
+			if (!Args->HasTypedField<EJson::Object>(TEXT("properties")))
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("missing_parameter"),
+					TEXT("'properties' object is required."));
+			}
+			const TSharedPtr<FJsonObject>* PropsPtr = nullptr;
+			Args->TryGetObjectField(TEXT("properties"), PropsPtr);
+			if (PropsPtr == nullptr || !PropsPtr->IsValid())
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("invalid_parameter"),
+					TEXT("'properties' must be a JSON object of name -> value pairs."));
+			}
+			const TSharedPtr<FJsonObject>& Properties = *PropsPtr;
+
+			const FScopedTransaction Transaction(
+				NSLOCTEXT("UnrealOpenMcp", "ObjectModify", "MCP: Modify Object"));
+
+			TArray<FString> Errors;
+			const int32 Applied = FUnrealOpenMcpPropertyJson::ApplyProperties(Object, Properties, Errors);
+
+			TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+			Result->SetNumberField(TEXT("applied"), Applied);
+			Result->SetStringField(TEXT("name"), Object->GetName());
+			Result->SetStringField(TEXT("class"), Object->GetClass() ? Object->GetClass()->GetPathName() : FString());
+			Result->SetStringField(TEXT("path"), Object->GetPathName());
+			if (Errors.Num() > 0)
+			{
+				TArray<TSharedPtr<FJsonValue>> ErrorValues;
+				ErrorValues.Reserve(Errors.Num());
+				for (const FString& E : Errors)
+				{
+					ErrorValues.Add(MakeShared<FJsonValueString>(E));
+				}
+				Result->SetArrayField(TEXT("errors"), ErrorValues);
+			}
+			return FUnrealOpenMcpToolDispatchResult::Ok(
+				WriteJson(MakeShared<FJsonValueObject>(Result)));
+		});
+
 	UE_LOG(
 		LogUnrealOpenMcp,
 		Log,
-		TEXT("[Unreal Open MCP] actor tools registered: unreal_open_mcp_actor_find, unreal_open_mcp_actor_create"));
+		TEXT("[Unreal Open MCP] actor tools registered: unreal_open_mcp_actor_find, unreal_open_mcp_actor_create, unreal_open_mcp_actor_modify, unreal_open_mcp_object_modify"));
 }

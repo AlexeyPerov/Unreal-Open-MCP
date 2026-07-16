@@ -215,8 +215,10 @@ private:
 				return FUnrealOpenMcpToolDispatchResult::Ok(Output);
 			});
 
-		// P2.2 — actor family (read-only find first; mutating tools land later).
-		FUnrealOpenMcpActorTools::Register(*ToolRegistry);
+			// P2.2/P2.3/P2.4 — actor family (find, create, modify) + object
+			// reflection (object_modify). Each family registers itself via its
+			// own Register(Registry) entry point.
+			FUnrealOpenMcpActorTools::Register(*ToolRegistry);
 	}
 
 	// Owned. Constructed in StartupModule, torn down in ShutdownModule. The

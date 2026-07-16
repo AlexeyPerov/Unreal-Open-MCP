@@ -2,6 +2,8 @@ import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import { ping } from "./ping.js";
 import { actorFind } from "./actor-find.js";
 import { actorCreate } from "./actor-create.js";
+import { actorModify } from "./actor-modify.js";
+import { objectModify } from "./object-modify.js";
 
 // Tool registry. P1.7 registers the first real tool — `unreal_open_mcp_ping` —
 // which the MCP server routes to the bridge's `GET /ping`. Each subsequent tool
@@ -14,6 +16,9 @@ import { actorCreate } from "./actor-create.js";
 // P2.2 adds the first real typed tool — `unreal_open_mcp_actor_find` (read-only
 // actor locator). P2.3 adds the first mutating typed tool —
 // `unreal_open_mcp_actor_create` (spawn in the current editor level; gate
-// deferred). The rest of the actor family (modify / tree / components) lands in
-// later P2 tasks and appends its tools here.
-export const ALL_TOOLS: Tool[] = [ping, actorFind, actorCreate];
+// deferred). P2.4 adds the reflection-write pair —
+// `unreal_open_mcp_actor_modify` (FProperty writes on actor(s)) and
+// `unreal_open_mcp_object_modify` (FProperty writes on any UObject; gate
+// deferred). The rest of the actor family (tree / components) lands in later
+// P2 tasks and appends its tools here.
+export const ALL_TOOLS: Tool[] = [ping, actorFind, actorCreate, actorModify, objectModify];

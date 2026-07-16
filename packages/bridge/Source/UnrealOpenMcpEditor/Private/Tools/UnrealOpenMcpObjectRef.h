@@ -19,19 +19,23 @@
 //     from Unreal-MCP FUnrealMcpObjectRef (label → name → path, exact-first).
 //   - Targeted-miss behavior — copy Unity's gameobject-find contract
 //     (targeted miss is NOT an error; it returns {ok:true,notFound:true}).
+// P2.4 adds ResolveObject (generic UObject by actor label, loaded-object path,
+// or asset soft path) — the addressing surface object_modify needs.
 #pragma once
 
 #include "CoreMinimal.h"
 
 class AActor;
 class UClass;
+class UObject;
 class UWorld;
 
 /**
- * Actor / class reference resolution shared by the actor-tool family. Lives in
- * a self-contained header so later actor tools (create / modify / tree ops)
- * reuse the same resolver and keep addressing semantics identical across the
- * family. Read-only helpers — none of them mutate the world.
+ * Actor / class / object reference resolution shared by the actor-tool family.
+ * Lives in a self-contained header so later actor tools (create / modify /
+ * tree ops / object reflection) reuse the same resolver and keep addressing
+ * semantics identical across the family. Read-only helpers — none of them
+ * mutate the world.
  */
 namespace FUnrealOpenMcpObjectRef
 {
@@ -66,4 +70,23 @@ namespace FUnrealOpenMcpObjectRef
 	 * Returns null when nothing matches. Used by the list-mode `class` filter.
 	 */
 	UNREALOPENMCPEDITOR_API UClass* ResolveClass(const FString& ClassRef);
+
+	/**
+	 * Resolve any UObject by reference — the addressing surface
+	 * `object_modify` (and later `object_get_data`) needs. Resolution order:
+	 *   1. A live actor in @p World (label → name → path) — takes precedence
+	 *      so `object-*` can target scene actors just like the actor tools.
+	 *   2. An already-loaded UObject by path (FindFirstObject).
+	 *   3. A soft object path on disk (FSoftObjectPath::TryLoad) — loads the
+	 *      asset into memory if not already there.
+	 *   4. Last-resort StaticLoadObject for legacy short forms that
+	 *      FSoftObjectPath's strict parsing rejects.
+	 * Returns null when nothing matches. @p World defaults to the editor world
+	 * when null (the actor check needs a world to sweep).
+	 *
+	 * Mirrors Unreal-MCP's FUnrealMcpObjectRef::ResolveObject (read-only
+	 * reference) — same precedence chain so a ref that resolves as an actor in
+	 * `actor_modify` also resolves in `object_modify`.
+	 */
+	UNREALOPENMCPEDITOR_API UObject* ResolveObject(const FString& ObjectRef, UWorld* World = nullptr);
 }

@@ -161,13 +161,16 @@ test("integration: tools/list advertises unreal_open_mcp_ping", async () => {
       names.includes("unreal_open_mcp_ping"),
       `ping must be advertised; got ${names.join(", ")}`,
     );
-    // P2 registry is ping + the actor tools landed so far (P2.2 added
-    // actor_find; P2.3 added actor_create). Guard against accidental registry
-    // drift silently changing what the phase-gate smoke covers.
+    // P2 registry is ping + the actor/object tools landed so far (P2.2 added
+    // actor_find; P2.3 added actor_create; P2.4 added actor_modify +
+    // object_modify). Guard against accidental registry drift silently changing
+    // what the phase-gate smoke covers.
     assert.deepEqual(names, [
       "unreal_open_mcp_ping",
       "unreal_open_mcp_actor_find",
       "unreal_open_mcp_actor_create",
+      "unreal_open_mcp_actor_modify",
+      "unreal_open_mcp_object_modify",
     ]);
   } finally {
     await cleanup();

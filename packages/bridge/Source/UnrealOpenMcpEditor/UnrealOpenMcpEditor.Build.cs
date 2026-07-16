@@ -11,7 +11,8 @@
 // queue, canonical {ok,result,error} envelope, echo stub tool); P2.2 added the
 // first real typed tool family (actor tools — read-only find), which pulls in
 // UnrealEd (GEditor/GetEditorWorldContext) and Json (FJsonObject arg parsing
-// inside the tool handlers).
+// inside the tool handlers); P2.4 added actor_modify + object_modify, which
+// reflect FProperty writes via FJsonObjectConverter (JsonUtilities module).
 using UnrealBuildTool;
 
 public class UnrealOpenMcpEditor : ModuleRules
@@ -51,13 +52,18 @@ public class UnrealOpenMcpEditor : ModuleRules
 			// P2.2 — typed tool handlers parse the raw POST body into an
 			// FJsonObject (TJsonReader + FJsonSerializer) and emit pre-serialized
 			// JSON results. The Json module supplies FJsonObject + the reader/
-			// writer; no FJsonObjectConverter dependency is needed.
+			// writer.
 			"Json",
+			// P2.4 — actor_modify / object_modify reflect FProperty writes via
+			// FJsonObjectConverter::JsonValueToUProperty (bool/int/float/string/
+			// vector/rotator/color/enum-by-name). The JsonUtilities module owns
+			// FJsonObjectConverter; the Json module alone does not expose it.
+			"JsonUtilities",
 		});
 
-		// P2.2 scope: HTTP server + /ping + tool dispatch + read-only actor
-		// find. No Slate UI, no gate wiring. Keep the dependency surface minimal
-		// so the Editor/Runtime boundary guard (P1.8) stays green and later
-		// phases add deps as they add features.
+		// P2.4 scope: HTTP server + /ping + tool dispatch + actor find/create/
+		// modify + object_modify. No Slate UI, no gate wiring. Keep the
+		// dependency surface minimal so the Editor/Runtime boundary guard
+		// (P1.8) stays green and later phases add deps as they add features.
 	}
 }

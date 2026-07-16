@@ -12,6 +12,11 @@ import { actorComponentDestroy } from "./actor-component-destroy.js";
 import { actorComponentGet } from "./actor-component-get.js";
 import { actorComponentModify } from "./actor-component-modify.js";
 import { actorComponentListAll } from "./actor-component-list-all.js";
+import { levelOpen } from "./level-open.js";
+import { levelSave } from "./level-save.js";
+import { levelListLoaded } from "./level-list-loaded.js";
+import { levelSetCurrent } from "./level-set-current.js";
+import { levelUnloadSublevel } from "./level-unload-sublevel.js";
 
 // Tool registry. P1.7 registers the first real tool — `unreal_open_mcp_ping` —
 // which the MCP server routes to the bridge's `GET /ping`. Each subsequent tool
@@ -30,9 +35,18 @@ import { actorComponentListAll } from "./actor-component-list-all.js";
 // deferred). P2.5 completes the actor family with three tree-structure
 // mutators (`actor_set_parent`, `actor_duplicate`, `actor_destroy`) and five
 // component CRUD tools (`actor_component_add`, `actor_component_destroy`,
-// `actor_component_get`, `actor_component_modify`, `actor_component_list_all`;
+// `actor_component_get`, `actor_component_modify`, `actor_component_list_all`);
 // the read-only component tools (get, list-all) carry no gate, the mutators
 // carry the forward-compat `paths_hint` + `gate` surface (deferred until P3.5).
+// P2.6 adds the level lifecycle family — `level_open` (replace the editor
+// world via LoadMap, with a dirty guard + ignore_dirty bypass), `level_save`
+// (save in place or save-as the persistent level), `level_list_loaded`
+// (read-only persistent + streaming sublevel enumeration), `level_set_current`
+// (switch the actor-editing context via MakeLevelCurrent), and
+// `level_unload_sublevel` (remove a streaming sublevel via
+// RemoveLevelFromWorld); the read-only list tool carries no gate, the four
+// mutators carry the forward-compat `paths_hint` + `gate` surface (deferred
+// until P3.5).
 export const ALL_TOOLS: Tool[] = [
   ping,
   actorFind,
@@ -47,4 +61,9 @@ export const ALL_TOOLS: Tool[] = [
   actorComponentGet,
   actorComponentModify,
   actorComponentListAll,
+  levelOpen,
+  levelSave,
+  levelListLoaded,
+  levelSetCurrent,
+  levelUnloadSublevel,
 ];

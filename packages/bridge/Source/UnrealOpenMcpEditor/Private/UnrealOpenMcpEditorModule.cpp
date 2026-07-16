@@ -41,6 +41,9 @@
 #include "Bridge/UnrealOpenMcpToolRegistry.h"
 #include "Dispatch/UnrealOpenMcpGameThreadDispatcher.h"
 #include "Tools/UnrealOpenMcpActorTools.h"
+// P2.6 — level lifecycle family (open / save / list-loaded / set-current /
+// unload-sublevel), the Unreal analog of Unity's scene_* family.
+#include "Tools/UnrealOpenMcpLevelTools.h"
 
 #include "HAL/PlatformProcess.h"
 #include "Misc/EngineVersion.h"
@@ -219,6 +222,11 @@ private:
 			// reflection (object_modify). Each family registers itself via its
 			// own Register(Registry) entry point.
 			FUnrealOpenMcpActorTools::Register(*ToolRegistry);
+
+			// P2.6 — level lifecycle family (open / save / list-loaded /
+			// set-current / unload-sublevel), the Unreal analog of Unity's
+			// scene_* family.
+			FUnrealOpenMcpLevelTools::Register(*ToolRegistry);
 	}
 
 	// Owned. Constructed in StartupModule, torn down in ShutdownModule. The

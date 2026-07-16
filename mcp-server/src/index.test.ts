@@ -24,11 +24,13 @@ const SERVER_ENTRY = resolve(here, "index.js");
 // (`unreal_open_mcp_ping`); P2.2 added `unreal_open_mcp_actor_find`; P2.3 added
 // `unreal_open_mcp_actor_create`; P2.4 added `unreal_open_mcp_actor_modify` +
 // `unreal_open_mcp_object_modify`; P2.5 added actor_set_parent /
-// actor_duplicate / actor_destroy + the five actor_component_* tools. Further
+// actor_duplicate / actor_destroy + the five actor_component_* tools; P2.6
+// added the five level lifecycle tools (level_open / level_save /
+// level_list_loaded / level_set_current / level_unload_sublevel). Further
 // tools land in later phases and append here.
 test("handleListTools returns the registered tools", async () => {
   const result = await handleListTools();
-  assert.equal(result.tools.length, 13);
+  assert.equal(result.tools.length, 18);
   assert.equal(result.tools[0].name, "unreal_open_mcp_ping");
   assert.equal(result.tools[1].name, "unreal_open_mcp_actor_find");
   assert.equal(result.tools[2].name, "unreal_open_mcp_actor_create");
@@ -176,7 +178,7 @@ test("subprocess: boots, answers initialize + tools/list, exits 0 on EOF", async
     | undefined;
   assert.ok(list, "tools/list response missing");
   const tools = list?.result?.tools ?? [];
-  assert.equal(tools.length, 13);
+  assert.equal(tools.length, 18);
   assert.equal(tools[0].name, "unreal_open_mcp_ping");
   assert.equal(tools[1].name, "unreal_open_mcp_actor_find");
   assert.equal(tools[2].name, "unreal_open_mcp_actor_create");

@@ -18,6 +18,7 @@
     "typecheck": "tsc --noEmit",
     "test": "npm run build:test && node --test 'dist-test/**/*.test.js'",
     "smoke:p1": "npm run build && node scripts/p1-parity-smoke.mjs",
+    "smoke:p2": "npm run build && node scripts/p2-parity-smoke.mjs",
     "prepublishOnly": "npm run build"
   },
   "keywords": [

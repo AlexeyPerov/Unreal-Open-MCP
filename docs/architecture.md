@@ -141,6 +141,36 @@ When the smoke (or a real ping) fails, the code / symptom points at the owner ar
 | Plugin won't load | `.uplugin` / module `Build.cs` mis-wired | Plugin scaffold + module structure |
 | CI boundary failure | Editor-only API referenced from Runtime code | Editor/Runtime boundary guard |
 
+## Phase 2 parity smoke
+
+The phase-gate before Phase 3 (gate/verify) begins. Phase 1 proved the `/ping` route end-to-end; Phase 2 widened the dispatch to every other tool via `POST /tools/{name}` with the canonical `{ok, result, error}` envelope (P2.1) and shipped the first typed tool, `unreal_open_mcp_actor_find` (P2.2). The P2 smoke proves the full typed-tool round-trip once over the canonical route:
+
+```
+stdio MCP client  →  unreal_open_mcp_actor_find  →  POST /tools/unreal_open_mcp_actor_find
+                  →  {ok, result, error} envelope  →  unwrapped result body
+```
+
+Two layers guard the route, mirroring the Phase 1 structure:
+
+1. **In-process integration tests** — `mcp-server/src/integration.test.ts` (P2.8 cases). Same in-memory MCP SDK `Client` ↔ `createServer()` wiring as the P1 cases, but the loopback HTTP stub now dispatches by method + URL: `GET /ping` stays healthy and `POST /tools/unreal_open_mcp_actor_find` returns the canonical actor-find body wrapped in `{ok:true, result:<body>}`. Three outcomes are pinned — healthy (the INNER `result` body survives the round-trip verbatim, proving `LiveClient.postTool` unwraps the envelope correctly), bridge-down (the typed-tool path inherits P1's `bridge_offline` classification with the instance-lock hint), and tool-error (`{ok:false, error:{code,message}}` surfaces as an MCP error carrying the tool-specific code so an agent can branch on `actor_not_found` vs a transport error). Run via `npm test`.
+2. **Scripted stdio smoke** — `mcp-server/scripts/p2-parity-smoke.mjs` (`npm run smoke:p2`). Spawns the built `dist/index.js` and drives `initialize → tools/list → tools/call actor_find` over stdio, across three cases (healthy stub, dead-port bridge-down, `{ok:false}` tool-error stub). This is the gate that catches packaging, transport, and instance-discovery wiring drift the in-process suite cannot see. Pass `--port <n> --project <path>` to run the healthy case against a live Unreal Editor (the bridge-down + tool-error cases require the stub harness; they are skipped in `--port` mode).
+
+Both layers must be green before Phase 3 work starts. The integration suite runs in `npm test`; the stdio smoke is a separate `npm run smoke:p2` because it spawns the built server as a child process.
+
+### Failure-signature cheat sheet (typed-tool path)
+
+The `/ping` cheat sheet above still applies to the typed-tool path — `bridge_offline` / `bridge_timeout` / `bridge_http_error` / `bridge_response_unparsable` classify identically whether the failure happens on `GET /ping` or `POST /tools/{name}`. The typed-tool path adds one failure surface of its own: the `{ok:false, error:{code,message}}` envelope, which the bridge emits when the tool handler ran but returned a structured failure. Those codes are tool-specific (e.g. `actor_not_found`, `invalid_parameter`, `no_editor_world`) and surface verbatim through to the MCP `CallToolResult` so an agent can branch on the cause.
+
+| Code | Owner area | Likely cause |
+|---|---|---|
+| `bridge_offline` | instance discovery / editor not running | UE closed, wrong port (same owner as the `/ping` path) |
+| `bridge_timeout` | bridge / game thread | Editor blocked (modal, heavy compile) |
+| `bridge_http_error` | HTTP transport | Unexpected status (404 tool_not_found, 405 method_not_allowed, 500 bridge_internal_error) |
+| `tool_not_found` | bridge tool registry | Tool not registered with the bridge dispatch |
+| `tool_not_routed` | MCP LiveClient | `postTool` not wired for this tool name (P2.1 regression) |
+| `actor_not_found` | actor-find handler | Bad actor ref / no editor world / no match |
+| tool-specific (`invalid_parameter`, `no_editor_world`, …) | the tool handler that emitted it | See the tool's documented error codes |
+
 ## Versioning
 
 The repo tracks a shared version for the npm MCP server, bridge plugin, and verify module from `version.json`. Generated version strings are synced by `scripts/sync-version.mjs`.

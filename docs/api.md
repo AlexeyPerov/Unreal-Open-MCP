@@ -20,6 +20,7 @@ This file is the index for external interfaces and protocol contracts exposed by
 - MCP tool definitions source: `mcp-server/src/tools/` (`ping` + the actor family shipped: `actor_find`, `actor_create`, `actor_modify`, `object_modify`, `actor_set_parent`, `actor_duplicate`, `actor_destroy`, and the five `actor_component_*` tools; plus the level family shipped: `level_open`, `level_save`, `level_list_loaded`, `level_set_current`, `level_unload_sublevel`, `level_get_data`, `level_create`; the rest land per phase)
 - MCP resources source: `mcp-server/src/resources/` (when shipped)
 - Phase 1 parity smoke sources: `mcp-server/src/integration.test.ts` (in-process MCP client↔server over in-memory transport), `mcp-server/scripts/p1-parity-smoke.mjs` (scripted stdio smoke against the built `dist/index.js`)
+- Phase 2 parity smoke sources: `mcp-server/src/integration.test.ts` (P2.8 cases — `unreal_open_mcp_actor_find` round-trip over `POST /tools/{name}` with the `{ok,result,error}` envelope), `mcp-server/scripts/p2-parity-smoke.mjs` (scripted stdio smoke against the built `dist/index.js`; healthy / bridge-down / tool-error cases)
 
 ## Contract documentation guidance
 

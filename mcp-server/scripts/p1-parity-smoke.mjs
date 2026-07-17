@@ -292,14 +292,39 @@ async function main() {
       `got [${tools.join(", ")}]`,
     );
     // The registry grows each phase. Pin the full known set so accidental
-    // removal (or drift) is caught here rather than downstream. P2.3 added
-    // unreal_open_mcp_actor_create.
+    // removal (or drift) is caught here rather than downstream. Kept in sync
+    // with the deepEqual pin in integration.test.ts (the canonical registry
+    // pin); this smoke re-pins it so a drift the integration suite catches is
+    // also caught over the built-artifact path. P2.2 added actor_find; P2.3
+    // actor_create; P2.4 actor_modify + object_modify; P2.5 the actor tree +
+    // component tools; P2.6 the level lifecycle tools; P2.7 the level inspect
+    // + create pair.
+    const PINNED_TOOLS = [
+      "unreal_open_mcp_ping",
+      "unreal_open_mcp_actor_find",
+      "unreal_open_mcp_actor_create",
+      "unreal_open_mcp_actor_modify",
+      "unreal_open_mcp_object_modify",
+      "unreal_open_mcp_actor_set_parent",
+      "unreal_open_mcp_actor_duplicate",
+      "unreal_open_mcp_actor_destroy",
+      "unreal_open_mcp_actor_component_add",
+      "unreal_open_mcp_actor_component_destroy",
+      "unreal_open_mcp_actor_component_get",
+      "unreal_open_mcp_actor_component_modify",
+      "unreal_open_mcp_actor_component_list_all",
+      "unreal_open_mcp_level_open",
+      "unreal_open_mcp_level_save",
+      "unreal_open_mcp_level_list_loaded",
+      "unreal_open_mcp_level_set_current",
+      "unreal_open_mcp_level_unload_sublevel",
+      "unreal_open_mcp_level_get_data",
+      "unreal_open_mcp_level_create",
+    ];
     check(
       "tools/list advertises the full registered set",
-      tools.length === 3
-        && tools[0] === "unreal_open_mcp_ping"
-        && tools[1] === "unreal_open_mcp_actor_find"
-        && tools[2] === "unreal_open_mcp_actor_create",
+      tools.length === PINNED_TOOLS.length
+        && PINNED_TOOLS.every((t, i) => tools[i] === t),
       `got [${tools.join(", ")}]`,
     );
 

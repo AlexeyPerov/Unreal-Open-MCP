@@ -21,6 +21,14 @@
 // fidelity, P1.9). Unity's integration tests cover the resources/router layers
 // that do not exist yet here; this port narrows to the ping route that P1.7
 // shipped, which is exactly the Phase 1 exit gate.
+//
+// P2.8 extended this file with the Phase 2 exit-gate smoke: the first typed
+// tool, unreal_open_mcp_actor_find, round-tripped through the full POST
+// /tools/{name} dispatch with the {ok,result,error} envelope. The P2.8 cases
+// live in the second half of the file and pin healthy envelope unwrap,
+// bridge-down inheritance of bridge_offline, and the {ok:false,error} tool
+// failure envelope — the three outcomes the Phase 2 acceptance criteria call
+// out as load-bearing before Phase 3 (gate/verify) can start.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -99,6 +107,42 @@ function startErrorBridgeStub(
         close: () => new Promise<void>((r) => server.close(() => r())),
       });
     });
+  });
+}
+
+/**
+ * Start an ephemeral loopback HTTP "bridge" with a custom handler so a test
+ * can dispatch by method + URL. P1's startBridgeStub / startErrorBridgeStub
+ * ignore the method and answer every path with the same body — fine for the
+ * /ping-only coverage but unable to exercise the POST /tools/{name} envelope
+ * round-trip that P2.8 pins. This stub mirrors the setHandler pattern from
+ * live-client.test.ts.
+ */
+function startHandlerStub(
+  handler: (req: IncomingMessage, res: ServerResponse) => void,
+): Promise<BridgeStub> {
+  return new Promise((resolve) => {
+    const server = createServer((req, res) => handler(req, res));
+    server.listen(0, "127.0.0.1", () => {
+      const addr = server.address();
+      const port = typeof addr === "object" && addr ? addr.port : 0;
+      resolve({
+        server,
+        port,
+        close: () => new Promise<void>((r) => server.close(() => r())),
+      });
+    });
+  });
+}
+
+/** Drain a request body to a string. POST /tools/{name} always carries a JSON
+ *  args body — reading it keeps the stub HTTP-compliant (the client may retry
+ *  or hold the socket if the body is never consumed). */
+function readBody(req: IncomingMessage): Promise<string> {
+  return new Promise((resolve) => {
+    let data = "";
+    req.on("data", (chunk) => (data += chunk.toString()));
+    req.on("end", () => resolve(data));
   });
 }
 
@@ -289,5 +333,191 @@ test("integration: initialize reports the published server name", async () => {
     assert.equal(serverInfo?.name, SERVER_NAME);
   } finally {
     await cleanup();
+  }
+});
+
+// ===========================================================================
+// P2.8 — Phase 2 parity smoke (actor-find round-trip)
+// ===========================================================================
+//
+// P1's integration tests pinned the /ping route only. Phase 2 widened the
+// dispatch to every other tool via POST /tools/{name} with the canonical
+// {ok, result, error} envelope (P2.1) and shipped the first typed tool,
+// unreal_open_mcp_actor_find (P2.2). These cases pin the FULL typed-tool
+// round-trip the way P1 pinned ping: MCP tools/call → LiveClient.postTool →
+// POST /tools/unreal_open_mcp_actor_find → {ok,true,result} envelope → unwrapped
+// result body surviving the MCP round-trip verbatim. Two failure modes are
+// pinned alongside the healthy case: bridge-down surfaces the same
+// `bridge_offline` envelope (proving the typed-tool path inherits P1's failure
+// classification), and a {ok,false,error} envelope surfaces as a structured MCP
+// error carrying the tool-specific code so an agent can branch on the cause.
+//
+// The stub here dispatches by method + URL — GET /ping stays healthy so a stray
+// tools/call(ping) wouldn't crash, and POST /tools/unreal_open_mcp_actor_find
+// returns the canonical actor-find result the bridge emits
+// (FUnrealOpenMcpActorTools::HandleActorFind).
+
+/**
+ * Canonical actor-find targeted-hit body the bridge emits — pinned field set
+ * for a single resolved actor (ToActorData with bIncludeComponents=true). The
+ * stub returns this wrapped in the {ok:true,result:<body>} envelope; the MCP
+ * `bodyOf` helper sees the INNER object after LiveClient.postTool unwraps it.
+ */
+const ACTOR_FIND_HIT = {
+  actors: [
+    {
+      label: "PlayerStart",
+      name: "PlayerStart",
+      class: "/Script/Engine.PlayerStart",
+      path: "/Game/Maps/Entry.Entry:PersistentLevel.PlayerStart",
+      transform: {
+        location: { x: 0, y: 0, z: 0 },
+        rotation: { pitch: 0, yaw: 0, roll: 0 },
+        scale: { x: 1, y: 1, z: 1 },
+      },
+      components: [{ name: "Sprite", class: "/Script/Engine.BillboardComponent" }],
+    },
+  ],
+  notFound: false,
+  count: 1,
+};
+
+/**
+ * Bridge handler that serves GET /ping (healthy) AND POST
+ * /tools/unreal_open_mcp_actor_find with the canonical envelope. Every other
+ * request falls through to a 404 so a misrouted call surfaces as a clear
+ * bridge_http_error rather than a false positive.
+ */
+async function actorFindHandler(
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<void> {
+  if (req.method === "GET" && req.url === "/ping") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(HEALTHY_PING));
+    return;
+  }
+  if (req.method === "POST" && req.url === "/tools/unreal_open_mcp_actor_find") {
+    // Drain the args body even though the stub ignores it — keeps the HTTP
+    // exchange clean (the LiveClient writes a JSON body on every POST).
+    await readBody(req);
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: true, result: ACTOR_FIND_HIT }));
+    return;
+  }
+  res.writeHead(404, { "Content-Type": "application/json" });
+  res.end(
+    JSON.stringify({
+      error: { code: "not_found", message: `${req.method} ${req.url}` },
+    }),
+  );
+}
+
+// --- P2.8 healthy: full typed-tool round-trip unwraps the result body -------
+
+test("P2.8 integration: tools/call actor_find returns the unwrapped result body on 200", async () => {
+  const bridge = await startHandlerStub(actorFindHandler);
+  try {
+    const { client, cleanup } = await setupClient(bridge.port);
+    try {
+      const result = await client.callTool({
+        name: "unreal_open_mcp_actor_find",
+        arguments: { actor: "PlayerStart" },
+      });
+      // Success envelope → isError:false and the INNER result object (not the
+      // {ok,result} wrapper) survives the MCP round-trip verbatim. This is the
+      // parity pin on the actor-find field set the bridge contract pins.
+      assert.equal(result.isError, false);
+      assert.deepEqual(bodyOf(result), ACTOR_FIND_HIT);
+    } finally {
+      await cleanup();
+    }
+  } finally {
+    await bridge.close();
+  }
+});
+
+// --- P2.8 bridge-down: typed-tool path inherits bridge_offline --------------
+
+test("P2.8 integration: bridge-down tools/call actor_find surfaces bridge_offline with the lock hint", async () => {
+  // Port 1 — nothing listening. The typed-tool path MUST classify exactly like
+  // the ping path: bridge_offline (NOT bridge_timeout), with the instance lock
+  // path named so an agent debugging a port mismatch knows where to look. This
+  // is the load-bearing assertion that the P1 failure classification survives
+  // the P2.1 postTool route unchanged. Pass a projectPath via the router so the
+  // offline hint names a concrete lock file (assertion below checks for it).
+  const { client, cleanup } = await setupClient(1);
+  setLiveRouter(new LiveClient(1, undefined, "/tmp/MyGame"));
+  try {
+    const result = await client.callTool({
+      name: "unreal_open_mcp_actor_find",
+      arguments: { actor: "PlayerStart" },
+    });
+    assert.equal(result.isError, true);
+    const body = bodyOf(result) as { error: { code: string; message: string } };
+    assert.equal(body.error.code, "bridge_offline");
+    assert.match(
+      body.error.message,
+      /\.unreal-open-mcp\/instances\//,
+      "offline hint must name the instance lock dir",
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+// --- P2.8 tool error: {ok,false,error} surfaces as a structured MCP error ----
+
+test("P2.8 integration: tools/call actor_find surfaces the tool error envelope on ok:false", async () => {
+  // The bridge ran the handler and it returned a structured failure (e.g. the
+  // referenced actor does not resolve, or no editor world is loaded). The
+  // {ok:false,error:{code,message}} envelope must surface as an MCP error
+  // (isError:true) carrying the tool-specific code verbatim so an agent can
+  // branch on actor_not_found vs invalid_parameter vs no_editor_world.
+  const bridge = await startHandlerStub(async (req, res) => {
+    if (req.method === "POST" && req.url === "/tools/unreal_open_mcp_actor_find") {
+      await readBody(req);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          ok: false,
+          error: {
+            code: "actor_not_found",
+            message: "No actor resolved for ref 'DoesNotExist'.",
+          },
+        }),
+      );
+      return;
+    }
+    res.writeHead(404, { "Content-Type": "application/json" });
+    res.end(
+      JSON.stringify({
+        error: { code: "not_found", message: `${req.method} ${req.url}` },
+      }),
+    );
+  });
+  try {
+    const { client, cleanup } = await setupClient(bridge.port);
+    try {
+      const result = await client.callTool({
+        name: "unreal_open_mcp_actor_find",
+        arguments: { actor: "DoesNotExist" },
+      });
+      assert.equal(result.isError, true);
+      const body = bodyOf(result) as {
+        error: { code: string; message: string };
+      };
+      // The tool-specific error code rides through — an agent can branch on
+      // actor_not_found rather than seeing an opaque transport error.
+      assert.equal(body.error.code, "actor_not_found");
+      assert.equal(
+        body.error.message,
+        "No actor resolved for ref 'DoesNotExist'.",
+      );
+    } finally {
+      await cleanup();
+    }
+  } finally {
+    await bridge.close();
   }
 });

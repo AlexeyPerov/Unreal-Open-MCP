@@ -12,6 +12,10 @@
 //
 // P3.1 scope: pure contract types only. No concrete rule scanners, no Asset
 // Registry walks, no bridge gate wiring — those land in P3.2–P3.4 / P3.7.
+//
+// P3.2 added private deps on Engine + AssetRegistry for the
+// broken_soft_references rule scanner. The dependency invariant (verify never
+// depends on an UnrealOpenMcp* module) is preserved.
 using UnrealBuildTool;
 
 public class UnrealOpenMcpVerify : ModuleRules
@@ -28,6 +32,14 @@ public class UnrealOpenMcpVerify : ModuleRules
 		PrivateDependencyModuleNames.AddRange(new string[]
 		{
 			"CoreUObject",
+			// P3.2: the broken_soft_references rule loads packages and walks
+			// UObjects (LoadPackage, GetObjectsWithOuter, FSoftObjectPath) and
+			// looks up package existence via the Asset Registry. Engine and
+			// AssetRegistry are first-party editor modules; verify still does
+			// NOT depend on any UnrealOpenMcp* module (the bridge depends on
+			// verify, never the reverse).
+			"Engine",
+			"AssetRegistry",
 		});
 
 		// Deliberately no UnrealOpenMcpEditor / UnrealOpenMcpRuntime dependency.

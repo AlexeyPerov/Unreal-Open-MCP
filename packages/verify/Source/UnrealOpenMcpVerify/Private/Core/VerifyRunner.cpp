@@ -1,8 +1,8 @@
-// FVerifyRunner implementation. See VerifyRunner.h for the lifecycle and the
-// P3.1 placeholder scope.
+// FVerifyRunner implementation. See VerifyRunner.h for the lifecycle.
 #include "Core/VerifyRunner.h"
 
 #include "Core/IssueKey.h"
+#include "Rules/BrokenSoftReferences/BrokenSoftReferencesRule.h"
 
 #include "HAL/PlatformTime.h"
 #include "Misc/Guid.h"
@@ -73,11 +73,12 @@ void LogCheckpointOverBudget(const int64 ElapsedMs, const FVerifyScope& Scope)
 
 void FVerifyRunner::RegisterDefaults()
 {
-	// P3.1 placeholder — the concrete rule families (broken_soft_references,
-	// missing_blueprint_parent, compile_error, content_path_hygiene) land in
-	// P3.2–P3.4 / P3.7. Leaving this empty keeps the scaffold's rule set
-	// empty so RunScoped returns an empty result and the contract tests pin
-	// the shell behavior.
+	// P3.2: the first concrete rule family lands here. The remaining families
+	// (missing_blueprint_parent, compile_error, content_path_hygiene) arrive
+	// in P3.3–P3.4 / P3.7. Each rule is registered exactly once via
+	// RegisterRule, which short-circuits on a duplicate Id so a hot reload
+	// cannot double-register.
+	RegisterRule(MakeUnique<FBrokenSoftReferencesRule>());
 }
 
 void FVerifyRunner::EnsureDefaultsRegistered()

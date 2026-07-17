@@ -4,10 +4,11 @@
 // contracts that the bridge gate flow (checkpoint → mutate → validate →
 // delta) dispatches into.
 //
-// P3.1 scope: pure contract types + the runner shell. StartupModule ensures
-// the default rule/fix registrations are idempotent (the bridge hard-depends
-// on verify in P3.5; an editor reload must not double-register). The
-// RegisterDefaults bodies are placeholders for P3.2–P3.4 / P3.7.
+// P3.1 shipped pure contract types + the runner shell. P3.2 wired the first
+// concrete rule family (broken_soft_references) into the runner's
+// RegisterDefaults. StartupModule keeps the default rule/fix registrations
+// idempotent (the bridge hard-depends on verify in P3.5; an editor reload
+// must not double-register).
 //
 // Per packages/verify/AGENTS.md: verify never depends on the bridge. The
 // dependency direction is bridge → verify, never the reverse.

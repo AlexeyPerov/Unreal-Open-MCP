@@ -27,6 +27,11 @@ public class UnrealOpenMcpVerifyTests : ModuleRules
 		PrivateDependencyModuleNames.AddRange(new string[]
 		{
 			"CoreUObject",
+			// P3.2: the BrokenSoftReferences spec loads synthetic packages via
+			// LoadPackage and walks them via FSoftObjectPath / Asset Registry, so
+			// mirror the verify module's private deps. Specs are editor-only.
+			"Engine",
+			"AssetRegistry",
 		});
 
 		// Reach the verify module's PRIVATE headers (the runner implementation

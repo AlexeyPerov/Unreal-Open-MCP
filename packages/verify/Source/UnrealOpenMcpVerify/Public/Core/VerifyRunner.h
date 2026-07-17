@@ -10,10 +10,10 @@
 //   - Unity's runner is a static class; the Unreal port keeps the same
 //     static surface so existing call sites transfer one-to-one.
 //
-// P3.1 scope: the runner shell only. RegisterDefaults() is a placeholder —
-// the concrete rule families (broken_soft_references, missing_blueprint_parent,
-// compile_error, content_path_hygiene) land in P3.2–P3.4 / P3.7. Until then
-// the runner's rule list is empty and RunScoped returns an empty result.
+// P3.1 shipped the runner shell. P3.2 wired the first concrete rule family
+// (broken_soft_references) into RegisterDefaults; the remaining families
+// (missing_blueprint_parent, compile_error, content_path_hygiene) land in
+// P3.3–P3.4 / P3.7.
 //
 // The runner swallows exceptions thrown from a rule's Scan() so one bad rule
 // cannot abort a gate pass — the issue is logged and the remaining rules
@@ -43,12 +43,15 @@ public:
 	/**
 	 * Idempotent: register the default rule families if the registry is
 	 * empty. Called from the verify module's StartupModule and from the
-	 * bridge gate boot (P3.5). P3.1 leaves the body empty — concrete rule
-	 * families land in P3.2–P3.4 / P3.7.
+	 * bridge gate boot (P3.5).
 	 */
 	static void EnsureDefaultsRegistered();
 
-	/** P3.1 placeholder for the concrete rule families. */
+	/**
+	 * Register the default rule families. P3.2 adds broken_soft_references;
+	 * the remaining families (missing_blueprint_parent, compile_error,
+	 * content_path_hygiene) arrive in P3.3–P3.4 / P3.7.
+	 */
 	static void RegisterDefaults();
 
 	/** All currently registered rules (in registration order). */

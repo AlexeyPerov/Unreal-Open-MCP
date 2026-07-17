@@ -17,6 +17,8 @@ import { levelSave } from "./level-save.js";
 import { levelListLoaded } from "./level-list-loaded.js";
 import { levelSetCurrent } from "./level-set-current.js";
 import { levelUnloadSublevel } from "./level-unload-sublevel.js";
+import { levelGetData } from "./level-get-data.js";
+import { levelCreate } from "./level-create.js";
 
 // Tool registry. P1.7 registers the first real tool — `unreal_open_mcp_ping` —
 // which the MCP server routes to the bridge's `GET /ping`. Each subsequent tool
@@ -46,7 +48,12 @@ import { levelUnloadSublevel } from "./level-unload-sublevel.js";
 // `level_unload_sublevel` (remove a streaming sublevel via
 // RemoveLevelFromWorld); the read-only list tool carries no gate, the four
 // mutators carry the forward-compat `paths_hint` + `gate` surface (deferred
-// until P3.5).
+// until P3.5). P2.7 adds the inspect + create pair — `level_get_data`
+// (read-only actor roster with profile/pagination + World Partition scope
+// flag) and `level_create` (new in-memory or saved-to-disk level, optionally
+// template-seeded, with the same dirty guard as level_open); the read-only
+// get-data tool carries no gate, the create mutator carries the forward-compat
+// `paths_hint` + `gate` surface (deferred until P3.5).
 export const ALL_TOOLS: Tool[] = [
   ping,
   actorFind,
@@ -66,4 +73,6 @@ export const ALL_TOOLS: Tool[] = [
   levelListLoaded,
   levelSetCurrent,
   levelUnloadSublevel,
+  levelGetData,
+  levelCreate,
 ];

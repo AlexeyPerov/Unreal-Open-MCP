@@ -166,8 +166,10 @@ test("integration: tools/list advertises unreal_open_mcp_ping", async () => {
     // object_modify; P2.5 added actor_set_parent / actor_duplicate /
     // actor_destroy + the five actor_component_* tools; P2.6 added the five
     // level lifecycle tools — level_open / level_save / level_list_loaded /
-    // level_set_current / level_unload_sublevel). Guard against accidental
-    // registry drift silently changing what the phase-gate smoke covers.
+    // level_set_current / level_unload_sublevel; P2.7 added the level
+    // inspect + create pair — level_get_data / level_create). Guard against
+    // accidental registry drift silently changing what the phase-gate smoke
+    // covers.
     assert.deepEqual(names, [
       "unreal_open_mcp_ping",
       "unreal_open_mcp_actor_find",
@@ -187,6 +189,8 @@ test("integration: tools/list advertises unreal_open_mcp_ping", async () => {
       "unreal_open_mcp_level_list_loaded",
       "unreal_open_mcp_level_set_current",
       "unreal_open_mcp_level_unload_sublevel",
+      "unreal_open_mcp_level_get_data",
+      "unreal_open_mcp_level_create",
     ]);
   } finally {
     await cleanup();

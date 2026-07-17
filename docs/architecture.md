@@ -66,6 +66,25 @@ Unreal separates editor and runtime modules at compile time:
 
 The load-bearing invariant is one-directional: **Editor code may reference Runtime code; Runtime code may NEVER reference Editor code.** ModuleRules enforce linking; the include/surface leak (e.g. a stray `#include "UnrealEd.h"` or an editor-only `Build.cs` dependency) is enforced by `scripts/check-editor-boundary.py`, which runs as a blocking CI guard (`editor-boundary` job). See `packages/bridge/AGENTS.md` for the run command and suppression policy.
 
+## Verify module
+
+`packages/verify/` is a standalone Editor plugin (`UnrealOpenMCPVerify.uplugin`) that owns the rule and fix contracts the gate flow (checkpoint → mutate → validate → delta) dispatches into. The load-bearing invariant is the reverse of the bridge's Editor→Runtime rule: **the bridge depends on verify; verify never depends on the bridge.** The `UnrealOpenMcpVerify.Build.cs` deliberately lists no `UnrealOpenMcp*` dependencies — verify must stay usable standalone so the MCP-side offline scanner can read its issue codes without a live editor, and so the gate (P3.5) can soft/hard-depend on it from the bridge.
+
+```
+packages/verify/
+  UnrealOpenMCPVerify.uplugin        # plugin descriptor — standalone (no bridge dep)
+  Source/
+    UnrealOpenMcpVerify/             # Editor module — verify contracts + runner
+      Public/Core/                   # EVerifySeverity, EVerifyRunMode, FVerifyScope,
+                                     # FVerifyIssue, FIssueKey, IVerifyRule,
+                                     # FVerifyResult, FCheckpointFingerprint, FVerifyRunner
+      Public/Fixes/                  # FFixDescription, FFixResult, FFixCandidate,
+                                     # IFixProvider, FFixProviderRegistry
+    UnrealOpenMcpVerifyTests/        # Automation specs (WITH_DEV_AUTOMATION_TESTS-guarded)
+```
+
+The contract surface mirrors Unity Open MCP's `packages/verify/Editor/Core/` + `Editor/Fixes/` at copy fidelity. The runner (`FVerifyRunner`) is a static class with idempotent `EnsureDefaultsRegistered()` called from the verify module's `StartupModule` and from the bridge gate boot — so a standalone editor and a bridge-driven path converge on the same registered rule set. The fix registry (`FFixProviderRegistry`) resolves providers deterministically and reports the `Safe` flag accurately (taken from `Describe()`, defaulting to **unsafe** on a throw so the gate never auto-applies something it cannot reason about). The scaffold ships the contracts, runner shell, and fix registry only; concrete rule scanners and fix providers register into the same surfaces as they land.
+
 ## Plugin layout
 
 The bridge is authored under `packages/bridge/` and installed into an Unreal project as `Plugins/UnrealOpenMCP/`:

@@ -1,0 +1,31 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "0.0.1",
+	"FriendlyName": "Unreal Open MCP Verify",
+	"Description": "Scoped health-check module for Unreal Open MCP. Carries the verify rule and fix contracts that the bridge gate flow (checkpoint → mutate → validate → delta) dispatches into. Standalone — does not depend on the bridge module; the bridge depends on this module, never the reverse.",
+	"Category": "AI",
+	"CreatedBy": "Alexey Perov",
+	"CreatedByURL": "https://github.com/AlexeyPerov",
+	"DocsURL": "https://github.com/AlexeyPerov/Unreal-Open-MCP",
+	"MarketplaceURL": "",
+	"SupportURL": "https://github.com/AlexeyPerov/Unreal-Open-MCP/issues",
+	"CanContainContent": false,
+	"IsBetaVersion": false,
+	"IsExperimentalVersion": true,
+	"Installed": false,
+	"Modules": [
+		{
+			"Name": "UnrealOpenMcpVerify",
+			"Type": "Editor",
+			"LoadingPhase": "Default",
+			"PlatformAllowList": [ "Win64", "Mac", "Linux" ]
+		},
+		{
+			"Name": "UnrealOpenMcpVerifyTests",
+			"Type": "Editor",
+			"LoadingPhase": "Default",
+			"PlatformAllowList": [ "Win64", "Mac", "Linux" ]
+		}
+	]
+}

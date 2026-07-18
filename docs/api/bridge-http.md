@@ -273,6 +273,107 @@ for mutating dispatches by adding a `gate` summary block (see
 `ok` and `error.code` stay stable across both forms so a P2.1 parser keeps
 working.
 
+#### Gate meta-tools (P3.6)
+
+The bridge ships three read-only meta-tools that surface the explicit
+**checkpoint → mutate → delta** workflow agents drive when they want a manual
+gate pass. All three are registered as non-mutating with gate `Off` so the
+dispatch policy runs them directly — they participate in the gate workflow
+but do not recurse through `FUnrealOpenMcpGatePolicy::Execute`.
+
+| Tool | Purpose |
+|---|---|
+| `unreal_open_mcp_validate_edit` | Scoped health check without a preceding mutation (manual verification / pre-commit). |
+| `unreal_open_mcp_checkpoint_create` | Capture a verify fingerprint for later delta comparison. |
+| `unreal_open_mcp_delta` | Compare current project health vs a stored checkpoint. |
+
+The canonical workflow is:
+
+```bash
+# 1. Capture a baseline before mutating.
+CP=$(curl -s -X POST http://127.0.0.1:$UNREAL_OPEN_MCP_BRIDGE_PORT/tools/unreal_open_mcp_checkpoint_create \
+  -H 'Content-Type: application/json' \
+  -d '{"paths":["/Game/BP/BP_Foo.BP_Foo"],"label":"before-edit"}' \
+  | jq -r .result.checkpointId)
+
+# 2. Mutate (any mutating tool: actor_create, actor_modify, level_save, …).
+#    paths_hint should match the checkpoint scope so the post-mutation
+#    validate scan is bounded to the touched paths.
+
+# 3. Delta against the baseline.
+curl -s -X POST http://127.0.0.1:$UNREAL_OPEN_MCP_BRIDGE_PORT/tools/unreal_open_mcp_delta \
+  -H 'Content-Type: application/json' \
+  -d "{\"checkpoint_id\":\"$CP\"}" | jq .
+```
+
+`validate_edit` returns the issue list with stable fields:
+
+```json
+{
+  "passed": false,
+  "issues": [
+    {
+      "ruleId": "broken_soft_references",
+      "categoryId": "broken_soft_references",
+      "severity": "Error",
+      "code": "broken_soft_reference",
+      "issueCode": "broken_soft_reference",
+      "assetPath": "/Game/BP/BP_Foo.BP_Foo",
+      "description": "Soft object path '/Game/MissingAsset.MissingAsset' does not resolve.",
+      "evidence": { "property": "Mesh.SkeletalMesh" }
+    }
+  ],
+  "categoriesRun": ["broken_soft_references", "missing_blueprint_parent", "compile_errors"],
+  "rulesApplied": ["broken_soft_references", "missing_blueprint_parent", "compile_errors"],
+  "durationMs": 42
+}
+```
+
+`passed` follows the strict-error contract: validate_edit is the gate's
+pre-mutation check, so it fails on any `Error`. The project severity threshold
+flows into the regression gate; here the contract is strict-error because
+validate_edit answers "is this asset currently healthy?".
+
+**Rule auto-select** (Unreal extension map):
+
+| Extension | Rules selected |
+|---|---|
+| `.uasset`, `.umap` | `broken_soft_references`, `missing_blueprint_parent`, `compile_errors` |
+| `.cpp`, `.h`, `.cs` | `compile_errors` |
+| (unknown / empty) | fallback: every registered rule |
+
+The caller can override via `categories` (explicit rule list), narrow via
+`include_rules` (intersect with the explicit list, or additive when
+`categories` is omitted), or filter via `exclude_rules` (deny-list; always
+wins).
+
+**Missing-checkpoint path.** Checkpoints are session-scoped (in-memory) and
+are wiped on hot reload or editor restart. `delta` does NOT treat a missing
+checkpoint as a tool failure — it returns `{ok:true}` with an explicit
+`unavailable` payload so an agent can proceed (e.g. fall back to
+`validate_edit`):
+
+```json
+{
+  "passed": true,
+  "unavailable": true,
+  "checkpointLostOnReload": true,
+  "warning": "Checkpoint 'cp_deadbeef' was not found and the in-memory checkpoint store is empty...",
+  "agentNextSteps": [
+    "The checkpoint store is empty — the pre-change baseline is gone (or was never created) and a delta cannot be computed.",
+    "To verify current state directly, call unreal_open_mcp_validate_edit (or unreal_open_mcp_scan_paths) on the relevant paths.",
+    "To re-establish a baseline, call unreal_open_mcp_checkpoint_create on the paths you intend to delta-check, then mutate, then unreal_open_mcp_delta."
+  ]
+}
+```
+
+`checkpointLostOnReload` is set ONLY when the store is completely empty AND a
+specific id was requested (the most likely cause is a hot reload that wiped
+the store). When the id is unknown but other checkpoints still exist, the
+payload carries `unavailable:true` without `checkpointLostOnReload` so the
+agent can distinguish "wiped by reload" from "this id was never created in
+this session".
+
 ### Manual smoke test
 
 ```bash

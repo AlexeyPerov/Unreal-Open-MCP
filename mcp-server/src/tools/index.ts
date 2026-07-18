@@ -19,6 +19,11 @@ import { levelSetCurrent } from "./level-set-current.js";
 import { levelUnloadSublevel } from "./level-unload-sublevel.js";
 import { levelGetData } from "./level-get-data.js";
 import { levelCreate } from "./level-create.js";
+// P3.6 — gate meta-tools (validate_edit / checkpoint_create / delta). The
+// explicit checkpoint → mutate → delta surface; read-only (route live).
+import { validateEdit } from "./validate-edit.js";
+import { checkpointCreate } from "./checkpoint-create.js";
+import { delta } from "./delta.js";
 
 // Tool registry. P1.7 registers the first real tool — `unreal_open_mcp_ping` —
 // which the MCP server routes to the bridge's `GET /ping`. Each subsequent tool
@@ -54,6 +59,13 @@ import { levelCreate } from "./level-create.js";
 // template-seeded, with the same dirty guard as level_open); the read-only
 // get-data tool carries no gate, the create mutator carries the forward-compat
 // `paths_hint` + `gate` surface (deferred until P3.5).
+// P3.6 adds the gate meta-tool family — `validate_edit` (scoped health check
+// without a preceding mutation), `checkpoint_create` (capture a fingerprint
+// for later delta comparison), and `delta` (compare current health vs a
+// stored checkpoint). All three are read-only and route live; they
+// participate in the gate workflow but bypass GatePolicy.Execute (no
+// recursion). They surface the explicit checkpoint → mutate → delta contract
+// agents drive when they want a manual gate pass.
 export const ALL_TOOLS: Tool[] = [
   ping,
   actorFind,
@@ -75,4 +87,7 @@ export const ALL_TOOLS: Tool[] = [
   levelUnloadSublevel,
   levelGetData,
   levelCreate,
+  validateEdit,
+  checkpointCreate,
+  delta,
 ];

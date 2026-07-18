@@ -44,6 +44,11 @@
 // P2.6 — level lifecycle family (open / save / list-loaded / set-current /
 // unload-sublevel), the Unreal analog of Unity's scene_* family.
 #include "Tools/UnrealOpenMcpLevelTools.h"
+// P3.6 — gate meta-tools (validate_edit / checkpoint_create / delta). The
+// explicit checkpoint → mutate → delta surface; read-only so the dispatch
+// path runs them directly (they participate in the gate workflow but must
+// not recurse through GatePolicy.Execute).
+#include "MetaTools/UnrealOpenMcpGateMetaTools.h"
 
 #include "HAL/PlatformProcess.h"
 #include "Misc/EngineVersion.h"
@@ -227,6 +232,13 @@ private:
 			// set-current / unload-sublevel), the Unreal analog of Unity's
 			// scene_* family.
 			FUnrealOpenMcpLevelTools::Register(*ToolRegistry);
+
+			// P3.6 — gate meta-tools (validate_edit / checkpoint_create /
+			// delta). The explicit checkpoint → mutate → delta surface agents
+			// drive when they want a manual gate pass. All three are read-
+			// only (the dispatch policy runs them directly; they do not
+			// recurse through GatePolicy.Execute).
+			FUnrealOpenMcpGateMetaTools::Register(*ToolRegistry);
 	}
 
 	// Owned. Constructed in StartupModule, torn down in ShutdownModule. The

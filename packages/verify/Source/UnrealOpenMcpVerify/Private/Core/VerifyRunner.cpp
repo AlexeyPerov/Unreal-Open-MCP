@@ -3,6 +3,7 @@
 
 #include "Core/IssueKey.h"
 #include "Rules/BrokenSoftReferences/BrokenSoftReferencesRule.h"
+#include "Rules/MissingBlueprintParent/MissingBlueprintParentRule.h"
 
 #include "HAL/PlatformTime.h"
 #include "Misc/Guid.h"
@@ -73,12 +74,13 @@ void LogCheckpointOverBudget(const int64 ElapsedMs, const FVerifyScope& Scope)
 
 void FVerifyRunner::RegisterDefaults()
 {
-	// P3.2: the first concrete rule family lands here. The remaining families
-	// (missing_blueprint_parent, compile_error, content_path_hygiene) arrive
-	// in P3.3–P3.4 / P3.7. Each rule is registered exactly once via
-	// RegisterRule, which short-circuits on a duplicate Id so a hot reload
-	// cannot double-register.
+	// P3.2 added broken_soft_references; P3.3 adds missing_blueprint_parents.
+	// The remaining families (compile_error, content_path_hygiene) arrive in
+	// P3.4 / P3.7. Each rule is registered exactly once via RegisterRule,
+	// which short-circuits on a duplicate Id so a hot reload cannot
+	// double-register.
 	RegisterRule(MakeUnique<FBrokenSoftReferencesRule>());
+	RegisterRule(MakeUnique<FMissingBlueprintParentRule>());
 }
 
 void FVerifyRunner::EnsureDefaultsRegistered()

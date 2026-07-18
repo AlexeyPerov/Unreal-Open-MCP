@@ -2,6 +2,8 @@
 // Safe-flag rationale and the synthetic-key strategy.
 #include "Fixes/FixProviderRegistry.h"
 
+#include "Fixes/ClearBrokenSoftReferenceFix.h"
+
 namespace UnrealOpenMcpVerify
 {
 
@@ -59,9 +61,16 @@ bool TryResolveSafe(const IFixProvider& Provider, const FString& IssueId)
 
 void FFixProviderRegistry::RegisterDefaults()
 {
-	// P3.1 placeholder — the concrete fix providers (remove_missing_script,
-	// relink_broken_guid, remove_orphan_meta, fix_duplicate_guid,
-	// reassign_missing_texture, reassign_missing_shader) land in P3.7.
+	// P3.7 — first concrete Safe provider. clear_broken_soft_reference nulls
+	// an unresolved FSoftObjectProperty the broken_soft_references rule
+	// pinned (top-level soft pointers only; struct-nested findings return
+	// Safe=false from Describe() so the gate never auto-suggests them).
+	//
+	// Catalog additions must land alongside a capabilities sync (P3.8) so
+	// unreal_open_mcp_capabilities stays accurate. New providers MUST declare
+	// their Safe flag honestly — the registry surfaces the real value from
+	// Describe() (regression guard pinned by FUnrealOpenMcpFixProviderRegistrySpec).
+	RegisterProvider(MakeUnique<FClearBrokenSoftReferenceFix>());
 }
 
 void FFixProviderRegistry::EnsureDefaultsRegistered()

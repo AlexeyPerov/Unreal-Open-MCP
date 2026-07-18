@@ -374,6 +374,90 @@ payload carries `unavailable:true` without `checkpointLostOnReload` so the
 agent can distinguish "wiped by reload" from "this id was never created in
 this session".
 
+#### apply_fix (P3.7)
+
+`unreal_open_mcp_apply_fix` is the fix application workflow. Dry-run previews
+the fix without mutating (no gate, no rollback snapshot); non-dry-run applies
+run through the bridge's `ApplyFixGateRunner` so a `FixRollback` snapshot
+protects the asset and a corrupting fix is auto-reverted on failure or new
+errors under `enforce`.
+
+**Args:**
+
+| Field | Required | Description |
+|---|---|---|
+| `issue_id` | yes | Canonical issue key (`{ruleId}\|{severity}\|{assetPath}\|{issueCode}`). The asset-path component is auto-derived as the gate's `paths_hint` when `paths_hint` is omitted. |
+| `fix_id` | no | Fix action id from the issue payload (e.g. `clear_broken_soft_reference`). When omitted, the response lists every fix that can resolve the issue. |
+| `dry_run` | no | Default `true`. Preview the fix without applying. Dry-run short-circuits the gate entirely. |
+| `gate` | no | One of `enforce` (default) / `warn` / `off`. Ignored for `dry_run`. Use `gate:"off"` only when you accept the fix commits with no rollback — the response then carries `rollbackDisabled:true`. |
+| `paths_hint` | no | Optional mutation scope override. Auto-derived from `issue_id`'s asset path when omitted. |
+
+**Result shapes:**
+
+```json
+// Dry-run with fix_id
+{ "dryRun": true, "fixId": "clear_broken_soft_reference", "issueId": "...",
+  "assetPath": "/Game/Foo/Bar.Bar", "description": "Clear the broken soft object pointer at 'Weapon' on '/Game/Foo/Bar.Bar' (sets the property to null and saves the package).",
+  "safe": true }
+
+// Dry-run without fix_id — list every fix that can resolve the issue
+{ "dryRun": true, "issueId": "...", "availableFixIds": ["clear_broken_soft_reference"] }
+
+// Apply succeeded
+{ "dryRun": false, "success": true, "description": "Cleared 1 broken soft object pointer(s) at 'Weapon' on '/Game/Foo/Bar.Bar' and saved package '/Game/Foo/Bar'.",
+  "touchedPaths": ["/Game/Foo/Bar.Bar"] }
+```
+
+**Safe auto-fix rollback.** A non-dry-run apply that fails OR introduces new
+errors under `enforce` is restored to its pre-fix state. The success envelope
+adds a top-level `rollback` block:
+
+```json
+{
+  "ok": true,
+  "result": { "dryRun": false, "success": false, "description": "..." },
+  "gate": { "ran": true, "outcome": "failed", "gateFailed": true, "delta": { "newErrors": 1, ... } },
+  "rollback": {
+    "rolledBack": true,
+    "reason": "fix introduced 1 new error(s) under enforce — restored touched files to pre-fix state",
+    "restoredPaths": ["/Game/Foo/Bar.Bar"]
+  }
+}
+```
+
+`gate:"off"` skips the delta and never consults the rollback snapshot — a fix
+that corrupts the asset under this path is permanent. The response carries
+`rollback.rollbackDisabled:true` so an agent knows the mutation committed
+without auto-rollback protection:
+
+```json
+{
+  "ok": true,
+  "result": { "dryRun": false, "success": true, "description": "...", "touchedPaths": [...] },
+  "gate": { "ran": false, "outcome": "skipped", "gateFailed": false },
+  "rollback": { "rolledBack": false, "rollbackDisabled": true }
+}
+```
+
+**Error codes:**
+
+| Code | Cause |
+|---|---|
+| `missing_parameter` | `issue_id` absent. |
+| `invalid_issue_id` | `issue_id` is not a well-formed `{ruleId}\|{severity}\|{assetPath}\|{issueCode}` key. |
+| `unknown_fix` (structured, `ok:true`) | `fix_id` does not resolve to a registered provider. Body carries `availableFixIds` + `applicableFixIdsForIssue` for self-correction. |
+| `fix_not_applicable` | The named fix's `CanFix()` rejected the issue id. |
+| `rollback_unavailable` | A non-dry-run apply was dispatched without the `ApplyFixGateRunner` wrapper (e.g. via `batch_execute`). Re-issue as a top-level call with `gate != off`, or use `dry_run:true`. |
+| `fix_failed` | The provider's `Apply()` returned `!success` (e.g. ambiguous target, asset layout changed since scan). The gate runner rolls back under `enforce`. |
+| `fix_error` | The provider threw during `Apply()` (only fireable in `WITH_EXCEPTIONS` builds). |
+
+**v1 implemented fix:** `clear_broken_soft_reference` (Safe) — nulls a broken
+soft object pointer at a precise top-level property path and saves the
+package. Refuses struct-nested properties in v1 (`Describe()` returns
+`safe:false` so the gate never auto-suggests them). The provider keys off the
+`broken_soft_references` rule + the `broken_soft_reference` issue code with a
+`<targetPackage>:<propertyPath>` suffix.
+
 ### Manual smoke test
 
 ```bash

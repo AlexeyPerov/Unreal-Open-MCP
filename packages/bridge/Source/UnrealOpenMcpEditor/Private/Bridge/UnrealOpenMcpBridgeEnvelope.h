@@ -72,6 +72,31 @@ struct UNREALOPENMCPEDITOR_API FUnrealOpenMcpBridgeEnvelope
 		const FUnrealOpenMcpGateDispatchResult& GateResult);
 
 	/**
+	 * Build the success envelope with a gate summary + apply_fix rollback
+	 * block. P3.7 widening — apply_fix dispatches that rolled back (failed
+	 * fix or new errors under enforce) OR committed with gate:"off" (no
+	 * rollback protection) emit this form so an agent sees the rollback
+	 * decision in a structured `rollback` field rather than parsing prose.
+	 *
+	 * Shape:
+	 *   { ok, result, gate:{...}, rollback:{ rolledBack, reason?, restoredPaths?,
+	 *                                        rollbackDisabled? } }
+	 * The rollback block is emitted ONLY when bRolledBack or bRollbackDisabled
+	 * is true. Optional rollback fields (`?`) are omitted when empty.
+	 */
+	struct FApplyFixRollbackFields
+	{
+		bool bRolledBack = false;
+		bool bRollbackDisabled = false;
+		FString RollbackReason;
+		TArray<FString> RestoredPaths;
+	};
+	static FString BuildSuccessWithGateAndRollback(
+		const FString& ResultJson,
+		const FUnrealOpenMcpGateDispatchResult& GateResult,
+		const FApplyFixRollbackFields& Rollback);
+
+	/**
 	 * Build the failure envelope with a structured error code + message. Used
 	 * for every in-band tool failure (timeout, execution_error,
 	 * game_thread_blocked, body-faulted, paths_hint_required). HTTP 200 — the

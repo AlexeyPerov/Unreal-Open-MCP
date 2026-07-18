@@ -238,6 +238,7 @@ test("integration: tools/list advertises unreal_open_mcp_ping", async () => {
       "unreal_open_mcp_validate_edit",
       "unreal_open_mcp_checkpoint_create",
       "unreal_open_mcp_delta",
+      "unreal_open_mcp_apply_fix",
     ]);
   } finally {
     await cleanup();

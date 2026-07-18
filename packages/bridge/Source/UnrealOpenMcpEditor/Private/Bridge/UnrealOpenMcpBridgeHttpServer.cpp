@@ -10,8 +10,10 @@
 #include "Bridge/UnrealOpenMcpToolRegistry.h"
 #include "Dispatch/UnrealOpenMcpGameThreadDispatcher.h"
 #include "Gate/UnrealOpenMcpGatePolicy.h"
+#include "MetaTools/UnrealOpenMcpApplyFixTool.h"
 #include "UnrealOpenMcpLog.h"
 
+#include "Core/IssueKey.h"
 #include "Core/VerifyRunner.h"
 
 #include "HAL/RunnableThread.h"
@@ -178,6 +180,52 @@ static TArray<FString> ExtractPathsHint(const FString& Body)
 		}
 	}
 	return Out;
+}
+
+// P3.7 — extract a named boolean from the request body. Used by the apply_fix
+// dispatch path to read `dry_run` (default true) BEFORE the registry resolves
+// metadata, so the dry-run short-circuit can decide whether to skip the gate.
+// Absent / wrong-type → DefaultValue.
+static bool ExtractBoolField(const FString& Body, const FString& FieldName, bool DefaultValue)
+{
+	if (Body.TrimStartAndEnd().IsEmpty())
+	{
+		return DefaultValue;
+	}
+	TSharedPtr<FJsonObject> Object;
+	TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Body);
+	if (!FJsonSerializer::Deserialize(Reader, Object) || !Object.IsValid())
+	{
+		return DefaultValue;
+	}
+	if (!Object->HasTypedField<EJson::Bool>(FieldName))
+	{
+		return DefaultValue;
+	}
+	return Object->GetBoolField(FieldName);
+}
+
+// P3.7 — extract a named string from the request body. Used by the apply_fix
+// dispatch path to read `issue_id` so the dispatcher can auto-derive a
+// paths_hint (the issue's asset path) when the caller omits one. Absent /
+// wrong-type → empty.
+static FString ExtractStringField(const FString& Body, const FString& FieldName)
+{
+	if (Body.TrimStartAndEnd().IsEmpty())
+	{
+		return FString();
+	}
+	TSharedPtr<FJsonObject> Object;
+	TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Body);
+	if (!FJsonSerializer::Deserialize(Reader, Object) || !Object.IsValid())
+	{
+		return FString();
+	}
+	if (!Object->HasTypedField<EJson::String>(FieldName))
+	{
+		return FString();
+	}
+	return Object->GetStringField(FieldName);
 }
 
 const TCHAR* FUnrealOpenMcpBridgeHttpServer::PortEnvVar()
@@ -735,10 +783,22 @@ namespace
 	// synthesize a Skipped gate result so the envelope builder branches
 	// uniformly; mutating tools route through FUnrealOpenMcpGatePolicy::Execute
 	// and carry the resolved gate decision.
+	//
+	// P3.7 — apply_fix carries an optional rollback block (rolledBack /
+	// restoredPaths / rollbackDisabled) when the ApplyFixGateRunner had to
+	// restore the snapshot after a failed/corrupting fix. Every other tool
+	// leaves these fields at their defaults.
 	struct FUnrealOpenMcpDispatchOutcome
 	{
 		FUnrealOpenMcpToolDispatchResult Tool;
 		FUnrealOpenMcpGateDispatchResult Gate;
+		// P3.7 — apply_fix-only rollback summary. Emitted as a top-level
+		// `rollback` block in the success envelope when bRolledBack or
+		// bRollbackDisabled is true.
+		bool bRolledBack = false;
+		bool bRollbackDisabled = false;
+		FString RollbackReason;
+		TArray<FString> RestoredPaths;
 	};
 } // namespace
 
@@ -786,14 +846,42 @@ void FUnrealOpenMcpBridgeHttpServer::HandleToolDispatch(
 		? FUnrealOpenMcpGatePolicy::ParseMode(GateToken)
 		: Metadata.DefaultGate;
 
+	// P3.7 — apply_fix dispatch path special-cases:
+	//   1. dry_run (the default) is a no-op mutation — the gate would run a
+	//      full checkpoint+validate around a Describe() that changes nothing.
+	//      Short-circuit to the inner handler directly so dry-run previews
+	//      stay cheap. Unity parity (BridgeHttpServer.cs:773).
+	//   2. non-dry-run apply runs through FUnrealOpenMcpApplyFixGateRunner
+	//      (rollback snapshot around the gate) — see GameThreadBody.
+	//   3. paths_hint auto-derived from issue_id when the caller omits one
+	//      (the issue's asset path IS the mutation scope). Mirrors Unity's
+	//      BridgeRequestBody.PathsFromIssueId.
+	const bool bIsApplyFixTool = ToolName == TEXT("unreal_open_mcp_apply_fix");
+	const bool bApplyFixDryRun = bIsApplyFixTool && ExtractBoolField(Body, TEXT("dry_run"), true);
+
 	// paths_hint extraction. Read-only tools skip this (no gate path). Mutating
 	// tools MUST supply a non-empty hint — there is no whole-project fallback
 	// (Unity parity; pinned by AGENTS.md §Gate policy). The hint may be empty
 	// only when gate:"off" is explicitly requested.
 	TArray<FString> PathsHint;
-	if (Metadata.bIsMutating && EffectiveGate != EUnrealOpenMcpGateMode::Off)
+	if (Metadata.bIsMutating && EffectiveGate != EUnrealOpenMcpGateMode::Off && !bApplyFixDryRun)
 	{
 		PathsHint = ExtractPathsHint(Body);
+		if (PathsHint.Num() == 0 && bIsApplyFixTool)
+		{
+			// Auto-derive from issue_id: the issue's asset path is the
+			// mutation scope. Parse the canonical key and extract the asset
+			// path component (Unity parity).
+			const FString IssueId = ExtractStringField(Body, TEXT("issue_id"));
+			FString ParsedRuleId;
+			EVerifySeverity ParsedSeverity = EVerifySeverity::Warning;
+			FString ParsedAssetPath;
+			FString ParsedIssueCode;
+			if (!IssueId.IsEmpty() && FIssueKey::TryParse(IssueId, ParsedRuleId, ParsedSeverity, ParsedAssetPath, ParsedIssueCode))
+			{
+				PathsHint.Add(ParsedAssetPath);
+			}
+		}
 		if (PathsHint.Num() == 0)
 		{
 			// Fail fast BEFORE any mutation runs. The structured error names the
@@ -826,13 +914,47 @@ void FUnrealOpenMcpBridgeHttpServer::HandleToolDispatch(
 			Body = Body,
 			Metadata,
 			EffectiveGate,
-			PathsHint = MoveTemp(PathsHint)
+			PathsHint = MoveTemp(PathsHint),
+			bIsApplyFixTool,
+			bApplyFixDryRun
 		]() -> FUnrealOpenMcpDispatchOutcome
 	{
 		// Ensure the verify rule registry is populated before any gate pass —
 		// the gate flow runs checkpoint + validate over every registered rule.
 		// Idempotent (the verify module's StartupModule calls this too).
 		FVerifyRunner::EnsureDefaultsRegistered();
+		// P3.7 — apply_fix dry-run is a no-op mutation: dispatch directly
+		// (the inner handler runs Describe and short-circuits). No gate, no
+		// rollback snapshot. The synthetic Skipped outcome keeps the envelope
+		// builder uniform.
+		if (bIsApplyFixTool && bApplyFixDryRun)
+		{
+			FUnrealOpenMcpDispatchOutcome Out;
+			Out.Tool = FUnrealOpenMcpApplyFixTool::Execute(Body);
+			Out.Gate.Mutation = Out.Tool;
+			Out.Gate.bGateRan = false;
+			Out.Gate.Outcome = Out.Tool.bOk ? EUnrealOpenMcpGateOutcome::Skipped : EUnrealOpenMcpGateOutcome::Failed;
+			Out.Gate.bGateFailed = !Out.Tool.bOk;
+			return Out;
+		}
+
+		// P3.7 — non-dry-run apply_fix runs through the gate runner so a
+		// FixRollback snapshot is active (the inner handler refuses a non-
+		// dry-run apply without one). The runner reuses FUnrealOpenMcpGatePolicy
+		// internally and adds the rollback step.
+		if (bIsApplyFixTool)
+		{
+			const FUnrealOpenMcpApplyFixGateRunnerResult RunnerResult =
+				FUnrealOpenMcpApplyFixGateRunner::Execute(Body, EffectiveGate, PathsHint);
+			FUnrealOpenMcpDispatchOutcome Out;
+			Out.Tool = RunnerResult.Gate.Mutation;
+			Out.Gate = RunnerResult.Gate;
+			Out.bRolledBack = RunnerResult.bRolledBack;
+			Out.bRollbackDisabled = RunnerResult.bRollbackDisabled;
+			Out.RollbackReason = RunnerResult.RollbackReason;
+			Out.RestoredPaths = RunnerResult.RestoredPaths;
+			return Out;
+		}
 
 		if (!Metadata.bIsMutating)
 		{
@@ -880,7 +1002,22 @@ void FUnrealOpenMcpBridgeHttpServer::HandleToolDispatch(
 			// existing parsers keep working. The gate block is added only when
 			// the gate ran (or when the outcome is non-passing, so a Warned
 			// mutation surfaces its warnings even though it committed).
-			if (Metadata.bIsMutating && (Outcome.Gate.bGateRan || Outcome.Gate.bGateFailed))
+			//
+			// P3.7 — apply_fix dispatches that rolled back (or committed with
+			// gate:"off") emit a `rollback` block alongside the gate summary so
+			// an agent sees the rollback decision in a structured field.
+			const bool bEmitGateBlock = Metadata.bIsMutating && (Outcome.Gate.bGateRan || Outcome.Gate.bGateFailed);
+			const bool bEmitRollbackBlock = Outcome.bRolledBack || Outcome.bRollbackDisabled;
+			if (bEmitGateBlock && bEmitRollbackBlock)
+			{
+				FUnrealOpenMcpBridgeEnvelope::FApplyFixRollbackFields Rollback;
+				Rollback.bRolledBack = Outcome.bRolledBack;
+				Rollback.bRollbackDisabled = Outcome.bRollbackDisabled;
+				Rollback.RollbackReason = Outcome.RollbackReason;
+				Rollback.RestoredPaths = Outcome.RestoredPaths;
+				SendJson(Client, 200, FUnrealOpenMcpBridgeEnvelope::BuildSuccessWithGateAndRollback(ToolResult.Output, Outcome.Gate, Rollback));
+			}
+			else if (bEmitGateBlock)
 			{
 				SendJson(Client, 200, FUnrealOpenMcpBridgeEnvelope::BuildSuccessWithGate(ToolResult.Output, Outcome.Gate));
 			}

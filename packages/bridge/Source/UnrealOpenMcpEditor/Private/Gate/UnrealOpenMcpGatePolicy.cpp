@@ -129,11 +129,20 @@ namespace UnrealOpenMcpGatePolicyInternal
 
 		if (CategoryId == TEXT("broken_soft_references"))
 		{
-			OutFixId = TEXT("relink_broken_soft_reference");
+			// P3.7 — clear_broken_soft_reference is the Safe provider for this
+			// rule. relink_broken_soft_reference remains a future unsafe
+			// provider (judgment call: picking a new target). Only Safe fixes
+			// are auto-suggested; the agent can still call apply_fix
+			// explicitly with an unsafe fix id when one is registered.
+			OutFixId = TEXT("clear_broken_soft_reference");
 			return true;
 		}
 		if (CategoryId == TEXT("missing_blueprint_parent"))
 		{
+			// No Safe provider for this code in v1 (clearing a missing parent
+			// is rarely Safe). The hint still resolves so an agent reading the
+			// gate guidance knows the rule has a fix family — apply_fix will
+			// surface availableFixIds when called without a fix_id.
 			OutFixId = TEXT("reparent_blueprint");
 			return true;
 		}

@@ -36,6 +36,7 @@ Rules for `packages/verify/` — the scoped health-check module for Unreal Open 
 - Every fix implements `IFixProvider` (plain C++ abstract class) and registers via `FFixProviderRegistry`.
 - Every fix must declare a `FixId` (returned by `GetFixId()`) and implement `CanFix(issueId)`.
 - `Safe: true` fixes are the only ones the gate will auto-suggest. `FFixProviderRegistry::TryGetFixInfo` / `CandidatesForIssue` surface the provider's REAL Safe flag from `Describe()` (regression guard: a previous Unity implementation hardwired safe=true and masked unsafe fixes as auto-applyable). When `Describe()` throws, the registry defaults Safe to **false** so the gate never auto-applies something it cannot reason about (WITH_EXCEPTIONS only).
+- v1 implemented fix: `clear_broken_soft_reference` (Safe — nulls a broken soft object pointer at a precise top-level property path and saves the package; refuses struct-nested properties in v1, returning `safe:false` from `Describe()` so the gate never auto-suggests them). Registers via `FFixProviderRegistry::RegisterDefaults` so the verify module's `StartupModule` wires it at boot. Adding a new fix means: implement `IFixProvider`, register it in `RegisterDefaults`, and update the gate-policy hint + the MCP catalog.
 
 ## Capability catalog sync
 

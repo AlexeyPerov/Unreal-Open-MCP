@@ -138,6 +138,59 @@ FString FUnrealOpenMcpBridgeEnvelope::BuildSuccessWithGate(
 	return Out;
 }
 
+FString FUnrealOpenMcpBridgeEnvelope::BuildSuccessWithGateAndRollback(
+	const FString& ResultJson,
+	const FUnrealOpenMcpGateDispatchResult& GateResult,
+	const FApplyFixRollbackFields& Rollback)
+{
+	namespace Internal = UnrealOpenMcpEnvelopeInternal;
+	FString Out;
+	Out.Reserve(96 + ResultJson.Len());
+	Out += TEXT("{\"ok\":true,\"result\":");
+	if (ResultJson.TrimStartAndEnd().IsEmpty())
+	{
+		Out += TEXT("null");
+	}
+	else
+	{
+		Out += ResultJson;
+	}
+	Out += TEXT(',');
+	Internal::AppendGateSummary(Out, GateResult);
+
+	// Rollback block — emitted only when one of the rollback signals is set.
+	// A clean apply_fix pass (gate passed, no rollback) does NOT emit the
+	// block so the wire shape is identical to BuildSuccessWithGate.
+	if (Rollback.bRolledBack || Rollback.bRollbackDisabled)
+	{
+		Out += TEXT(",\"rollback\":{");
+		Out += TEXT("\"rolledBack\":");
+		Out += Rollback.bRolledBack ? TEXT("true") : TEXT("false");
+		if (Rollback.bRollbackDisabled)
+		{
+			Out += TEXT(",\"rollbackDisabled\":true");
+		}
+		if (!Rollback.RollbackReason.IsEmpty())
+		{
+			Out += TEXT(",\"reason\":");
+			FUnrealOpenMcpBridgeJson::AppendJsonString(Out, Rollback.RollbackReason);
+		}
+		if (Rollback.RestoredPaths.Num() > 0)
+		{
+			Out += TEXT(",\"restoredPaths\":[");
+			for (int32 i = 0; i < Rollback.RestoredPaths.Num(); ++i)
+			{
+				if (i > 0) Out += TEXT(',');
+				FUnrealOpenMcpBridgeJson::AppendJsonString(Out, Rollback.RestoredPaths[i]);
+			}
+			Out += TEXT(']');
+		}
+		Out += TEXT('}');
+	}
+	Out += TEXT('}');
+	return Out;
+}
+
 FString FUnrealOpenMcpBridgeEnvelope::BuildError(const FString& Code, const FString& Message)
 {
 	// {ok:false, error:{code, message}} — the error object reuses the same

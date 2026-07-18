@@ -24,6 +24,10 @@ import { levelCreate } from "./level-create.js";
 import { validateEdit } from "./validate-edit.js";
 import { checkpointCreate } from "./checkpoint-create.js";
 import { delta } from "./delta.js";
+// P3.7 — apply_fix. Mutating tool (default gate Enforce); dry_run short-
+// circuits the gate, non-dry-run applies route through the ApplyFixGateRunner
+// so a FixRollback snapshot protects the asset.
+import { applyFix } from "./apply-fix.js";
 
 // Tool registry. P1.7 registers the first real tool — `unreal_open_mcp_ping` —
 // which the MCP server routes to the bridge's `GET /ping`. Each subsequent tool
@@ -66,6 +70,11 @@ import { delta } from "./delta.js";
 // participate in the gate workflow but bypass GatePolicy.Execute (no
 // recursion). They surface the explicit checkpoint → mutate → delta contract
 // agents drive when they want a manual gate pass.
+// P3.7 adds `apply_fix` — the fix application workflow. Dry-run previews the
+// fix (no mutation, no gate); non-dry-run applies run through the
+// ApplyFixGateRunner so a FixRollback snapshot protects the asset and a
+// corrupting fix is auto-reverted on failure or new errors under Enforce.
+// v1 ships the single Safe provider `clear_broken_soft_reference`.
 export const ALL_TOOLS: Tool[] = [
   ping,
   actorFind,
@@ -90,4 +99,5 @@ export const ALL_TOOLS: Tool[] = [
   validateEdit,
   checkpointCreate,
   delta,
+  applyFix,
 ];

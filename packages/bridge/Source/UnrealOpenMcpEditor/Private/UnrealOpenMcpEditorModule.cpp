@@ -49,6 +49,7 @@
 // path runs them directly (they participate in the gate workflow but must
 // not recurse through GatePolicy.Execute).
 #include "MetaTools/UnrealOpenMcpGateMetaTools.h"
+#include "MetaTools/UnrealOpenMcpApplyFixTool.h"
 
 #include "HAL/PlatformProcess.h"
 #include "Misc/EngineVersion.h"
@@ -239,6 +240,13 @@ private:
 			// only (the dispatch policy runs them directly; they do not
 			// recurse through GatePolicy.Execute).
 			FUnrealOpenMcpGateMetaTools::Register(*ToolRegistry);
+
+			// P3.7 — apply_fix. Mutating tool (default gate Enforce); the
+			// dispatch path short-circuits dry_run=true directly to the inner
+			// handler (no gate around a preview that mutates nothing) and
+			// routes non-dry-run applies through the ApplyFixGateRunner so a
+			// FixRollback snapshot protects the asset.
+			FUnrealOpenMcpApplyFixMetaTools::Register(*ToolRegistry);
 	}
 
 	// Owned. Constructed in StartupModule, torn down in ShutdownModule. The

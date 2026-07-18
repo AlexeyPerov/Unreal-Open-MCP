@@ -9,7 +9,10 @@
 #include "Bridge/UnrealOpenMcpInstancePortResolver.h"
 #include "Bridge/UnrealOpenMcpToolRegistry.h"
 #include "Dispatch/UnrealOpenMcpGameThreadDispatcher.h"
+#include "Gate/UnrealOpenMcpGatePolicy.h"
 #include "UnrealOpenMcpLog.h"
+
+#include "Core/VerifyRunner.h"
 
 #include "HAL/RunnableThread.h"
 #include "HAL/PlatformProcess.h"
@@ -19,6 +22,10 @@
 #include "Common/TcpSocketBuilder.h"
 #include "Interfaces/IPv4/IPv4Address.h"
 #include "Interfaces/IPv4/IPv4Endpoint.h"
+// P3.5 — FJsonObject / TJsonReader for the paths_hint array extraction.
+#include "Dom/JsonObject.h"
+#include "Serialization/JsonReader.h"
+#include "Serialization/JsonSerializer.h"
 
 // HTTP/1.1 request-line timeout. Short because /ping is a readiness probe —
 // clients either send the request line immediately or have already given up.
@@ -90,6 +97,87 @@ static uint32 ExtractTimeoutMs(const FString& Body)
 		static_cast<int64>(MinToolDispatchTimeoutMs),
 		static_cast<int64>(MaxToolDispatchTimeoutMs));
 	return static_cast<uint32>(Clamped);
+}
+
+// P3.5 — extract the wire `gate` token from the request body. Hand-rolled
+// substring parse, same philosophy as ExtractTimeoutMs: a tiny scanner that
+// avoids the FJsonObject dependency for the dispatch boundary. Recognizes
+// "enforce" / "warn" / "off" (the wire tokens); absent/unparseable → empty so
+// the caller falls back to the tool-default / project-default precedence.
+static FString ExtractGateToken(const FString& Body)
+{
+	if (Body.IsEmpty())
+	{
+		return FString();
+	}
+	const FString Key = TEXT("\"gate\"");
+	const int32 KeyIdx = Body.Find(*Key, ESearchCase::CaseSensitive, ESearchDir::FromStart);
+	if (KeyIdx == INDEX_NONE)
+	{
+		return FString();
+	}
+	const int32 ColonIdx = Body.Find(TEXT(":"), ESearchCase::CaseSensitive, ESearchDir::FromStart, KeyIdx + Key.Len());
+	if (ColonIdx == INDEX_NONE)
+	{
+		return FString();
+	}
+	int32 Start = ColonIdx + 1;
+	while (Start < Body.Len() && FChar::IsWhitespace(Body[Start]))
+	{
+		++Start;
+	}
+	if (Start >= Body.Len() || Body[Start] != TEXT('"'))
+	{
+		return FString();
+	}
+	++Start; // step past the opening quote
+	int32 End = Start;
+	while (End < Body.Len() && Body[End] != TEXT('"') && Body[End] != TEXT('\\'))
+	{
+		++End;
+	}
+	if (End >= Body.Len() || Body[End] != TEXT('"'))
+	{
+		return FString();
+	}
+	return Body.Mid(Start, End - Start);
+}
+
+// P3.5 — extract the `paths_hint` string array from the request body. Parses
+// the body into an FJsonObject (paths_hint is an array of strings; a hand-
+// rolled scan would be brittle for arrays). Empty / absent / wrong-type →
+// empty array; the dispatch policy treats an empty hint on a mutating tool as
+// paths_hint_required.
+static TArray<FString> ExtractPathsHint(const FString& Body)
+{
+	TArray<FString> Out;
+	if (Body.TrimStartAndEnd().IsEmpty())
+	{
+		return Out;
+	}
+	TSharedPtr<FJsonObject> Object;
+	TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Body);
+	if (!FJsonSerializer::Deserialize(Reader, Object) || !Object.IsValid())
+	{
+		return Out;
+	}
+	const TArray<TSharedPtr<FJsonValue>>* Arr = Object->GetArrayField(TEXT("paths_hint"));
+	if (Arr == nullptr)
+	{
+		return Out;
+	}
+	for (const TSharedPtr<FJsonValue>& Item : *Arr)
+	{
+		if (Item.IsValid() && Item->Type == EJson::String)
+		{
+			const FString Path = Item->AsString();
+			if (!Path.IsEmpty())
+			{
+				Out.Add(Path);
+			}
+		}
+	}
+	return Out;
 }
 
 const TCHAR* FUnrealOpenMcpBridgeHttpServer::PortEnvVar()
@@ -638,84 +726,181 @@ void FUnrealOpenMcpBridgeHttpServer::HandlePing(FSocket& Client)
 	SendJson(Client, 503, BodyJson);
 }
 
+namespace
+{
+	// Outcome of one tool dispatch through the gate. The dispatched game-thread
+	// body returns both the tool-level result and the gate-level result so the
+	// listener thread can build the right envelope (success vs failure, with vs
+	// without a gate summary) without re-running the gate. Read-only tools
+	// synthesize a Skipped gate result so the envelope builder branches
+	// uniformly; mutating tools route through FUnrealOpenMcpGatePolicy::Execute
+	// and carry the resolved gate decision.
+	struct FUnrealOpenMcpDispatchOutcome
+	{
+		FUnrealOpenMcpToolDispatchResult Tool;
+		FUnrealOpenMcpGateDispatchResult Gate;
+	};
+} // namespace
+
 void FUnrealOpenMcpBridgeHttpServer::HandleToolDispatch(
 	FSocket& Client, const FString& ToolName, const FString& Body, const FString& AgentId)
 {
-	// P2.1 tool dispatch. The handler runs on the GAME THREAD via the
-	// dispatcher — this is a pinned acceptance criterion (game-thread dispatch
-	// enforced). The HTTP listener worker thread blocks on the future here,
-	// same shape as HandlePing, but with a tool-specific timeout.
+	// P3.5 tool dispatch. P2.1 ran the handler directly; P3.5 wraps every
+	// mutating dispatch in FUnrealOpenMcpGatePolicy::Execute so the
+	// checkpoint → mutate → validate → delta policy path is the single
+	// mandatory chokepoint. Read-only tools still dispatch directly (gate Off
+	// skips the gate entirely). The handler runs on the GAME THREAD via the
+	// dispatcher — pinned acceptance criterion (game-thread dispatch enforced).
 	//
 	// Timeout resolution mirrors Unity's BridgeRequestBody.ExtractTimeoutMs:
 	//   request body timeout_ms → clamped to [Min, Max] → DefaultToolDispatchTimeoutMs
-	// when the field is absent. Hand-rolled substring parse (no FJsonObject) —
-	// consistent with the rest of the bridge's JSON philosophy.
+	// when the field is absent.
 	const uint32 TimeoutMs = ExtractTimeoutMs(Body);
 
-	// Resolve the handler out here (registry lookup is cheap and does not need
-	// the game thread) so the dispatched body can capture it by value. If the
-	// tool vanished between RouteRequest's Contains check and here (registry
-	// mutated), fall back to tool_not_found.
+	// Resolve the handler + metadata out here (registry lookup is cheap and
+	// does not need the game thread) so the dispatched body can capture them by
+	// value. If the tool vanished between RouteRequest's Contains check and
+	// here (registry mutated), fall back to tool_not_found.
 	FUnrealOpenMcpToolHandler Handler;
 	if (!ToolRegistry.TryGet(ToolName, Handler) || !Handler)
 	{
 		SendJson(Client, 404, FUnrealOpenMcpBridgeEnvelope::BuildToolNotFound(ToolName));
 		return;
 	}
+	FUnrealOpenMcpToolMetadata Metadata;
+	if (!ToolRegistry.TryGetMetadata(ToolName, Metadata))
+	{
+		// Defensive — registry guarantees metadata is present whenever a handler
+		// is. Treat as read-only + gate Off so a corrupt entry still dispatches
+		// (the operator can fix the registration separately).
+		Metadata = FUnrealOpenMcpToolMetadata::ReadOnly();
+	}
 
-	// Marshal the handler onto the game thread via the dispatcher — pinned
-	// acceptance criterion (game-thread dispatch enforced). The dispatched body
-	// captures ONLY by value (Handler, Body) — never `this` — so it is safe
-	// even if the server is torn down between EnqueueAsync and the game thread
-	// draining the body. The dispatcher's single-completion guard absorbs a
-	// late body without a crash; reading through a dead `this` would be UB.
-	//
+	// Gate precedence (docs/api/bridge-http.md#gate-policy):
+	//   valid request `gate`  →  tool default.
+	// Project default lands between these in a later phase (the project
+	// settings surface is not wired yet). Unity adds (2) BridgeGateDefaultPolicy;
+	// the Unreal port adds it when the settings tab lands.
+	const FString GateToken = ExtractGateToken(Body);
+	const EUnrealOpenMcpGateMode EffectiveGate = !GateToken.IsEmpty()
+		? FUnrealOpenMcpGatePolicy::ParseMode(GateToken)
+		: Metadata.DefaultGate;
+
+	// paths_hint extraction. Read-only tools skip this (no gate path). Mutating
+	// tools MUST supply a non-empty hint — there is no whole-project fallback
+	// (Unity parity; pinned by AGENTS.md §Gate policy). The hint may be empty
+	// only when gate:"off" is explicitly requested.
+	TArray<FString> PathsHint;
+	if (Metadata.bIsMutating && EffectiveGate != EUnrealOpenMcpGateMode::Off)
+	{
+		PathsHint = ExtractPathsHint(Body);
+		if (PathsHint.Num() == 0)
+		{
+			// Fail fast BEFORE any mutation runs. The structured error names the
+			// tool and the effective gate mode so an agent can self-correct.
+			SendJson(Client, 200, FUnrealOpenMcpBridgeEnvelope::BuildPathsHintRequired(ToolName, EffectiveGate));
+			return;
+		}
+	}
+
 	// The fair request queue (RequestQueue) is available on the listener thread
-	// for X-Agent-Id-keyed fairness accounting; in P2.1's single-stream
-	// listener every dispatch is serialized so the queue is exercised by its
-	// own spec and wired here for the concurrent-dispatch path a later phase
-	// adds. Capturing the agent id + tool name into the queue before dispatch
-	// keeps the bookkeeping on the listener thread (where `this` is alive),
-	// while the handler runs on the game thread with no `this` dependency.
+	// for X-Agent-Id-keyed fairness accounting; in the single-stream listener
+	// every dispatch is serialized so the queue is exercised by its own spec
+	// and wired here for the concurrent-dispatch path a later phase adds.
 	RequestQueue.Submit(AgentId, ToolName, []() -> FUnrealOpenMcpToolDispatchResult
 	{
-		// Bookkeeping-only entry: Submit enqueues, picks, and runs this lambda
-		// inline on the listener thread. The real handler runs separately on
-		// the game thread (below). This exercises the queue's fairness path on
-		// every dispatch so the structure is live; when a concurrent dispatch
-		// path lands, the handler will run through Submit directly.
 		return FUnrealOpenMcpToolDispatchResult::Ok();
 	});
 
-	auto GameThreadBody = [Handler = MoveTemp(Handler), Body = Body]() -> FUnrealOpenMcpToolDispatchResult
+	// Marshal the handler (and, for mutating tools, the gate wrapper) onto the
+	// game thread. The dispatched body captures ONLY by value — never `this` —
+	// so it is safe even if the server is torn down between EnqueueAsync and
+	// the game thread draining the body.
+	//
+	// The body returns BOTH the tool dispatch result AND the gate dispatch
+	// result so the listener thread can build the right envelope without
+	// re-running the gate. Read-only tools synthesize a Skipped gate result so
+	// the envelope builder branches uniformly.
+	auto GameThreadBody = [
+			Handler = MoveTemp(Handler),
+			Body = Body,
+			Metadata,
+			EffectiveGate,
+			PathsHint = MoveTemp(PathsHint)
+		]() -> FUnrealOpenMcpDispatchOutcome
 	{
-		return Handler(Body);
+		// Ensure the verify rule registry is populated before any gate pass —
+		// the gate flow runs checkpoint + validate over every registered rule.
+		// Idempotent (the verify module's StartupModule calls this too).
+		FVerifyRunner::EnsureDefaultsRegistered();
+
+		if (!Metadata.bIsMutating)
+		{
+			// Read-only: dispatch directly, no gate. The synthetic gate result
+			// carries the handler outcome (Skipped on success, Failed on
+			// mutation error) so the envelope builder branches uniformly.
+			FUnrealOpenMcpDispatchOutcome Out;
+			Out.Tool = Handler(Body);
+			Out.Gate.Mutation = Out.Tool;
+			Out.Gate.bGateRan = false;
+			Out.Gate.Outcome = Out.Tool.bOk ? EUnrealOpenMcpGateOutcome::Skipped : EUnrealOpenMcpGateOutcome::Failed;
+			Out.Gate.bGateFailed = !Out.Tool.bOk;
+			return Out;
+		}
+
+		// Mutating: route through the gate. The mutation callback the gate
+		// invokes IS the tool handler — the gate owns the checkpoint + validate
+		// sandwich around it.
+		FUnrealOpenMcpDispatchOutcome MutateOut;
+		MutateOut.Gate = FUnrealOpenMcpGatePolicy::Execute(EffectiveGate, PathsHint, [&Handler, &Body]() -> FUnrealOpenMcpToolDispatchResult
+		{
+			return Handler(Body);
+		});
+		MutateOut.Tool = MutateOut.Gate.Mutation;
+		return MutateOut;
 	};
 
-	TFuture<TUnrealOpenMcpDispatchResult<FUnrealOpenMcpToolDispatchResult>> Future =
-		Dispatcher.EnqueueAsync<FUnrealOpenMcpToolDispatchResult>(MoveTemp(GameThreadBody), TimeoutMs);
+	TFuture<TUnrealOpenMcpDispatchResult<FUnrealOpenMcpDispatchOutcome>> Future =
+		Dispatcher.EnqueueAsync<FUnrealOpenMcpDispatchOutcome>(MoveTemp(GameThreadBody), TimeoutMs);
 
-	const TUnrealOpenMcpDispatchResult<FUnrealOpenMcpToolDispatchResult> Result = Future.Get();
+	const TUnrealOpenMcpDispatchResult<FUnrealOpenMcpDispatchOutcome> Result = Future.Get();
 
 	// Map the dispatcher outcome to the canonical envelope. A Success means the
-	// body ran (the handler returned its own Ok/Fail); every other outcome is a
-	// dispatch-level failure mapped to a distinct error code.
+	// body ran (the handler + gate returned their own outcomes); every other
+	// outcome is a dispatch-level failure mapped to a distinct error code.
 	if (Result.Result == EUnrealOpenMcpDispatchResult::Success)
 	{
-		const FUnrealOpenMcpToolDispatchResult& ToolResult = Result.Value.Get(FUnrealOpenMcpToolDispatchResult::Fail(
-			TEXT("empty_output"), TEXT("Tool returned no result.")));
+		const FUnrealOpenMcpDispatchOutcome Outcome = Result.Value.Get(FUnrealOpenMcpDispatchOutcome{});
+		const FUnrealOpenMcpToolDispatchResult& ToolResult = Outcome.Tool;
 
 		if (ToolResult.bOk)
 		{
-			SendJson(Client, 200, FUnrealOpenMcpBridgeEnvelope::BuildSuccess(ToolResult.Output));
+			// Success. Mutating tools emit the widened envelope (with gate
+			// summary); read-only tools emit the P2.1 shape verbatim so the
+			// existing parsers keep working. The gate block is added only when
+			// the gate ran (or when the outcome is non-passing, so a Warned
+			// mutation surfaces its warnings even though it committed).
+			if (Metadata.bIsMutating && (Outcome.Gate.bGateRan || Outcome.Gate.bGateFailed))
+			{
+				SendJson(Client, 200, FUnrealOpenMcpBridgeEnvelope::BuildSuccessWithGate(ToolResult.Output, Outcome.Gate));
+			}
+			else
+			{
+				SendJson(Client, 200, FUnrealOpenMcpBridgeEnvelope::BuildSuccess(ToolResult.Output));
+			}
 		}
 		else
 		{
-			// Tool ran and returned a structured failure (e.g. invalid_request,
-			// execution_error). HTTP 200 with {ok:false} — structured tool
-			// outcomes are never transport failures (mirrors Unity's envelope
-			// discipline).
-			SendJson(Client, 200, FUnrealOpenMcpBridgeEnvelope::BuildError(ToolResult.Code, ToolResult.Message));
+			// Tool ran and returned a structured failure. Mutating tools emit
+			// the gate summary alongside the tool error so an agent sees both.
+			if (Metadata.bIsMutating && (Outcome.Gate.bGateRan || Outcome.Gate.bGateFailed))
+			{
+				SendJson(Client, 200, FUnrealOpenMcpBridgeEnvelope::BuildErrorWithGate(ToolResult.Code, ToolResult.Message, Outcome.Gate));
+			}
+			else
+			{
+				SendJson(Client, 200, FUnrealOpenMcpBridgeEnvelope::BuildError(ToolResult.Code, ToolResult.Message));
+			}
 		}
 		return;
 	}

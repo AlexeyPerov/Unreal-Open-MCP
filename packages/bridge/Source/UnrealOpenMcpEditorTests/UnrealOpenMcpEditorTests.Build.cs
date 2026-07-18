@@ -35,7 +35,8 @@ public class UnrealOpenMcpEditorTests : ModuleRules
 			"Engine",
 			// Editor module: reach its private headers (e.g. BridgeSession.h
 			// under Private/Bridge/, Tools/UnrealOpenMcpActorTools.h under
-			// Private/Tools/) for specs.
+			// Private/Tools/, Gate/UnrealOpenMcpGatePolicy.h under
+			// Private/Gate/) for specs.
 			"UnrealOpenMcpEditor",
 			// P1.3 — the ping spec drives the loopback HTTP listener (FTcpSocketBuilder,
 			// raw socket Recv) and reads the bound port back from FSocket.
@@ -46,6 +47,12 @@ public class UnrealOpenMcpEditorTests : ModuleRules
 			// drives the editor world (GEditor) to spawn test actors.
 			"Json",
 			"UnrealEd",
+			// P3.5 — the gate-policy spec drives the verify rule registry to
+			// install stub rules (emitting known issues so the gate delta has a
+			// deterministic shape). The bridge hard-depends on verify; the
+			// specs need the same module so they can reach FVerifyRunner /
+			// IVerifyRule.
+			"UnrealOpenMcpVerify",
 		});
 
 		// Reach the editor module's PRIVATE headers so Automation specs can

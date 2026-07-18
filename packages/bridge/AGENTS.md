@@ -33,10 +33,13 @@ The deny-list of editor headers/modules lives in the script so the policy is rea
 - Tools are registered with the HTTP server and dispatched via `POST /tools/{name}`.
 - Every new tool must declare:
   - A unique `Name` (the MCP tool name, `unreal_open_mcp_*`).
-  - Whether it is mutating (changes Unreal project/editor state).
-  - Default gate mode for mutating tools (`Enforce` / `Warn` / `Off`).
+  - Whether it is mutating (changes Unreal project/editor state) via the registry metadata API.
+  - Default gate mode for mutating tools (`Enforce` / `Warn` / `Off`) — the metadata consulted when neither the request nor the project default applies.
   - Tool group id from the canonical catalog in `mcp-server/src/capabilities/tool-groups.ts`.
-- Mutating tools must accept and honor the request-level `gate` value.
+- Registry API:
+  - `Register(name, handler)` — read-only shorthand. Defaults to non-mutating with gate Off (no gate path).
+  - `Register(name, handler, FUnrealOpenMcpToolMetadata::Mutating())` — mutating tool. Defaults to gate Enforce; the dispatch policy routes it through `FUnrealOpenMcpGatePolicy::Execute`.
+- Mutating tools must accept `paths_hint: string[]` (mandatory, no whole-project fallback) and the optional request-level `gate` value.
 - When adding/removing/renaming a tool, update the MCP-side tool definition (`mcp-server/src/tools/`) in the same task.
 
 ## Tool-group visibility
@@ -47,9 +50,12 @@ The deny-list of editor headers/modules lives in the script so the policy is rea
 
 ## Gate policy
 
-- The gate flow (checkpoint → mutate → validate → delta) is the bridge's core safety contract. Do not add a mutating dispatch path that bypasses `GatePolicy.Execute`.
-- `paths_hint` is mandatory for mutating tool calls — there is no whole-project fallback. Do not add one.
-- Gate precedence: request `gate` → project default → tool default.
+- The gate flow (checkpoint → mutate → validate → delta) is the bridge's core safety contract. Do not add a mutating dispatch path that bypasses `FUnrealOpenMcpGatePolicy::Execute` (the single dispatch chokepoint wired in `HandleToolDispatch`).
+- `paths_hint` is mandatory for mutating tool calls — there is no whole-project fallback. Do not add one. An empty hint fails fast with `paths_hint_required` BEFORE any mutation runs; only `gate:"off"` bypasses the hint.
+- Gate precedence: request `gate` → tool default (the project default slot is wired when the settings tab lands). Request `gate` is case-sensitive; unknown values fall back to Enforce.
+- Mutating tools register with `FUnrealOpenMcpToolMetadata::Mutating()` so the dispatch policy knows to route them through the gate. Read-only tools use the `Register(name, handler)` shorthand (defaults to non-mutating + gate Off).
+- The widened envelope (P3.5) adds a `gate` summary block to mutating dispatches. `ok` and `error.code` stay stable across the P2.1 → P3.5 widening; only additive fields appear. See [docs/api/bridge-http.md#gate-policy](../../docs/api/bridge-http.md#gate-policy).
+- Gate outcomes are stable wire tokens: `passed` / `warned` / `failed` / `skipped` / `validate_scan_failed`. `validate_scan_failed` is set ONLY by the validate-exception catch in `Execute` — `ResolveOutcome` must never produce it (parity invariant pinned by `UnrealOpenMcpGatePolicySpec`).
 
 ## Transport
 

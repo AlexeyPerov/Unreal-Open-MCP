@@ -13,6 +13,14 @@
 // UnrealEd (GEditor/GetEditorWorldContext) and Json (FJsonObject arg parsing
 // inside the tool handlers); P2.4 added actor_modify + object_modify, which
 // reflect FProperty writes via FJsonObjectConverter (JsonUtilities module).
+//
+// P3.5 added a PRIVATE dependency on UnrealOpenMcpVerify — the gate flow
+// (GatePolicy.Execute → VerifyGateAdapter → FVerifyRunner) consults verify's
+// runner + CheckpointFingerprint / VerifyResult / IssueKey types. The
+// dependency direction is one-way: bridge → verify, never the reverse (per
+// packages/verify/AGENTS.md). PRIVATE because the bridge's public headers do
+// not surface verify types — only the gate implementation files include
+// verify headers.
 using UnrealBuildTool;
 
 public class UnrealOpenMcpEditor : ModuleRules
@@ -59,11 +67,19 @@ public class UnrealOpenMcpEditor : ModuleRules
 			// vector/rotator/color/enum-by-name). The JsonUtilities module owns
 			// FJsonObjectConverter; the Json module alone does not expose it.
 			"JsonUtilities",
+			// P3.5 — gate policy. The bridge wraps every mutating dispatch in
+			// FUnrealOpenMcpGatePolicy::Execute, which consults
+			// FUnrealOpenMcpVerifyGateAdapter → FVerifyRunner for the
+			// checkpoint / validate / delta cycle. The verify module owns the
+			// rule registry (broken_soft_references / missing_blueprint_parent
+			// / compile_errors in P3.2–P3.4) and the CheckpointFingerprint /
+			// VerifyResult / IssueKey types. PRIVATE: verify types do not
+			// surface in any bridge public header.
+			"UnrealOpenMcpVerify",
 		});
 
-		// P2.4 scope: HTTP server + /ping + tool dispatch + actor find/create/
-		// modify + object_modify. No Slate UI, no gate wiring. Keep the
-		// dependency surface minimal so the Editor/Runtime boundary guard
-		// (P1.8) stays green and later phases add deps as they add features.
+		// P3.5 scope: gate policy wired at the dispatch boundary. The dependency
+		// surface stays minimal so the Editor/Runtime boundary guard (P1.8)
+		// stays green and later phases add deps as they add features.
 	}
 }

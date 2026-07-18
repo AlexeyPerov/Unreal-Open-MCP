@@ -52,6 +52,8 @@ class FSocket;
 class FUnrealOpenMcpGameThreadDispatcher;
 class FUnrealOpenMcpToolRegistry;
 class FUnrealOpenMcpBridgeRequestQueue;
+struct FUnrealOpenMcpToolMetadata;
+enum class EUnrealOpenMcpGateMode : uint8;
 
 /**
  * Loopback HTTP bridge server (P1.3: GET /ping).

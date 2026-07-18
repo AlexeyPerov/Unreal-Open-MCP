@@ -135,6 +135,7 @@ returns HTTP 200 with `ok:false` and one of these dispatch-level codes:
 | `timeout` | The handler started but did not finish within the per-call timeout. |
 | `execution_error` | The handler threw an exception. |
 | `dispatcher_shutdown` | The dispatcher is tearing down (editor quit / hot reload). |
+| `paths_hint_required` | (Mutating tools only) The request omitted `paths_hint`. The gate refuses to fall back to a whole-project scan; re-issue with `paths_hint` or set `gate:"off"`. |
 
 #### Routing / transport errors
 
@@ -143,6 +144,114 @@ returns HTTP 200 with `ok:false` and one of these dispatch-level codes:
 | `404` | `tool_not_found` | No handler registered for the tool name. |
 | `405` | `method_not_allowed` | Non-POST method on a tool endpoint. |
 | `500` | `bridge_internal_error` | Unhandled bridge fault (rare; the body is a bare `{"error":{...}}`). |
+
+## Gate policy
+
+The gate is the bridge's core safety contract for mutating tools. Every mutating
+dispatch routes through `FUnrealOpenMcpGatePolicy::Execute` — a single
+mandatory chokepoint that runs `checkpoint → mutate → validate → delta` around
+the tool handler. Read-only tools dispatch directly (gate Off) and never enter
+the gate path.
+
+### `paths_hint` is mandatory for mutating tools
+
+A mutating request MUST include a non-empty `paths_hint: string[]` (content /
+source paths the mutation is scoped to). The hint bounds both the pre-mutation
+checkpoint and the post-mutation validate scan. An empty hint fails fast with
+the structured `paths_hint_required` error BEFORE any mutation runs — there is
+no whole-project fallback scan (Unity parity; pinned by
+`packages/bridge/AGENTS.md` §Gate policy). Set `gate:"off"` to bypass the gate
+and skip the hint.
+
+### Gate precedence
+
+| Step | Source | Notes |
+|---|---|---|
+| 1 | Request `gate` | One of `"enforce"`, `"warn"`, `"off"`. Case-sensitive; unknown values fall back to Enforce. |
+| 2 | Tool default | `Enforce` for mutating tools (registry metadata); `Off` for read-only tools. |
+
+A later phase adds step 3 (project default from `.unreal-open-mcp/settings.json`).
+Until then, the tool default is the fallback.
+
+### Gate outcome
+
+The gate resolves one of five outcomes, surfaced as the wire token
+`gate.outcome`:
+
+| Outcome | Meaning |
+|---|---|
+| `passed` | Mutation committed; post-mutation delta reported no new Errors (warnings may be present). |
+| `warned` | Mutation committed; delta reported new Errors under Warn mode OR new Warnings surfaced. `gate.gateFailed` stays false (the mutation is in). |
+| `failed` | Enforce-mode delta reported new Errors, OR the mutation itself failed, OR checkpoint/delta key validation failed. The dispatch is non-passing; the agent must fix and retry. |
+| `skipped` | Gate did not run (Off mode, empty paths_hint, or read-only tool). Outcome follows the mutation result. |
+| `validate_scan_failed` | Mutation committed but the post-mutation validate scan threw — distinct from `failed` (the delta did not report new errors; the scanner blew up). The agent should run `unreal_open_mcp_validate_edit` / `unreal_open_mcp_scan_paths` to confirm health. |
+
+### Widened envelope (mutating dispatches)
+
+Mutating dispatches widen the P2.1 `{ok, result, error}` envelope with a `gate`
+summary so an agent can branch on the gate decision without parsing prose in
+`agentNextSteps`. Read-only tools keep the P2.1 shape exactly — the widening
+only adds fields, never renames or removes.
+
+Mutating success (HTTP 200):
+
+```json
+{
+  "ok": true,
+  "result": { "actor": { "label": "PointLight_1", "path": "..." } },
+  "gate": {
+    "ran": true,
+    "outcome": "passed",
+    "gateFailed": false,
+    "checkpointId": "cp_abcdef",
+    "delta": {
+      "newErrors": 0,
+      "newWarnings": 0,
+      "resolvedErrors": 0,
+      "resolvedWarnings": 0,
+      "newIssueKeys": [],
+      "resolvedIssueKeys": []
+    },
+    "categoriesRun": ["broken_soft_references", "missing_blueprint_parent", "compile_errors"],
+    "checkpointMs": 12,
+    "validateMs": 47,
+    "totalMs": 65,
+    "agentNextSteps": ["Gate passed — no new issues detected."]
+  }
+}
+```
+
+Mutating failure (HTTP 200, e.g. ValidateScanFailed):
+
+```json
+{
+  "ok": false,
+  "error": { "code": "execution_error", "message": "..." },
+  "gate": {
+    "ran": true,
+    "outcome": "validate_scan_failed",
+    "gateFailed": true,
+    "checkpointId": "cp_abcdef",
+    "agentNextSteps": [
+      "Mutation committed, but the gate's validate scan threw (...). Run unreal_open_mcp_validate_edit on the touched paths to confirm health."
+    ]
+  }
+}
+```
+
+The `paths_hint_required` body adds an `effectiveMode` field so the agent sees
+which gate mode was applied when the hint was missing:
+
+```json
+{
+  "ok": false,
+  "error": {
+    "code": "paths_hint_required",
+    "message": "Mutating tool 'unreal_open_mcp_actor_create' requires a non-empty paths_hint..."
+  },
+  "gate": { "ran": false, "outcome": "failed", "gateFailed": true, "effectiveMode": "enforce" }
+}
+```
 
 #### Smoke stub: `unreal_open_mcp_echo`
 
@@ -156,12 +265,13 @@ curl -s -X POST http://127.0.0.1:$UNREAL_OPEN_MCP_BRIDGE_PORT/tools/unreal_open_
   -d '{"hello":"world"}' | jq .
 ```
 
-#### Envelope contract (P2.1)
+#### Envelope contract (P2.1 + P3.5)
 
-The `{ok, result, error}` shape is the P2.1 canonical envelope. Gate wrapping
-(checkpoint → mutate → validate → delta) is deferred to a later phase; when it
-lands, the envelope will *widen* (adding gate/mutation fields) but `ok` and
-`error.code` stay stable so existing parsers keep working.
+The `{ok, result, error}` shape is the P2.1 canonical envelope. P3.5 widened it
+for mutating dispatches by adding a `gate` summary block (see
+[Gate policy](#gate-policy)). Read-only tools keep the P2.1 shape exactly;
+`ok` and `error.code` stay stable across both forms so a P2.1 parser keeps
+working.
 
 ### Manual smoke test
 
@@ -190,8 +300,9 @@ the caller can branch on cause:
 |---|---|
 | `/ping` 200 OK | success (the `/ping` body verbatim) |
 | `/ping` 503 not ready | `bridge_http_error` (carries the `connected:false` fallback body) |
-| `/tools/{name}` 200 `{ok:true}` | success (the `result` value verbatim) |
-| `/tools/{name}` 200 `{ok:false}` | error carrying the tool's `error.code` / `error.message` |
+| `/tools/{name}` 200 `{ok:true}` (read-only) | success (the `result` value verbatim — P2.1 shape) |
+| `/tools/{name}` 200 `{ok:true,...,"gate":{...}}` (mutating) | success; `result` is the primary payload and `gate` rides through as metadata so an agent can branch on `gate.outcome` |
+| `/tools/{name}` 200 `{ok:false}` | error carrying the tool's `error.code` / `error.message`; when a `gate` block is present it rides through as `detail.gate` |
 | `/tools/{name}` 404 / 405 / 500 | error carrying the bridge's `error.code` |
 | no listener / ECONNREFUSED | `bridge_offline` |
 | listener accepts but never responds | `bridge_timeout` |

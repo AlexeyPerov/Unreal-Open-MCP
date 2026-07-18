@@ -4,7 +4,10 @@
 
 #include "UnrealOpenMcpLog.h"
 
-bool FUnrealOpenMcpToolRegistry::Register(const FString& Name, FUnrealOpenMcpToolHandler Handler)
+bool FUnrealOpenMcpToolRegistry::Register(
+	const FString& Name,
+	FUnrealOpenMcpToolHandler Handler,
+	const FUnrealOpenMcpToolMetadata& Metadata)
 {
 	FScopeLock ScopeLock(&Lock);
 	// First registration wins. A second Register for the same name is a no-op
@@ -20,7 +23,10 @@ bool FUnrealOpenMcpToolRegistry::Register(const FString& Name, FUnrealOpenMcpToo
 			*Name);
 		return false;
 	}
-	Tools.Add(Name, MoveTemp(Handler));
+	FEntry Entry;
+	Entry.Handler = MoveTemp(Handler);
+	Entry.Metadata = Metadata;
+	Tools.Add(Name, MoveTemp(Entry));
 	return true;
 }
 
@@ -33,7 +39,7 @@ bool FUnrealOpenMcpToolRegistry::Contains(const FString& Name) const
 bool FUnrealOpenMcpToolRegistry::TryGet(const FString& Name, FUnrealOpenMcpToolHandler& OutHandler) const
 {
 	FScopeLock ScopeLock(&Lock);
-	const FUnrealOpenMcpToolHandler* Found = Tools.Find(Name);
+	const FEntry* Found = Tools.Find(Name);
 	if (Found == nullptr)
 	{
 		return false;
@@ -41,7 +47,19 @@ bool FUnrealOpenMcpToolRegistry::TryGet(const FString& Name, FUnrealOpenMcpToolH
 	// Copy the TFunction out from under the lock so the caller can invoke it
 	// without holding the registry mutex. TFunction copy is cheap (shared
 	// state under the hood).
-	OutHandler = *Found;
+	OutHandler = Found->Handler;
+	return true;
+}
+
+bool FUnrealOpenMcpToolRegistry::TryGetMetadata(const FString& Name, FUnrealOpenMcpToolMetadata& OutMetadata) const
+{
+	FScopeLock ScopeLock(&Lock);
+	const FEntry* Found = Tools.Find(Name);
+	if (Found == nullptr)
+	{
+		return false;
+	}
+	OutMetadata = Found->Metadata;
 	return true;
 }
 

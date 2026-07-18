@@ -12,7 +12,8 @@ This file is the index for external interfaces and protocol contracts exposed by
 
 ## Contract boundaries
 
-- Bridge HTTP contract source: `packages/bridge/Source/UnrealOpenMcpEditor/Private/Bridge/` (`GET /ping` + `POST /tools/{name}` dispatch with the `{ok,result,error}` envelope shipped)
+- Bridge HTTP contract source: `packages/bridge/Source/UnrealOpenMcpEditor/Private/Bridge/` (`GET /ping` + `POST /tools/{name}` dispatch with the `{ok,result,error}` envelope shipped; mutating dispatches widen the envelope with a `gate` summary block per [Gate policy](api/bridge-http.md#gate-policy))
+- Gate policy source: `packages/bridge/Source/UnrealOpenMcpEditor/Private/Gate/` (`UnrealOpenMcpGatePolicy` wraps every mutating dispatch in `checkpoint → mutate → validate → delta`; `UnrealOpenMcpVerifyGateAdapter` is the bridge→verify glue; `UnrealOpenMcpCheckpointStore` mirrors the gate's checkpoint for the P3.6 meta-tools)
 - Instance lock + port resolver source: `packages/bridge/Source/UnrealOpenMcpRuntime/Public/Bridge/UnrealOpenMcpInstancePortResolver.h` (deterministic port + lock path), `packages/bridge/Source/UnrealOpenMcpEditor/Private/Bridge/UnrealOpenMcpBridgeInstanceLock.h` (lock file writer)
 - SHA-256 source: `packages/bridge/Source/UnrealOpenMcpRuntime/Public/Crypto/UnrealOpenMcpSha256.h` (self-contained FIPS 180-4; byte-for-byte parity with Node `crypto.createHash('sha256')`)
 - MCP server routing/registry source: `mcp-server/src/index.ts` (stdio server + tool dispatch), `mcp-server/src/live-client.ts` (live bridge HTTP client; routes `ping` → `GET /ping` and every other tool → `POST /tools/{name}`)

@@ -426,3 +426,169 @@ test("ping: omits Authorization header when no token was provided", async () => 
     await bridge.close();
   }
 });
+
+// --- P3.5 widened envelope (gate summary) ----------------------------------
+
+test("postTool: success envelope with a gate block merges gate into the surfaced payload", async () => {
+  // P3.5 widening — a mutating dispatch returns
+  //   {ok:true, result:<value>, gate:{ran,outcome,gateFailed,...}}
+  // The LiveClient must merge `gate` into the surfaced payload so an agent
+  // reading the CallToolResult can branch on gate.outcome. The P2.1 `result`
+  // value stays the primary payload (under `result`).
+  const gateBlock = {
+    ran: true,
+    outcome: "passed",
+    gateFailed: false,
+    checkpointId: "cp_abc123",
+    delta: {
+      newErrors: 0,
+      newWarnings: 0,
+      resolvedErrors: 0,
+      resolvedWarnings: 0,
+      newIssueKeys: [] as string[],
+      resolvedIssueKeys: [] as string[],
+    },
+  };
+  const bridge = await startBridgeStub((_req, res) => {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: true, result: { created: "actor_42" }, gate: gateBlock }));
+  });
+  try {
+    const client = new LiveClient(bridge.port);
+    const result = await client.route("unreal_open_mcp_actor_create", {
+      classPath: "/Script/Engine.PointLight",
+      paths_hint: ["/Game/Maps/Arena.umap"],
+    });
+    assert.equal(result.isError, false);
+    const body = bodyOf(result) as { result: unknown; gate: typeof gateBlock };
+    assert.deepEqual(body.result, { created: "actor_42" });
+    assert.equal(body.gate.outcome, "passed");
+    assert.equal(body.gate.checkpointId, "cp_abc123");
+  } finally {
+    await bridge.close();
+  }
+});
+
+test("postTool: gate block on a warned outcome surfaces gateFailed=false", async () => {
+  // Warn mode commits the mutation; gateFailed stays false so an agent does
+  // not treat it as a hard failure.
+  const gateBlock = {
+    ran: true,
+    outcome: "warned",
+    gateFailed: false,
+    delta: {
+      newErrors: 1,
+      newWarnings: 0,
+      resolvedErrors: 0,
+      resolvedWarnings: 0,
+      newIssueKeys: ["broken_soft_references|ERROR|/Game/A.uasset|broken_soft_reference"],
+      resolvedIssueKeys: [] as string[],
+    },
+  };
+  const bridge = await startBridgeStub((_req, res) => {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: true, result: { ok: 1 }, gate: gateBlock }));
+  });
+  try {
+    const client = new LiveClient(bridge.port);
+    const result = await client.route("unreal_open_mcp_actor_create", {
+      classPath: "/Script/Engine.PointLight",
+      paths_hint: ["/Game/Maps/Arena.umap"],
+      gate: "warn",
+    });
+    assert.equal(result.isError, false);
+    const body = bodyOf(result) as { gate: typeof gateBlock };
+    assert.equal(body.gate.outcome, "warned");
+    assert.equal(body.gate.gateFailed, false);
+  } finally {
+    await bridge.close();
+  }
+});
+
+test("postTool: failure envelope with a gate block carries gate as detail.gate", async () => {
+  // A mutating failure (e.g. ValidateScanFailed) carries the gate summary so
+  // an agent can inspect the gate decision that produced the failure.
+  const gateBlock = {
+    ran: true,
+    outcome: "validate_scan_failed",
+    gateFailed: true,
+    checkpointId: "cp_abc",
+    agentNextSteps: ["Run validate_edit to confirm health."],
+  };
+  const bridge = await startBridgeStub((_req, res) => {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({
+      ok: false,
+      error: { code: "execution_error", message: "scanner blew up" },
+      gate: gateBlock,
+    }));
+  });
+  try {
+    const client = new LiveClient(bridge.port);
+    const result = await client.route("unreal_open_mcp_actor_create", {
+      classPath: "/Script/Engine.PointLight",
+      paths_hint: ["/Game/Maps/Arena.umap"],
+    });
+    assert.equal(result.isError, true);
+    const body = bodyOf(result) as {
+      error: { code: string; message: string };
+      gate: typeof gateBlock;
+    };
+    assert.equal(body.error.code, "execution_error");
+    assert.equal(body.gate.outcome, "validate_scan_failed");
+    assert.equal(body.gate.gateFailed, true);
+  } finally {
+    await bridge.close();
+  }
+});
+
+test("postTool: paths_hint_required failure surfaces the structured error", async () => {
+  // Mutating tool dispatched with an empty paths_hint fails fast BEFORE any
+  // mutation runs. The structured error names the tool + effective mode.
+  const bridge = await startBridgeStub((_req, res) => {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({
+      ok: false,
+      error: {
+        code: "paths_hint_required",
+        message: "Mutating tool 'unreal_open_mcp_actor_create' requires a non-empty paths_hint.",
+      },
+      gate: { ran: false, outcome: "failed", gateFailed: true, effectiveMode: "enforce" },
+    }));
+  });
+  try {
+    const client = new LiveClient(bridge.port);
+    const result = await client.route("unreal_open_mcp_actor_create", {
+      classPath: "/Script/Engine.PointLight",
+    });
+    assert.equal(result.isError, true);
+    const body = bodyOf(result) as {
+      error: { code: string };
+      gate: { effectiveMode: string };
+    };
+    assert.equal(body.error.code, "paths_hint_required");
+    assert.equal(body.gate.effectiveMode, "enforce");
+  } finally {
+    await bridge.close();
+  }
+});
+
+test("postTool: read-only success omits the gate block (P2.1 shape preserved)", async () => {
+  // Read-only tools never emit a gate block — the surfaced payload is the
+  // bare `result` value, exactly the P2.1 contract. Pinned so a regression
+  // that wraps every result in {result, gate} is caught.
+  const bridge = await startBridgeStub((_req, res) => {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: true, result: { actors: [] } }));
+  });
+  try {
+    const client = new LiveClient(bridge.port);
+    const result = await client.route("unreal_open_mcp_actor_find", {});
+    assert.equal(result.isError, false);
+    const body = bodyOf(result);
+    // The payload must be the bare actors[] object, NOT wrapped in {result, gate}.
+    assert.deepEqual(body, { actors: [] });
+  } finally {
+    await bridge.close();
+  }
+});

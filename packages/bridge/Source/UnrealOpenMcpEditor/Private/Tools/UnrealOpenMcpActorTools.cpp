@@ -648,7 +648,7 @@ void FUnrealOpenMcpActorTools::Register(FUnrealOpenMcpToolRegistry& Registry)
 			}
 			return FUnrealOpenMcpToolDispatchResult::Ok(
 				WriteJson(MakeShared<FJsonValueObject>(Result)));
-		});
+		}, FUnrealOpenMcpToolMetadata::Mutating());
 
 	// unreal_open_mcp_actor_modify — FProperty writes on resolved actor(s).
 	// Two targeting shapes:
@@ -805,7 +805,7 @@ void FUnrealOpenMcpActorTools::Register(FUnrealOpenMcpToolRegistry& Registry)
 			}
 			return FUnrealOpenMcpToolDispatchResult::Ok(
 				WriteJson(MakeShared<FJsonValueObject>(Result)));
-		});
+		}, FUnrealOpenMcpToolMetadata::Mutating());
 
 	// unreal_open_mcp_object_modify — FProperty writes on any resolved UObject
 	// (actor, component, asset instance). Uses ResolveObject (actor → loaded →
@@ -898,7 +898,7 @@ void FUnrealOpenMcpActorTools::Register(FUnrealOpenMcpToolRegistry& Registry)
 			}
 			return FUnrealOpenMcpToolDispatchResult::Ok(
 				WriteJson(MakeShared<FJsonValueObject>(Result)));
-		});
+		}, FUnrealOpenMcpToolMetadata::Mutating());
 
 	// =====================================================================
 	// P2.5 — actor tree ops + component CRUD tools.
@@ -1045,7 +1045,7 @@ void FUnrealOpenMcpActorTools::Register(FUnrealOpenMcpToolRegistry& Registry)
 			Result->SetObjectField(TEXT("actor"), ToActorData(Child, /*bIncludeComponents=*/true));
 			return FUnrealOpenMcpToolDispatchResult::Ok(
 				WriteJson(MakeShared<FJsonValueObject>(Result)));
-		});
+		}, FUnrealOpenMcpToolMetadata::Mutating());
 
 	// unreal_open_mcp_actor_duplicate — duplicate an actor in the current editor
 	// level. Re-spawns via SpawnActor with the source as the template (the
@@ -1191,7 +1191,7 @@ void FUnrealOpenMcpActorTools::Register(FUnrealOpenMcpToolRegistry& Registry)
 			}
 			return FUnrealOpenMcpToolDispatchResult::Ok(
 				WriteJson(MakeShared<FJsonValueObject>(Result)));
-		});
+		}, FUnrealOpenMcpToolMetadata::Mutating());
 
 	// unreal_open_mcp_actor_destroy — destroy one or more actors in the current
 	// editor level. Single (`actor`) or batch (`actors` array); the batch path
@@ -1317,7 +1317,7 @@ void FUnrealOpenMcpActorTools::Register(FUnrealOpenMcpToolRegistry& Registry)
 			Result->SetNumberField(TEXT("count"), DestroyedLabels.Num());
 			return FUnrealOpenMcpToolDispatchResult::Ok(
 				WriteJson(MakeShared<FJsonValueObject>(Result)));
-		});
+		}, FUnrealOpenMcpToolMetadata::Mutating());
 
 	// unreal_open_mcp_actor_component_add — add a component to an actor in the
 	// current editor level. Resolves the component class (same ResolveClass
@@ -1457,7 +1457,7 @@ void FUnrealOpenMcpActorTools::Register(FUnrealOpenMcpToolRegistry& Registry)
 				TEXT("component"), ToComponentData(NewComp, /*bIncludeProperties=*/true));
 			return FUnrealOpenMcpToolDispatchResult::Ok(
 				WriteJson(MakeShared<FJsonValueObject>(Result)));
-		});
+		}, FUnrealOpenMcpToolMetadata::Mutating());
 
 	// unreal_open_mcp_actor_component_destroy — destroy a component on an actor
 	// in the current editor level. Only INSTANCE components (the ones the editor
@@ -1556,7 +1556,7 @@ void FUnrealOpenMcpActorTools::Register(FUnrealOpenMcpToolRegistry& Registry)
 			Result->SetBoolField(TEXT("destroyed"), true);
 			return FUnrealOpenMcpToolDispatchResult::Ok(
 				WriteJson(MakeShared<FJsonValueObject>(Result)));
-		});
+		}, FUnrealOpenMcpToolMetadata::Mutating());
 
 	// unreal_open_mcp_actor_component_get — read a single component on an actor.
 	// Read-only (no gate, no transaction). Returns the component's ComponentData
@@ -1732,7 +1732,7 @@ void FUnrealOpenMcpActorTools::Register(FUnrealOpenMcpToolRegistry& Registry)
 			}
 			return FUnrealOpenMcpToolDispatchResult::Ok(
 				WriteJson(MakeShared<FJsonValueObject>(Result)));
-		});
+		}, FUnrealOpenMcpToolMetadata::Mutating());
 
 	// unreal_open_mcp_actor_component_list_all — list every component on an
 	// actor. Read-only (no gate, no transaction). Returns a components[] array

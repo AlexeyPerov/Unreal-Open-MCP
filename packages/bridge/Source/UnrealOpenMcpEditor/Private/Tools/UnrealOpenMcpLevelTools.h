@@ -26,10 +26,11 @@
 //     content path. The Unreal analog of Unity's scene_create.
 //
 // The read-only tools (level_list_loaded, level_get_data) carry no gate; the
-// mutators carry the forward-compat `paths_hint` + `gate` surface (no-op until
-// P3.5, matching the actor family). level_open + level_create additionally
-// honor a dirty guard (FUnrealOpenMcpLevelDirtyGuard): they refuse to replace
-// a world with unsaved edits unless `ignore_dirty` is set, mirroring Unity's
+// mutators are registered with `FUnrealOpenMcpToolMetadata::Mutating()` so P3.5
+// routes every dispatch through `FUnrealOpenMcpGatePolicy::Execute`, and
+// `paths_hint` is mandatory. level_open + level_create additionally honor a
+// dirty guard (FUnrealOpenMcpLevelDirtyGuard): they refuse to replace a world
+// with unsaved edits unless `ignore_dirty` is set, mirroring Unity's
 // SceneDirtyGuard.
 //
 // Adapted from Unity Open MCP's ScenesTools
@@ -73,15 +74,14 @@ class FUnrealOpenMcpToolRegistry;
  * First-registration-wins: a duplicate name is ignored by the registry.
  *
  * Registers: `unreal_open_mcp_level_open` (mutating; dirty guard; gate
- *             deferred),
- *             `unreal_open_mcp_level_save` (mutating; gate deferred),
+ *             Enforce),
+ *             `unreal_open_mcp_level_save` (mutating; gate Enforce),
  *             `unreal_open_mcp_level_list_loaded` (read-only),
- *             `unreal_open_mcp_level_set_current` (mutating; gate deferred),
- *             `unreal_open_mcp_level_unload_sublevel` (mutating; gate
- *             deferred),
+ *             `unreal_open_mcp_level_set_current` (mutating; gate Enforce),
+ *             `unreal_open_mcp_level_unload_sublevel` (mutating; gate Enforce),
  *             `unreal_open_mcp_level_get_data` (read-only; WP-aware),
  *             `unreal_open_mcp_level_create` (mutating; dirty guard; gate
- *             deferred).
+ *             Enforce).
  */
 namespace FUnrealOpenMcpLevelTools
 {

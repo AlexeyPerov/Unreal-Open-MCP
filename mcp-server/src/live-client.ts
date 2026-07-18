@@ -7,16 +7,27 @@
 //
 // The bridge's POST /tools/{name} dispatch returns one of:
 //   - HTTP 200 {"ok":true,"result":<value>}    → success (result verbatim)
+//   - HTTP 200 {"ok":true,"result":<value>,"gate":{...}} → mutating success
+//     (P3.5 widening — the gate summary surfaces alongside result).
 //   - HTTP 200 {"ok":false,"error":{code,msg}} → structured tool failure
+//   - HTTP 200 {"ok":false,"error":{code,msg},"gate":{...}} → mutating failure
+//     (P3.5 — the gate summary surfaces alongside the tool error).
 //   - HTTP 404 {"error":{code:"tool_not_found",...}} → unknown tool (routing)
 //   - HTTP 405 {"error":{code:"method_not_allowed",...}} → wrong method
 //   - HTTP 500 {"error":{code:"bridge_internal_error",...}} → bridge fault
 //
-// postTool unwraps the {ok,result} success body as the tool output and maps
-// {ok:false} + HTTP error bodies to a structured MCP error result carrying the
-// bridge's own error code/message. The bridge envelope and the MCP
-// CallToolResult are distinct shapes — the bridge owns ok/error, the MCP
-// wrapper owns content[]/isError.
+// postTool unwraps the {ok,result} success body as the tool output. When the
+// envelope carries a `gate` block (P3.5 mutating dispatches), the gate summary
+// is merged into the surfaced result so an agent reading the CallToolResult
+// can branch on `gate.outcome` (passed / warned / failed / skipped /
+// validate_scan_failed). The P2.1 `result` value stays the primary payload —
+// the gate block is additive metadata, not a replacement.
+//
+// postTool maps {ok:false} + HTTP error bodies to a structured MCP error
+// result carrying the bridge's own error code/message. When a gate block is
+// present on a failure (e.g. ValidateScanFailed), the gate summary rides
+// through as `detail.gate` so an agent can inspect the gate decision that
+// produced the failure.
 //
 // Failure classification (the load-bearing contract):
 //   - bridge_offline     → the bridge is not reachable. ECONNREFUSED, DNS, or a
@@ -32,15 +43,14 @@
 //                          Carries the bridge's own error body when it sent one.
 //
 // Adapted from Unity Open MCP's mcp-server/src/live-client.ts (copy fidelity,
-// P1.7 + P2.1). Intentional deltas:
+// P1.7 + P2.1 + P3.5). Intentional deltas:
 //   - `unrealVersion` in PingResponse (not `unityVersion`), plus `status` /
 //     `port` fields the Unreal bridge emits.
-//   - Minimal class: no PingCache, no compile-wait, no gate envelopes, no
-//     endpoint-refresh. The Unity client grew those over many milestones; this
-//     port adds them as later phases require.
-//   - Canonical {ok,result,error} envelope (P2.1) instead of Unity's
-//     {mutation,gate} — simpler for P2.1, widens in P3.5 but ok+error.code
-//     stay stable.
+//   - Minimal class: no PingCache, no compile-wait, no endpoint-refresh. The
+//     Unity client grew those over many milestones; this port adds them as
+//     later phases require.
+//   - Canonical {ok,result,error} envelope (P2.1) widens with a `gate` block
+//     in P3.5 — ok + error.code stay stable, so a P2.1 parser keeps working.
 //   - Offline hint points at `~/.unreal-open-mcp/instances/...`.
 
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
@@ -64,24 +74,72 @@ export interface Router {
 /**
  * Bridge tool-dispatch success envelope (HTTP 200 from POST /tools/{name}):
  *   {"ok":true,"result":<value>}
+ * P3.5 widening: mutating dispatches add a `gate` summary alongside result.
  * `result` is a raw JSON value (object, array, string, number, bool, null).
+ * `gate` is optional — read-only tools omit it.
  */
 interface ToolDispatchOk {
   ok: true;
   result: unknown;
+  /** P3.5 — gate summary for mutating dispatches. Absent on read-only tools
+   *  and on mutating dispatches whose gate did not run (gate:"off") or did not
+   *  produce a non-passing outcome. */
+  gate?: GateSummary;
 }
 
 /**
  * Bridge tool-dispatch failure envelope (HTTP 200 from POST /tools/{name}):
  *   {"ok":false,"error":{"code":"...","message":"..."}}
+ * P3.5 widening: mutating failures add a `gate` summary alongside error.
  */
 interface ToolDispatchErr {
   ok: false;
   error: { code: string; message: string };
+  /** P3.5 — gate summary for mutating failures (ValidateScanFailed, etc.).
+   *  Absent on read-only tool failures and on dispatch-level failures. */
+  gate?: GateSummary;
 }
 
-/** Union of the two P2.1 tool-dispatch envelopes. */
+/** Union of the two tool-dispatch envelopes (P2.1 + P3.5 widening). */
 type ToolDispatchEnvelope = ToolDispatchOk | ToolDispatchErr;
+
+/**
+ * Gate summary block emitted by mutating dispatches (P3.5). Surfaced verbatim
+ * into the MCP CallToolResult (success) or as `detail.gate` (failure) so an
+ * agent can branch on `gate.outcome` without parsing prose in agentNextSteps.
+ *
+ * Mirrors the bridge's FUnrealOpenMcpBridgeEnvelope::AppendGateSummary field
+ * set. Optional fields are omitted by the bridge when the gate did not run or
+ * the value is empty.
+ */
+export interface GateSummary {
+  /** True when the gate ran (checkpoint + validate + delta). */
+  ran: boolean;
+  /** Wire token for the gate decision. */
+  outcome: "passed" | "warned" | "failed" | "skipped" | "validate_scan_failed";
+  /** True when the dispatch is non-passing (Failed / Warned / mutation
+   *  faulted / ValidateScanFailed). */
+  gateFailed: boolean;
+  /** cp_xxxxxx token the meta-tools can delta-compare against. */
+  checkpointId?: string;
+  /** Issue-key diff counts + key lists. */
+  delta?: {
+    newErrors: number;
+    newWarnings: number;
+    resolvedErrors: number;
+    resolvedWarnings: number;
+    newIssueKeys: string[];
+    resolvedIssueKeys: string[];
+  };
+  /** Rule ids that ran in the validate pass. */
+  categoriesRun?: string[];
+  /** Wall-clock for checkpoint / validate / total gate, ms. */
+  checkpointMs?: number;
+  validateMs?: number;
+  totalMs?: number;
+  /** Actionable hints an agent should consider before retrying. */
+  agentNextSteps?: string[];
+}
 
 /**
  * /ping response body shape emitted by the Unreal bridge
@@ -308,21 +366,35 @@ export class LiveClient implements Router {
       });
     }
 
-    // ok:true → success. Return the `result` value verbatim as a text block.
+    // ok:true → success. Return the `result` value as the primary text block.
+    // When the bridge emitted a gate summary (P3.5 mutating dispatches), merge
+    // it into the surfaced result so an agent reading the CallToolResult can
+    // branch on `gate.outcome` (passed / warned / failed / skipped /
+    // validate_scan_failed). Read-only tools omit the gate block and the
+    // surfaced result is the bare `result` value (P2.1 behavior preserved).
     if (envelope.ok === true) {
+      const payload = envelope.gate
+        ? { result: envelope.result, gate: envelope.gate }
+        : envelope.result;
       return {
-        content: [{ type: "text", text: JSON.stringify(envelope.result) }],
+        content: [{ type: "text", text: JSON.stringify(payload) }],
         isError: false,
       };
     }
 
     // ok:false → structured tool failure. The bridge ran the tool and it
     // returned its own error code/message; surface both so an agent can branch
-    // on the tool-specific cause (e.g. invalid_request, execution_error).
+    // on the tool-specific cause (e.g. invalid_request, execution_error,
+    // paths_hint_required). When a gate block is present (mutating failure),
+    // carry it through as `detail` so the agent can inspect the gate decision
+    // that produced the failure alongside the tool error.
     const err = envelope.error ?? { code: "unknown", message: "No error detail." };
     return makeErrorResult({
       code: err.code,
       message: err.message,
+      detail: envelope.gate
+        ? { error: err, gate: envelope.gate }
+        : undefined,
     });
   }
 

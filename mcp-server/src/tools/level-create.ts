@@ -103,15 +103,21 @@ export const levelCreate: Tool = {
         type: "array",
         items: { type: "string" },
         description:
-          "Mutation scope (forward-compat) — content path the create is " +
-          "scoped to. Accepted but NOT enforced until the gate lands (P3.5).",
+          "Mutation scope — content path(s) the mutation is scoped to, fed to " +
+          "the gate as the checkpoint + validate hint. REQUIRED for mutating " +
+          "tools (the gate refuses an empty hint with paths_hint_required; " +
+          "there is no whole-project fallback). Set gate:\"off\" to bypass " +
+          "the gate and skip the hint.",
       },
       gate: {
         enum: ["enforce", "warn", "off"],
         default: "enforce",
         description:
-          "Gate mode (forward-compat) — accepted but ignored in P2 (gate " +
-          "execution is a no-op until P3.5).",
+          "Gate mode — enforce (default) runs checkpoint → mutate → " +
+          "validate → delta and hard-fails on new Errors; warn commits " +
+          "the mutation but surfaces new Errors as warnings; off skips " +
+          "the gate entirely (paths_hint optional). Precedence: request " +
+          "gate → tool default (enforce for mutators).",
       },
     },
     additionalProperties: false,

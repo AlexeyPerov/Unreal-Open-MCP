@@ -510,7 +510,7 @@ void FUnrealOpenMcpLevelTools::Register(FUnrealOpenMcpToolRegistry& Registry)
 			}
 			return FUnrealOpenMcpToolDispatchResult::Ok(
 				WriteJson(MakeShared<FJsonValueObject>(Result)));
-		});
+		}, FUnrealOpenMcpToolMetadata::Mutating());
 
 	// unreal_open_mcp_level_save — save the current level in place, or save-as
 	// the persistent level to a new content path via `path` (save-as uses
@@ -627,7 +627,7 @@ void FUnrealOpenMcpLevelTools::Register(FUnrealOpenMcpToolRegistry& Registry)
 			Result->SetNumberField(TEXT("count"), SavedPackages.Num());
 			return FUnrealOpenMcpToolDispatchResult::Ok(
 				WriteJson(MakeShared<FJsonValueObject>(Result)));
-		});
+		}, FUnrealOpenMcpToolMetadata::Mutating());
 
 	// unreal_open_mcp_level_list_loaded — read-only enumeration of the levels
 	// loaded in the current editor world: the persistent level first, then any
@@ -833,7 +833,7 @@ void FUnrealOpenMcpLevelTools::Register(FUnrealOpenMcpToolRegistry& Registry)
 			TSharedRef<FJsonObject> Result = ToLevelData(Target, World);
 			return FUnrealOpenMcpToolDispatchResult::Ok(
 				WriteJson(MakeShared<FJsonValueObject>(Result)));
-		});
+		}, FUnrealOpenMcpToolMetadata::Mutating());
 
 	// unreal_open_mcp_level_unload_sublevel — unload (remove from the world) a
 	// loaded streaming sublevel by short name OR full package path
@@ -970,7 +970,7 @@ void FUnrealOpenMcpLevelTools::Register(FUnrealOpenMcpToolRegistry& Registry)
 			Result->SetBoolField(TEXT("wasDirty"), bWasDirty);
 			return FUnrealOpenMcpToolDispatchResult::Ok(
 				WriteJson(MakeShared<FJsonValueObject>(Result)));
-		});
+		}, FUnrealOpenMcpToolMetadata::Mutating());
 
 	// unreal_open_mcp_level_get_data — read-only actor roster of the current
 	// editor world (or a loaded streaming sublevel named by `path`), with a
@@ -1369,7 +1369,7 @@ void FUnrealOpenMcpLevelTools::Register(FUnrealOpenMcpToolRegistry& Registry)
 			}
 			return FUnrealOpenMcpToolDispatchResult::Ok(
 				WriteJson(MakeShared<FJsonValueObject>(Result)));
-		});
+		}, FUnrealOpenMcpToolMetadata::Mutating());
 
 	UE_LOG(
 		LogUnrealOpenMcp,

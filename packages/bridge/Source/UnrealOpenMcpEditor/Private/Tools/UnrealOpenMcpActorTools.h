@@ -9,9 +9,9 @@
 // It spawns an actor in the current editor level from a native class path or a
 // Blueprint asset path, optionally setting label / location / rotation / parent
 // attachment, and returns the new actor's `ActorData` for chaining. Wrapped in
-// an `FScopedTransaction` for editor Undo support. The schema carries
-// forward-compat `paths_hint` / `gate` fields but gate execution is a no-op
-// until P3.5 (per the P2.3 plan — schema forward-compat only).
+// an `FScopedTransaction` for editor Undo support. Registered as mutating
+// (gate Enforce) so P3.5 routes every dispatch through
+// `FUnrealOpenMcpGatePolicy::Execute`; `paths_hint` is mandatory.
 //
 // P2.4 ships the reflection-write pair:
 //   - `unreal_open_mcp_actor_modify` — FProperty writes on resolved actor(s),
@@ -23,7 +23,7 @@
 //     resolved UObject (actor, component, asset instance) via ResolveObject.
 // Both wrap their writes in `FScopedTransaction` and delegate the per-field
 // reflection to the shared `FUnrealOpenMcpPropertyJson::ApplyProperties`
-// helper. `paths_hint` / `gate` are forward-compat (no-op until P3.5).
+// helper. Registered as mutating (gate Enforce); `paths_hint` mandatory.
 //
 // P2.5 completes the actor family with tree-structure mutators and component
 // CRUD tools (eight tools):
@@ -37,7 +37,8 @@
 //   `..._component_list_all` (read-only components[] array).
 // All mutators reuse the resolve-before-mutate ordering, `FScopedTransaction`,
 // and the shared `ToActorData` / `ToComponentData` serializers defined here.
-// `paths_hint` / `gate` are forward-compat (no-op until P3.5).
+// Mutators are registered with `FUnrealOpenMcpToolMetadata::Mutating()` so P3.5
+// routes them through the gate; `paths_hint` is mandatory.
 //
 // Adapted from Unity Open MCP's GameObjectsTools
 // (packages/bridge/Editor/TypedTools/GameObjectsTools.cs — the Find + Create
@@ -87,16 +88,16 @@ class FUnrealOpenMcpToolRegistry;
  * First-registration-wins: a duplicate name is ignored by the registry.
  *
  * P2.2 registers: `unreal_open_mcp_actor_find` (read-only).
- * P2.3 registers: `unreal_open_mcp_actor_create` (mutating; gate deferred).
- * P2.4 registers: `unreal_open_mcp_actor_modify` (mutating; gate deferred),
- *                 `unreal_open_mcp_object_modify` (mutating; gate deferred).
- * P2.5 registers: `unreal_open_mcp_actor_set_parent` (mutating; gate deferred),
- *                 `unreal_open_mcp_actor_duplicate` (mutating; gate deferred),
- *                 `unreal_open_mcp_actor_destroy` (mutating; gate deferred),
- *                 `unreal_open_mcp_actor_component_add` (mutating; gate deferred),
- *                 `unreal_open_mcp_actor_component_destroy` (mutating; gate deferred),
+ * P2.3 registers: `unreal_open_mcp_actor_create` (mutating; gate Enforce),
+ *                 `unreal_open_mcp_actor_modify` (mutating; gate Enforce),
+ *                 `unreal_open_mcp_object_modify` (mutating; gate Enforce).
+ * P2.5 registers: `unreal_open_mcp_actor_set_parent` (mutating; gate Enforce),
+ *                 `unreal_open_mcp_actor_duplicate` (mutating; gate Enforce),
+ *                 `unreal_open_mcp_actor_destroy` (mutating; gate Enforce),
+ *                 `unreal_open_mcp_actor_component_add` (mutating; gate Enforce),
+ *                 `unreal_open_mcp_actor_component_destroy` (mutating; gate Enforce),
  *                 `unreal_open_mcp_actor_component_get` (read-only),
- *                 `unreal_open_mcp_actor_component_modify` (mutating; gate deferred),
+ *                 `unreal_open_mcp_actor_component_modify` (mutating; gate Enforce),
  *                 `unreal_open_mcp_actor_component_list_all` (read-only).
  */
 namespace FUnrealOpenMcpActorTools

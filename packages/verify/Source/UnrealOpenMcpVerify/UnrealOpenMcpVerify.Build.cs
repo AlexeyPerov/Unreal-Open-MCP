@@ -16,6 +16,15 @@
 // P3.2 added private deps on Engine + AssetRegistry for the
 // broken_soft_references rule scanner. The dependency invariant (verify never
 // depends on an UnrealOpenMcp* module) is preserved.
+//
+// P3.4 added a Windows-only LiveCoding dep for the compile_errors rule's
+// production status provider (reads ILiveCodingModule::IsEnabledForSession /
+// HasStarted / IsCompiling — never Compile()). The LiveCoding module is
+// Windows-only in stock UE (Engine/Source/Developer/Windows/LiveCoding), so
+// the dep is gated to Win64 and the provider's #include is guarded by
+// PLATFORM_WINDOWS. On other platforms the provider returns Clean (no
+// hot-reload failure state to observe); the rule's behavior contract is still
+// fully pinned by the Automation spec via the injected fake provider.
 using UnrealBuildTool;
 
 public class UnrealOpenMcpVerify : ModuleRules
@@ -41,6 +50,16 @@ public class UnrealOpenMcpVerify : ModuleRules
 			"Engine",
 			"AssetRegistry",
 		});
+
+		// P3.4: Windows-only LiveCoding dependency. The provider consults
+		// ILiveCodingModule for read-only status (IsEnabledForSession /
+		// HasStarted / IsCompiling); it NEVER calls Compile() — that is the
+		// side effect the rule bans. On non-Windows platforms the provider's
+		// #if PLATFORM_WINDOWS branch is excluded and it returns Clean.
+		if (Target.Platform == UnrealBuildTool.UnrealTargetPlatform.Win64)
+		{
+			PrivateDependencyModuleNames.Add("LiveCoding");
+		}
 
 		// Deliberately no UnrealOpenMcpEditor / UnrealOpenMcpRuntime dependency.
 		// The verify contracts are standalone C++ types; the bridge will take a

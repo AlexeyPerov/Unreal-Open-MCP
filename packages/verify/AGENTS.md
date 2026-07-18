@@ -14,13 +14,14 @@ Rules for `packages/verify/` — the scoped health-check module for Unreal Open 
   - `Public/Fixes/` — `FFixDescription`, `FFixResult`, `FFixCandidate`, `IFixProvider`, `FFixProviderRegistry`.
   - `Public/Rules/BrokenSoftReferences/` — `FBrokenSoftReferencesRule`, `ISoftPathResolver`, `BrokenSoftReferencesIssueCodes` (P3.2).
   - `Public/Rules/MissingBlueprintParent/` — `FMissingBlueprintParentRule`, `IBlueprintParentResolver`, `MissingBlueprintParentIssueCodes` (P3.3).
-  - `Private/Core/`, `Private/Fixes/`, `Private/Rules/BrokenSoftReferences/`, `Private/Rules/MissingBlueprintParent/` — implementations.
+  - `Public/Rules/CompileErrors/` — `FCompileErrorsRule`, `ICompileStatusProvider`, `CompileErrorsIssueCodes` (P3.4).
+  - `Private/Core/`, `Private/Fixes/`, `Private/Rules/BrokenSoftReferences/`, `Private/Rules/MissingBlueprintParent/`, `Private/Rules/CompileErrors/` — implementations.
 
 ## Verify rules
 
 - Every rule implements `IVerifyRule` (plain C++ abstract class — not a UObject) and lives in its own folder under `Rules/{RuleName}/` once concrete families land.
 - **Every rule must declare a stable `Id`** (returned by `GetId()`) — surfaced in MCP tool responses, the capability catalog, and the gate delta.
-- **Every `FVerifyIssue` must carry an `IssueCode`**. v1 issue codes: `broken_soft_reference` (implemented, P3.2 — `broken_soft_references` rule, walks `FSoftObjectPath` properties and asks `ISoftPathResolver` whether each target resolves), `missing_blueprint_parent` (implemented, P3.3 — `missing_blueprint_parents` rule, reads `UBlueprint::ParentClass` and asks `IBlueprintParentResolver` whether the parent path resolves; null `ParentClass` after a successful `LoadPackage` is reported with `expectedParent="(unknown)"`), `compile_error`, `content_path_hygiene` (still scaffold-only). Issue codes link rules to fixes.
+- **Every `FVerifyIssue` must carry an `IssueCode`**. v1 issue codes: `broken_soft_reference` (implemented, P3.2 — `broken_soft_references` rule, walks `FSoftObjectPath` properties and asks `ISoftPathResolver` whether each target resolves), `missing_blueprint_parent` (implemented, P3.3 — `missing_blueprint_parents` rule, reads `UBlueprint::ParentClass` and asks `IBlueprintParentResolver` whether the parent path resolves; null `ParentClass` after a successful `LoadPackage` is reported with `expectedParent="(unknown)"`), `compile_error` (implemented, P3.4 — `compile_errors` rule, asks `ICompileStatusProvider` for the current `ECompileState` and structured diagnostics; never calls `Compile()` — the rule bans compile side effects; a Failed state with no per-file diagnostics emits a coarse `(project)` finding so a known failure is never silently swallowed), `content_path_hygiene` (still scaffold-only). Issue codes link rules to fixes.
 - Severity (`Error` / `Warning`) is set per-issue, not per-rule. The gate delta treats Errors as failures; Warnings are informational.
 - `IVerifyRule::Scan` must be side-effect-free beyond appending to the sink — the runner swallows exceptions thrown from Scan() so one bad rule cannot abort a gate pass (WITH_EXCEPTIONS only; in no-exception builds a misbehaving rule surfaces as a crash).
 

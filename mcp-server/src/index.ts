@@ -27,6 +27,8 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { pathToFileURL } from "node:url";
 import { ALL_TOOLS } from "./tools/index.js";
+import { buildCapabilities } from "./capabilities/build-capabilities.js";
+import { RULE_CATALOG, FIX_CATALOG } from "./capabilities/rule-catalog.js";
 import { readPackageVersion } from "./package-version.js";
 import {
   resolvePort,
@@ -50,6 +52,62 @@ const PACKAGE_VERSION = readPackageVersion();
 
 /** Name → tool lookup, built once for call dispatch + unknown-tool diagnostics. */
 const TOOL_BY_NAME = new Map(ALL_TOOLS.map((t) => [t.name, t]));
+
+/**
+ * Local-route tools — resolved in-process by {@link handleLocalTool} without a
+ * bridge round-trip. The capabilities tool is the first (P3.8): it builds the
+ * capability surface from the registered tool list + the static rule/fix
+ * catalog, so it works with the editor down. Adding a local-route tool means
+ * extending this set AND adding a handler branch in {@link handleLocalTool}.
+ */
+const LOCAL_TOOLS: ReadonlySet<string> = new Set([
+  "unreal_open_mcp_capabilities",
+]);
+
+/**
+ * Resolve a local-route tool call in-process. Returns `null` when the tool is
+ * not a local-route tool (the caller then routes it through the live bridge).
+ * Exported so unit tests can drive the local dispatch directly without booting
+ * the live router.
+ */
+export async function handleLocalTool(
+  name: string,
+  args: Record<string, unknown>,
+): Promise<CallToolResult | null> {
+  if (!LOCAL_TOOLS.has(name)) {
+    return null;
+  }
+  if (name === "unreal_open_mcp_capabilities") {
+    const kind =
+      args.kind === "tools" || args.kind === "rules" || args.kind === "fixes"
+        ? (args.kind as "tools" | "rules" | "fixes")
+        : undefined;
+    const includePlanned = args.include_planned !== false;
+    const result = buildCapabilities(
+      {
+        tools: ALL_TOOLS,
+        rules: RULE_CATALOG,
+        fixes: FIX_CATALOG,
+      },
+      { kind, includePlanned },
+    );
+    return {
+      content: [{ type: "text", text: JSON.stringify(result) }],
+      isError: false,
+    };
+  }
+  // Unreachable: LOCAL_TOOLS membership is checked above and every member has
+  // a handler branch. Defensive fallback keeps the call honest.
+  return {
+    isError: true,
+    content: [
+      {
+        type: "text",
+        text: `Tool ${name} is registered as local-route but has no in-process handler.`,
+      },
+    ],
+  };
+}
 
 /**
  * Module-level live router. Installed once by `main()` after env/port/token
@@ -112,6 +170,16 @@ export async function handleCallTool(
       isError: true,
       content: [{ type: "text", text: `Unknown tool: ${name}.${suffix}` }],
     };
+  }
+  // Local-route tools resolve in-process — no bridge round-trip. The
+  // capabilities tool (P3.8) is the first; it works with the editor down
+  // because the rule/fix catalog is static and the tool list is in-memory.
+  // Resolve before the live-router check so a missing router never blocks a
+  // local tool (and so a unit test with no router installed can still call
+  // capabilities directly).
+  const localResult = await handleLocalTool(name, args ?? {});
+  if (localResult !== null) {
+    return localResult;
   }
   if (liveRouter) {
     return liveRouter.route(name, args ?? {});
@@ -270,8 +338,12 @@ if (entrypointUrl === import.meta.url) {
 //    fallback" vs Unity's "env override" / "instance discovery") so users can
 //    tell whether a live lock supplied the port.
 //  - LiveClient is the minimal P1.7 surface (ping only; `tool_not_routed` for
-//    other names). No BatchSpawn / ToolRouter / offline / local routing /
-//    resources / CLI dispatch yet.
+//    other names). No BatchSpawn / ToolRouter / offline routing / resources /
+//    CLI dispatch yet. P3.8 adds the first **local-route** tool
+//    (`unreal_open_mcp_capabilities`) — resolved in-process by
+//    `handleLocalTool` before the live-router check, so it works with the
+//    editor down. The full per-tool router (live / offline / local / batch)
+//    lands in Phase 8 and will absorb this dispatch into a `ToolRouter`.
 //  - Handlers (`handleListTools`, `handleCallTool`) are exported standalone so
 //    tests can exercise them directly. Unity inlines them inside `createServer`
 //    and tests other modules; we export them so the dispatch + fallback paths

@@ -29,10 +29,11 @@ const SERVER_ENTRY = resolve(here, "index.js");
 // level_list_loaded / level_set_current / level_unload_sublevel); P2.7 added
 // the level inspect + create pair (level_get_data / level_create); P3.6 added
 // the three gate meta-tools (validate_edit / checkpoint_create / delta); P3.7
-// added apply_fix. Further tools land in later phases and append here.
+// added apply_fix; P3.8 added capabilities. Further tools land in later
+// phases and append here.
 test("handleListTools returns the registered tools", async () => {
   const result = await handleListTools();
-  assert.equal(result.tools.length, 24);
+  assert.equal(result.tools.length, 25);
   assert.equal(result.tools[0].name, "unreal_open_mcp_ping");
   assert.equal(result.tools[1].name, "unreal_open_mcp_actor_find");
   assert.equal(result.tools[2].name, "unreal_open_mcp_actor_create");
@@ -99,6 +100,63 @@ test("handleCallTool dispatches a known tool through the installed live router",
   } finally {
     resetLiveRouterForTest();
   }
+});
+
+// P3.8 — capabilities is local-route: it resolves in-process before the live
+// router is consulted, so it works with the editor down (no router installed)
+// AND never touches the router when one is installed. Both branches are pinned
+// here so a later refactor cannot accidentally route capabilities live.
+test("handleCallTool resolves unreal_open_mcp_capabilities locally without a router", async () => {
+  resetLiveRouterForTest();
+  const result = await handleCallTool({
+    params: { name: "unreal_open_mcp_capabilities", arguments: {} },
+  } as unknown as Parameters<typeof handleCallTool>[0]);
+  assert.equal(result.isError, false);
+  const text = (result.content[0] as { type: string; text: string }).text;
+  const payload = JSON.parse(text) as {
+    tools: unknown[];
+    rules: unknown[];
+    fixes: unknown[];
+    counts: { toolsImplemented: number; rulesImplemented: number };
+  };
+  assert.ok(payload.tools.length > 0);
+  assert.ok(payload.rules.length > 0);
+  assert.ok(payload.fixes.length > 0);
+  // Every registered tool is surfaced (capabilities is itself included).
+  assert.equal(payload.counts.toolsImplemented, 25);
+  assert.equal(payload.counts.rulesImplemented, 3);
+});
+
+test("handleCallTool does not consult the live router for unreal_open_mcp_capabilities", async () => {
+  const routed: string[] = [];
+  setLiveRouter({
+    async route(name: string) {
+      routed.push(name);
+      return { content: [{ type: "text", text: "" }], isError: false };
+    },
+  });
+  try {
+    await handleCallTool({
+      params: { name: "unreal_open_mcp_capabilities", arguments: { kind: "rules" } },
+    } as unknown as Parameters<typeof handleCallTool>[0]);
+    assert.deepEqual(routed, [], "capabilities must NOT route through the bridge");
+  } finally {
+    resetLiveRouterForTest();
+  }
+});
+
+test("handleCallTool honors kind=rules filter on capabilities", async () => {
+  resetLiveRouterForTest();
+  const result = await handleCallTool({
+    params: { name: "unreal_open_mcp_capabilities", arguments: { kind: "rules" } },
+  } as unknown as Parameters<typeof handleCallTool>[0]);
+  assert.equal(result.isError, false);
+  const payload = JSON.parse(
+    (result.content[0] as { type: string; text: string }).text,
+  ) as { tools: unknown[]; rules: unknown[]; fixes: unknown[] };
+  assert.equal(payload.tools.length, 0);
+  assert.ok(payload.rules.length > 0);
+  assert.equal(payload.fixes.length, 0);
 });
 
 // createServer wires the handlers without booting stdio. The MCP initialize
@@ -180,7 +238,7 @@ test("subprocess: boots, answers initialize + tools/list, exits 0 on EOF", async
     | undefined;
   assert.ok(list, "tools/list response missing");
   const tools = list?.result?.tools ?? [];
-  assert.equal(tools.length, 24);
+  assert.equal(tools.length, 25);
   assert.equal(tools[0].name, "unreal_open_mcp_ping");
   assert.equal(tools[1].name, "unreal_open_mcp_actor_find");
   assert.equal(tools[2].name, "unreal_open_mcp_actor_create");

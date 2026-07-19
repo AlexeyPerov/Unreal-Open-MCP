@@ -28,6 +28,9 @@ import { delta } from "./delta.js";
 // circuits the gate, non-dry-run applies route through the ApplyFixGateRunner
 // so a FixRollback snapshot protects the asset.
 import { applyFix } from "./apply-fix.js";
+// P3.8 — capabilities. Local-route discovery tool: resolves in-process from
+// the registered tool list + the static rule/fix catalog. No bridge hop.
+import { capabilities } from "./capabilities.js";
 
 // Tool registry. P1.7 registers the first real tool — `unreal_open_mcp_ping` —
 // which the MCP server routes to the bridge's `GET /ping`. Each subsequent tool
@@ -75,6 +78,10 @@ import { applyFix } from "./apply-fix.js";
 // ApplyFixGateRunner so a FixRollback snapshot protects the asset and a
 // corrupting fix is auto-reverted on failure or new errors under Enforce.
 // v1 ships the single Safe provider `clear_broken_soft_reference`.
+// P3.8 adds `capabilities` — the local-route discovery tool. Builds the
+// capability surface (tools + rules + fixes) in-process from the static
+// rule-catalog + the registered tool list, with no bridge round-trip. An
+// agent calls this first to learn what is available before mutating.
 export const ALL_TOOLS: Tool[] = [
   ping,
   actorFind,
@@ -100,4 +107,5 @@ export const ALL_TOOLS: Tool[] = [
   checkpointCreate,
   delta,
   applyFix,
+  capabilities,
 ];

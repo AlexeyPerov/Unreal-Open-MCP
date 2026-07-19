@@ -64,6 +64,15 @@
 // (get/set). The Unreal analog of Unity's editor-set-state / editor-status /
 // selection-get / selection-set; get tools read-only, set tools mutating.
 #include "Tools/UnrealOpenMcpEditorTools.h"
+// P5.3 — console family (get_logs / clear_logs / run_command) over the bounded
+// GLog ring-buffer collector. The collector's GLog registration lifecycle is
+// owned by this module (Start after boot, Stop before teardown).
+#include "Tools/UnrealOpenMcpConsoleTools.h"
+#include "Tools/UnrealOpenMcpLogCollector.h"
+// P5.4 — reflection family (method_find / method_call): first-party UFunction
+// discovery + safety-gated ProcessEvent invoke (BlueprintCallable / CallInEditor
+// only; CDO path requires static / CallInEditor).
+#include "Tools/UnrealOpenMcpReflectionTools.h"
 
 #include "HAL/PlatformProcess.h"
 #include "Misc/EngineVersion.h"
@@ -90,6 +99,12 @@ public:
 		// second dispatch path. StartupModule runs on the game thread, so this
 		// construction is safe.
 		Dispatcher = MakeUnique<FUnrealOpenMcpGameThreadDispatcher>();
+
+		// P5.3: start the bounded GLog ring-buffer collector as early as
+		// possible so the console tools capture the most session history. Lines
+		// logged before this point (including the proof-of-life line above) are
+		// the documented cold-start gap. Idempotent across hot reloads.
+		FUnrealOpenMcpLogCollector::Get().Start();
 
 		// P2.1: construct the tool registry + fair queue before the HTTP
 		// server (the server holds references to both). Register the echo stub
@@ -144,6 +159,11 @@ public:
 		// Idempotent: module shutdown may run after a reload cycle or during
 		// editor teardown. Keep this path side-effect-free.
 		UE_LOG(LogUnrealOpenMcp, Log, TEXT("[Unreal Open MCP] plugin shutting down"));
+
+		// P5.3: unregister the GLog collector FIRST so no log line is delivered
+		// to a device that is about to be torn down (GLog can call output
+		// devices from any thread). Idempotent.
+		FUnrealOpenMcpLogCollector::Get().Stop();
 
 		// Release the instance lock BEFORE stopping the HTTP server: the lock
 		// advertises the listening port to the MCP server, so we want it gone
@@ -284,6 +304,18 @@ private:
 				// tools read-only; set tools mutating (gate Enforce; paths_hint
 				// required).
 				FUnrealOpenMcpEditorTools::Register(*ToolRegistry);
+
+				// P5.3 — console family (get_logs / clear_logs / run_command)
+				// over the bounded GLog ring buffer. get/clear are read-only
+				// (clear is buffer-local); run_command is mutating (gate
+				// Enforce; paths_hint required).
+				FUnrealOpenMcpConsoleTools::Register(*ToolRegistry);
+
+				// P5.4 — reflection family (method_find / method_call).
+				// method_find is read-only UFunction discovery; method_call is
+				// a safety-gated ProcessEvent invoke (mutating; gate Enforce;
+				// paths_hint required).
+				FUnrealOpenMcpReflectionTools::Register(*ToolRegistry);
 	}
 
 	// Owned. Constructed in StartupModule, torn down in ShutdownModule. The

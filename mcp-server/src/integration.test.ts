@@ -261,6 +261,11 @@ test("integration: tools/list advertises unreal_open_mcp_ping", async () => {
       "unreal_open_mcp_editor_application_set_state",
       "unreal_open_mcp_editor_selection_get",
       "unreal_open_mcp_editor_selection_set",
+      "unreal_open_mcp_console_get_logs",
+      "unreal_open_mcp_console_clear_logs",
+      "unreal_open_mcp_console_run_command",
+      "unreal_open_mcp_reflection_method_find",
+      "unreal_open_mcp_reflection_method_call",
     ]);
   } finally {
     await cleanup();

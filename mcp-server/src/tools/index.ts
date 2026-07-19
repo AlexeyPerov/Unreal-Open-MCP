@@ -71,6 +71,17 @@ import { editorApplicationSetState } from "./editor-application-set-state.js";
 // replace-by-refs or explicit clear, resolve-before-mutate, refuse empty.
 import { editorSelectionGet } from "./editor-selection-get.js";
 import { editorSelectionSet } from "./editor-selection-set.js";
+// P5.3 — console family over the bounded GLog ring buffer. get/clear are
+// read-only (clear is buffer-local); run-command is mutating (default gate
+// Enforce; paths_hint required) and destructive (accepted-risk class).
+import { consoleGetLogs } from "./console-get-logs.js";
+import { consoleClearLogs } from "./console-clear-logs.js";
+import { consoleRunCommand } from "./console-run-command.js";
+// P5.4 — reflection family. method-find is read-only UFunction discovery;
+// method-call is a safety-gated ProcessEvent invoke (mutating; default gate
+// Enforce; paths_hint required; BlueprintCallable / CallInEditor only).
+import { reflectionMethodFind } from "./reflection-method-find.js";
+import { reflectionMethodCall } from "./reflection-method-call.js";
 
 // Tool registry. P1.7 registers the first real tool — `unreal_open_mcp_ping` —
 // which the MCP server routes to the bridge's `GET /ping`. Each subsequent tool
@@ -189,4 +200,9 @@ export const ALL_TOOLS: Tool[] = [
   editorApplicationSetState,
   editorSelectionGet,
   editorSelectionSet,
+  consoleGetLogs,
+  consoleClearLogs,
+  consoleRunCommand,
+  reflectionMethodFind,
+  reflectionMethodCall,
 ];

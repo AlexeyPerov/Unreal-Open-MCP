@@ -112,6 +112,15 @@ const TOOL_CATEGORY: Record<string, string> = {
   // default gate Enforce, paths_hint required).
   unreal_open_mcp_editor_selection_get: "editor",
   unreal_open_mcp_editor_selection_set: "editor",
+  // P5.3 — console family. get/clear read-only; run-command mutating (route
+  // live, default gate Enforce, paths_hint required).
+  unreal_open_mcp_console_get_logs: "console",
+  unreal_open_mcp_console_clear_logs: "console",
+  unreal_open_mcp_console_run_command: "console",
+  // P5.4 — reflection family. method-find read-only; method-call mutating
+  // (route live, default gate Enforce, paths_hint required).
+  unreal_open_mcp_reflection_method_find: "reflection",
+  unreal_open_mcp_reflection_method_call: "reflection",
 };
 
 function categoryFor(toolName: string): string {

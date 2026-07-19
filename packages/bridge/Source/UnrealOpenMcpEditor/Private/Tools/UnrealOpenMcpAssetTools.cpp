@@ -1,8 +1,10 @@
-// Asset-tool family — see header for the find/get-data contract and the
-// shared helpers the later P4 mutators build on. This file owns the two
-// read-only handlers plus the shared `AssetDataToJson` serializer, the
-// `GetAssetRegistry` accessor, the `NormalizeContentPath` resolver, and the
-// `IsWritableContentRoot` predicate.
+// Asset-tool family — see header for the find/get-data + CRUD contracts and
+// the shared helpers the later P4 mutators build on. This file owns the two
+// read-only handlers (asset_find, asset_get_data), four mutating CRUD
+// handlers (asset_create_folder, asset_copy, asset_move, asset_delete), the
+// read-only refresh handler, plus the shared `AssetDataToJson` serializer,
+// the `GetAssetRegistry` accessor, the `NormalizeContentPath` /
+// `SplitObjectPath` resolvers, and the `IsWritableContentRoot` predicate.
 //
 // Arg parsing + output mirror the level family: each handler parses the raw
 // POST body into an FJsonObject and emits a pre-serialized JSON string handed
@@ -10,12 +12,16 @@
 // stays raw-body — only the handler layer parses.
 //
 // Behavior reference (read-only): Unreal-MCP's asset handlers
-// (UnrealMcpAssetTools.cpp — asset-find / asset-get-data). The filter-shape,
-// the short-name substring post-filter, the deterministic object-path sort,
-// the empty-filter → /Game default, the class-path validation BEFORE
-// FTopLevelAssetPath construction, and the TagsAndValues.ForEach
-// serialization were studied for correct Unreal editor API usage and adapted
-// to this port's Ok/Fail result shape.
+// (UnrealMcpAssetTools.cpp — asset-find / asset-get-data / asset-create-
+// folder / asset-copy / asset-move / asset-delete / asset-refresh). The
+// filter-shape, the short-name substring post-filter, the deterministic
+// object-path sort, the empty-filter → /Game default, the class-path
+// validation BEFORE FTopLevelAssetPath construction, the TagsAndValues.ForEach
+// serialization, the MakeDirectory idempotent shape, the DuplicateAsset /
+// RenameAsset dest-already-exists refusal, the DeleteAsset referencer guard +
+// `force` override, and the ScanPathsSynchronous rescan shape were studied
+// for correct Unreal editor API usage and adapted to this port's Ok/Fail
+// result shape.
 #include "Tools/UnrealOpenMcpAssetTools.h"
 
 #include "Bridge/UnrealOpenMcpToolRegistry.h"
@@ -153,6 +159,46 @@ namespace
 			Work.LeftChopInline(1);
 		}
 		return Work;
+	}
+
+	/**
+	 * Split a destination path into (package-path, asset-name). Accepts either
+	 * an object-path form ("/Game/Mat/M_Foo.M_Foo") or a package-path form
+	 * ("/Game/Mat/M_Foo"). Returns false when the path has no '/' separator,
+	 * starts with '/', or ends with '/' — i.e. it cannot name a valid
+	 * destination asset. Used by asset_copy / asset_move to validate the
+	 * destination BEFORE handing it to EditorAssetLibrary (the engine would
+	 * otherwise log a generic Error + return false; we want a structured
+	 * invalid_path error the agent can act on).
+	 *
+	 * Read-only behavior reference: Unreal-MCP's SplitObjectPath.
+	 */
+	bool SplitObjectPath(const FString& InPath, FString& OutPackagePath, FString& OutAssetName)
+	{
+		FString Work = InPath;
+		// Drop a trailing object suffix (".AssetName") if present.
+		int32 DotIndex;
+		if (Work.FindChar(TEXT('.'), DotIndex))
+		{
+			Work.LeftInline(DotIndex);
+		}
+		Work.TrimStartAndEndInline();
+		while (Work.EndsWith(TEXT("/")))
+		{
+			Work.LeftChopInline(1);
+		}
+
+		int32 SlashIndex;
+		// No slash, or slash at position 0 (root only), or slash at the end
+		// (trailing '/' stripped above so this catches a path that was ONLY
+		// slashes): none of these name a valid destination asset.
+		if (!Work.FindLastChar(TEXT('/'), SlashIndex) || SlashIndex == 0 || SlashIndex == Work.Len() - 1)
+		{
+			return false;
+		}
+		OutPackagePath = Work.Left(SlashIndex);
+		OutAssetName = Work.Mid(SlashIndex + 1);
+		return !OutAssetName.IsEmpty() && !OutPackagePath.IsEmpty();
 	}
 
 	/**
@@ -608,8 +654,501 @@ void FUnrealOpenMcpAssetTools::Register(FUnrealOpenMcpToolRegistry& Registry)
 				WriteJson(MakeShared<FJsonValueObject>(Result)));
 		});
 
+	// =========================================================================
+	// P4.2 — Content Browser mutators (create_folder / copy / move / delete)
+	// =========================================================================
+	//
+	// The four mutators share the same discipline:
+	//   1. Validate args (path/source/destination present).
+	//   2. Refuse engine content roots via IsWritableContentRoot.
+	//   3. Resolve destination shape via SplitObjectPath (copy/move only).
+	//   4. Refuse destination-already-exists collisions with a structured
+	//      error (no silent overwrite; data-loss prevention).
+	//   5. Call the EditorAssetLibrary op (MakeDirectory / DuplicateAsset /
+	//      RenameAsset / DeleteAsset) and surface the result.
+	//
+	// delete adds an extra referencer guard BEFORE step 5: the registry is
+	// queried for inbound referencers and the call refuses with a structured
+	// `delete_blocked_by_referencers` error listing them, unless `force: true`
+	// is passed. This is the P4.2 contract for "delete surfaces referencer
+	// information (or structured refuse) before breaking soft refs silently"
+	// from the plan.
+	//
+	// All four register with FUnrealOpenMcpToolMetadata::Mutating() so the
+	// dispatcher wraps them in GatePolicy.Execute (checkpoint → mutate →
+	// validate → delta). The gate's `paths_hint` (mandatory for mutating
+	// dispatches) is enforced by the dispatcher BEFORE the handler runs, so
+	// the handlers themselves do not re-check it.
+	//
+	// Structured errors per the P4.2 contract:
+	//   - missing_parameter          — required arg absent/empty
+	//   - invalid_parameter          — malformed body / bad shape
+	//   - invalid_content_root       — write under /Engine, /Script, /Temp
+	//   - invalid_path               — destination is not a valid package path
+	//   - asset_not_found            — source/path does not exist
+	//   - asset_already_exists       — destination collision (copy/move)
+	//   - delete_blocked_by_referencers — asset has inbound referencers
+	//                                     (force:false); referencer list surfaced
+	//   - execution_error            — the editor op returned false
+	// =========================================================================
+
+	// unreal_open_mcp_asset_create_folder — MakeDirectory. Idempotent: returns
+	// `created: false` when the folder already exists (NOT an error). The
+	// writable-root guard refuses /Engine, /Script, /Temp so an agent cannot
+	// accidentally scribble into engine content.
+	//
+	// Mutating (creates a Content Browser folder on disk). Structured errors:
+	//   - missing_parameter    — `path` absent/empty
+	//   - invalid_content_root — path under /Engine, /Script, /Temp
+	//   - invalid_parameter    — malformed body
+	//   - execution_error      — MakeDirectory returned false
+	Registry.Register(
+		TEXT("unreal_open_mcp_asset_create_folder"),
+		[](const FString& Body) -> FUnrealOpenMcpToolDispatchResult
+		{
+			TSharedPtr<FJsonObject> Args = ParseBody(Body);
+			if (!Args.IsValid())
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("invalid_parameter"),
+					TEXT("Request body was not a valid JSON object."));
+			}
+
+			const FString Path = Args->HasTypedField<EJson::String>(TEXT("path"))
+				? Args->GetStringField(TEXT("path"))
+				: FString();
+			if (Path.IsEmpty())
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("missing_parameter"),
+					TEXT("'path' is required (package path of the folder, e.g. '/Game/MyFolder')."));
+			}
+
+			if (!IsWritableContentRoot(Path))
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("invalid_content_root"),
+					FString::Printf(
+						TEXT("Refusing to create '%s' under an engine content root; use a project root like '/Game'."),
+						*Path));
+			}
+
+			// Idempotent — DoesDirectoryExist is the cheap probe that turns the
+			// already-exists case into a structured `created: false` result
+			// instead of letting MakeDirectory log an Error.
+			if (UEditorAssetLibrary::DoesDirectoryExist(Path))
+			{
+				TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+				Result->SetStringField(TEXT("path"), Path);
+				Result->SetBoolField(TEXT("created"), false);
+				return FUnrealOpenMcpToolDispatchResult::Ok(
+					WriteJson(MakeShared<FJsonValueObject>(Result)));
+			}
+
+			if (!UEditorAssetLibrary::MakeDirectory(Path))
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("execution_error"),
+					FString::Printf(TEXT("Failed to create folder '%s'."), *Path));
+			}
+
+			TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+			Result->SetStringField(TEXT("path"), Path);
+			Result->SetBoolField(TEXT("created"), true);
+			return FUnrealOpenMcpToolDispatchResult::Ok(
+				WriteJson(MakeShared<FJsonValueObject>(Result)));
+		}, FUnrealOpenMcpToolMetadata::Mutating());
+
+	// unreal_open_mcp_asset_copy — DuplicateAsset. `source` is the existing
+	// asset to copy (path-or-name); `destination` is the new package path. The
+	// destination must NOT already exist — a collision is a structured error
+	// (no silent overwrite, no data loss). Intermediate destination folders
+	// must already exist (call asset_create_folder first).
+	//
+	// Mutating (writes a new asset on disk). Structured errors:
+	//   - missing_parameter     — `source`/`destination` absent
+	//   - asset_not_found       — source does not exist
+	//   - invalid_path          — destination is not a valid package path
+	//   - invalid_content_root  — destination under /Engine, /Script, /Temp
+	//   - asset_already_exists  — destination already exists (collision)
+	//   - execution_error       — DuplicateAsset returned false
+	Registry.Register(
+		TEXT("unreal_open_mcp_asset_copy"),
+		[](const FString& Body) -> FUnrealOpenMcpToolDispatchResult
+		{
+			TSharedPtr<FJsonObject> Args = ParseBody(Body);
+			if (!Args.IsValid())
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("invalid_parameter"),
+					TEXT("Request body was not a valid JSON object."));
+			}
+
+			const FString Source = Args->HasTypedField<EJson::String>(TEXT("source"))
+				? Args->GetStringField(TEXT("source"))
+				: FString();
+			const FString Destination = Args->HasTypedField<EJson::String>(TEXT("destination"))
+				? Args->GetStringField(TEXT("destination"))
+				: FString();
+			if (Source.IsEmpty() || Destination.IsEmpty())
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("missing_parameter"),
+					TEXT("'source' and 'destination' are required (path-or-name of the asset to copy and the new package path)."));
+			}
+
+			if (!UEditorAssetLibrary::DoesAssetExist(Source))
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("asset_not_found"),
+					FString::Printf(TEXT("No source asset at '%s'."), *Source));
+			}
+
+			// Validate destination shape up front so a malformed path returns
+			// invalid_path instead of a logged engine Error + generic failure.
+			FString DestPackagePath;
+			FString DestAssetName;
+			if (!SplitObjectPath(Destination, DestPackagePath, DestAssetName))
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("invalid_path"),
+					FString::Printf(
+						TEXT("'%s' is not a valid destination package path (expected '/Game/Folder/AssetName')."),
+						*Destination));
+			}
+
+			if (!IsWritableContentRoot(Destination))
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("invalid_content_root"),
+					FString::Printf(
+						TEXT("Refusing to copy into '%s' under an engine content root; use a project root like '/Game'."),
+						*Destination));
+			}
+
+			if (UEditorAssetLibrary::DoesAssetExist(Destination))
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("asset_already_exists"),
+					FString::Printf(TEXT("Destination '%s' already exists."), *Destination));
+			}
+
+			if (!UEditorAssetLibrary::DuplicateAsset(Source, Destination))
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("execution_error"),
+					FString::Printf(TEXT("Failed to copy '%s' -> '%s'."), *Source, *Destination));
+			}
+
+			TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+			Result->SetStringField(TEXT("source"), Source);
+			Result->SetStringField(TEXT("destination"), Destination);
+			return FUnrealOpenMcpToolDispatchResult::Ok(
+				WriteJson(MakeShared<FJsonValueObject>(Result)));
+		}, FUnrealOpenMcpToolMetadata::Mutating());
+
+	// unreal_open_mcp_asset_move — RenameAsset. `source` is the existing asset
+	// to move/rename; `destination` is the new package path. Destination must
+	// NOT already exist. A redirector MAY remain at the source path — the
+	// structured result surfaces this as a `note` field so the agent knows to
+	// fix up references separately.
+	//
+	// Mutating (renames a package on disk). Structured errors mirror copy:
+	//   - missing_parameter / asset_not_found / invalid_path
+	//   - invalid_content_root / asset_already_exists
+	//   - execution_error       — RenameAsset returned false
+	Registry.Register(
+		TEXT("unreal_open_mcp_asset_move"),
+		[](const FString& Body) -> FUnrealOpenMcpToolDispatchResult
+		{
+			TSharedPtr<FJsonObject> Args = ParseBody(Body);
+			if (!Args.IsValid())
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("invalid_parameter"),
+					TEXT("Request body was not a valid JSON object."));
+			}
+
+			const FString Source = Args->HasTypedField<EJson::String>(TEXT("source"))
+				? Args->GetStringField(TEXT("source"))
+				: FString();
+			const FString Destination = Args->HasTypedField<EJson::String>(TEXT("destination"))
+				? Args->GetStringField(TEXT("destination"))
+				: FString();
+			if (Source.IsEmpty() || Destination.IsEmpty())
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("missing_parameter"),
+					TEXT("'source' and 'destination' are required (path-or-name of the asset to move and the new package path)."));
+			}
+
+			if (!UEditorAssetLibrary::DoesAssetExist(Source))
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("asset_not_found"),
+					FString::Printf(TEXT("No source asset at '%s'."), *Source));
+			}
+
+			FString DestPackagePath;
+			FString DestAssetName;
+			if (!SplitObjectPath(Destination, DestPackagePath, DestAssetName))
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("invalid_path"),
+					FString::Printf(
+						TEXT("'%s' is not a valid destination package path (expected '/Game/Folder/AssetName')."),
+						*Destination));
+			}
+
+			if (!IsWritableContentRoot(Destination))
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("invalid_content_root"),
+					FString::Printf(
+						TEXT("Refusing to move into '%s' under an engine content root; use a project root like '/Game'."),
+						*Destination));
+			}
+
+			if (UEditorAssetLibrary::DoesAssetExist(Destination))
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("asset_already_exists"),
+					FString::Printf(TEXT("Destination '%s' already exists."), *Destination));
+			}
+
+			if (!UEditorAssetLibrary::RenameAsset(Source, Destination))
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("execution_error"),
+					FString::Printf(TEXT("Failed to move '%s' -> '%s'."), *Source, *Destination));
+			}
+
+			TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+			Result->SetStringField(TEXT("source"), Source);
+			Result->SetStringField(TEXT("destination"), Destination);
+			// A redirector may remain at the source path — surface as a note
+			// so the agent knows references to the old path may need fixing.
+			Result->SetStringField(TEXT("note"), TEXT("A redirector may remain at the source path."));
+			return FUnrealOpenMcpToolDispatchResult::Ok(
+				WriteJson(MakeShared<FJsonValueObject>(Result)));
+		}, FUnrealOpenMcpToolMetadata::Mutating());
+
+	// unreal_open_mcp_asset_delete — DeleteAsset with a referencer guard.
+	// `path` is the asset to delete; `force` (default false) overrides the
+	// referencer guard. Without `force`, the registry is queried for inbound
+	// referencers and the call REFUSES with `delete_blocked_by_referencers`,
+	// surfacing the (bounded) referencer list so the agent can decide.
+	//
+	// This is the P4.2 contract: "Delete surfaces referencer information (or
+	// structured refuse) before breaking soft refs silently". The gate's
+	// broken_soft_references rule still runs in the validate pass after a
+	// forced delete; this guard is the BEFORE hook that prevents an agent
+	// from learning about broken refs only after the fact.
+	//
+	// Mutating (deletes a package on disk; not undoable from MCP). Errors:
+	//   - missing_parameter / asset_not_found / invalid_content_root
+	//   - delete_blocked_by_referencers — asset has inbound referencers
+	//                                     (force:false); referencer list in message
+	//   - execution_error       — DeleteAsset returned false
+	Registry.Register(
+		TEXT("unreal_open_mcp_asset_delete"),
+		[](const FString& Body) -> FUnrealOpenMcpToolDispatchResult
+		{
+			TSharedPtr<FJsonObject> Args = ParseBody(Body);
+			if (!Args.IsValid())
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("invalid_parameter"),
+					TEXT("Request body was not a valid JSON object."));
+			}
+
+			const FString Path = Args->HasTypedField<EJson::String>(TEXT("path"))
+				? Args->GetStringField(TEXT("path"))
+				: FString();
+			if (Path.IsEmpty())
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("missing_parameter"),
+					TEXT("'path' is required (path-or-name of the asset to delete)."));
+			}
+
+			const bool bForce = Args->HasTypedField<EJson::Boolean>(TEXT("force"))
+				&& Args->GetBoolField(TEXT("force"));
+
+			if (!UEditorAssetLibrary::DoesAssetExist(Path))
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("asset_not_found"),
+					FString::Printf(TEXT("No asset at '%s'."), *Path));
+			}
+
+			// Engine-root guard — this is the family's most destructive write,
+			// so it refuses /Engine, /Script, /Temp like create-folder/copy/
+			// move do (without it, force:true on '/Engine/...' would
+			// DeleteAsset engine content).
+			if (!IsWritableContentRoot(Path))
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("invalid_content_root"),
+					FString::Printf(
+						TEXT("Refusing to delete '%s' under an engine content root; use a project root like '/Game'."),
+						*Path));
+			}
+
+			// Referencer guard — UEditorAssetLibrary::DeleteAsset force-deletes
+			// WITHOUT confirmation, silently dangling inbound references.
+			// Query the registry for on-disk referencers first and refuse
+			// (unless `force`) with the referencer list so the caller can decide.
+			if (!bForce)
+			{
+				const FAssetData Data = UEditorAssetLibrary::FindAssetData(Path);
+				if (Data.IsValid() && !Data.PackageName.IsNone())
+				{
+					TArray<FName> Referencers;
+					GetAssetRegistry().GetReferencers(Data.PackageName, Referencers);
+					// The asset's own package is sometimes self-referenced
+					// (e.g. a material referencing its own texture parameter);
+					// never count the asset itself.
+					Referencers.Remove(Data.PackageName);
+					if (Referencers.Num() > 0)
+					{
+						// Bound the list — the first 10 referencers + a "+N more"
+						// counter so the message stays readable on large fan-ins.
+						// The envelope ships {code, message} verbatim on Fail, so
+						// the structured referencer list rides inside the message
+						// itself: agents read the count in the prefix and the
+						// bounded list in brackets, and chain into
+						// unreal_open_mcp_find_references for the full closure.
+						FString List;
+						const int32 Shown = FMath::Min(Referencers.Num(), 10);
+						for (int32 Index = 0; Index < Shown; ++Index)
+						{
+							if (Index > 0)
+							{
+								List += TEXT(", ");
+							}
+							List += Referencers[Index].ToString();
+						}
+						if (Referencers.Num() > Shown)
+						{
+							List += FString::Printf(TEXT(", (+%d more)"), Referencers.Num() - Shown);
+						}
+						return FUnrealOpenMcpToolDispatchResult::Fail(
+							TEXT("delete_blocked_by_referencers"),
+							FString::Printf(
+								TEXT("Refusing to delete '%s': referenced by %d package(s) [%s]. Pass 'force':true to delete anyway (the gate's broken_soft_references rule will still flag any dangling refs)."),
+								*Path, Referencers.Num(), *List));
+					}
+				}
+			}
+
+			if (!UEditorAssetLibrary::DeleteAsset(Path))
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("execution_error"),
+					FString::Printf(TEXT("Failed to delete '%s'."), *Path));
+			}
+
+			TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+			Result->SetStringField(TEXT("path"), Path);
+			Result->SetBoolField(TEXT("deleted"), true);
+			Result->SetBoolField(TEXT("forced"), bForce);
+			return FUnrealOpenMcpToolDispatchResult::Ok(
+				WriteJson(MakeShared<FJsonValueObject>(Result)));
+		}, FUnrealOpenMcpToolMetadata::Mutating());
+
+	// unreal_open_mcp_asset_refresh — IAssetRegistry::ScanPathsSynchronous.
+	// Rescans the requested package paths so newly added files on disk become
+	// visible to the registry. `paths` (array) defaults to ['/Game'] when
+	// omitted; a single-string `path` is also accepted for ergonomics.
+	// `force: true` triggers a full blocking rescan (slow for large trees).
+	//
+	// Classification: READ-ONLY. Unlike Unity's AssetDatabase.Refresh (which
+	// can trigger an import/compile, hence Unity marks assets_refresh
+	// mutating), Unreal's ScanPathsSynchronous only updates the in-memory
+	// AssetRegistry cache — it does not write packages or change the UObject
+	// graph. The gate would have no on-disk diff to checkpoint. Registered
+	// with the ReadOnly() metadata so the dispatcher runs it directly.
+	//
+	// Structured errors:
+	//   - invalid_parameter — malformed body / bad `paths` shape
+	// Result: { paths: string[], force: boolean }
+	Registry.Register(
+		TEXT("unreal_open_mcp_asset_refresh"),
+		[](const FString& Body) -> FUnrealOpenMcpToolDispatchResult
+		{
+			TSharedPtr<FJsonObject> Args = ParseBody(Body);
+			if (!Args.IsValid())
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("invalid_parameter"),
+					TEXT("Request body was not a valid JSON object."));
+			}
+
+			TArray<FString> Paths;
+			if (Args->HasTypedField<EJson::Array>(TEXT("paths")))
+			{
+				const TArray<TSharedPtr<FJsonValue>>* RawPaths = nullptr;
+				if (Args->TryGetArrayField(TEXT("paths"), RawPaths))
+				{
+					for (const TSharedPtr<FJsonValue>& Entry : *RawPaths)
+					{
+						if (Entry.IsValid() && Entry->Type == EJson::String)
+						{
+							const FString Str = Entry->AsString();
+							if (!Str.IsEmpty())
+							{
+								Paths.AddUnique(Str);
+							}
+						}
+					}
+				}
+			}
+			else if (Args->HasField(TEXT("paths")))
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("invalid_parameter"),
+					TEXT("'paths' must be an array of package paths."));
+			}
+
+			// Ergonomic single-path alternative — appended to `paths` if both
+			// are supplied (deduped by AddUnique).
+			if (Args->HasTypedField<EJson::String>(TEXT("path")))
+			{
+				const FString SinglePath = Args->GetStringField(TEXT("path"));
+				if (!SinglePath.IsEmpty())
+				{
+					Paths.AddUnique(SinglePath);
+				}
+			}
+
+			const bool bForce = Args->HasTypedField<EJson::Boolean>(TEXT("force"))
+				&& Args->GetBoolField(TEXT("force"));
+
+			if (Paths.Num() == 0)
+			{
+				// Empty filter → /Game (same default as asset_find; never the
+				// whole registry incl. /Engine by accident).
+				Paths.Add(TEXT("/Game"));
+			}
+
+			GetAssetRegistry().ScanPathsSynchronous(Paths, /*bForceRescan*/ bForce);
+
+			TArray<TSharedPtr<FJsonValue>> ScannedValues;
+			ScannedValues.Reserve(Paths.Num());
+			for (const FString& P : Paths)
+			{
+				ScannedValues.Add(MakeShared<FJsonValueString>(P));
+			}
+			TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+			Result->SetArrayField(TEXT("paths"), ScannedValues);
+			Result->SetBoolField(TEXT("force"), bForce);
+			return FUnrealOpenMcpToolDispatchResult::Ok(
+				WriteJson(MakeShared<FJsonValueObject>(Result)));
+		});
+
 	UE_LOG(
 		LogUnrealOpenMcp,
 		Log,
-		TEXT("[Unreal Open MCP] asset tools registered: unreal_open_mcp_asset_find, unreal_open_mcp_asset_get_data"));
+		TEXT("[Unreal Open MCP] asset tools registered: unreal_open_mcp_asset_find, unreal_open_mcp_asset_get_data, unreal_open_mcp_asset_create_folder, unreal_open_mcp_asset_copy, unreal_open_mcp_asset_move, unreal_open_mcp_asset_delete, unreal_open_mcp_asset_refresh"));
 }

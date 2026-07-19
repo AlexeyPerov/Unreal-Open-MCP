@@ -214,7 +214,9 @@ test("integration: tools/list advertises unreal_open_mcp_ping", async () => {
     // inspect + create pair — level_get_data / level_create; P3.6 added the
     // three gate meta-tools — validate_edit / checkpoint_create / delta; P3.7
     // added apply_fix; P3.8 added capabilities; P4.1 added the asset read
-    // pair — asset_find / asset_get_data). Guard against accidental registry
+    // pair — asset_find / asset_get_data; P4.2 added the Content Browser
+    // CRUD family — asset_create_folder / asset_copy / asset_move /
+    // asset_delete / asset_refresh). Guard against accidental registry
     // drift silently changing what the phase-gate smoke covers.
     assert.deepEqual(names, [
       "unreal_open_mcp_ping",
@@ -244,6 +246,11 @@ test("integration: tools/list advertises unreal_open_mcp_ping", async () => {
       "unreal_open_mcp_capabilities",
       "unreal_open_mcp_asset_find",
       "unreal_open_mcp_asset_get_data",
+      "unreal_open_mcp_asset_create_folder",
+      "unreal_open_mcp_asset_copy",
+      "unreal_open_mcp_asset_move",
+      "unreal_open_mcp_asset_delete",
+      "unreal_open_mcp_asset_refresh",
     ]);
   } finally {
     await cleanup();

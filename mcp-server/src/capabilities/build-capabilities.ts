@@ -80,6 +80,15 @@ const TOOL_CATEGORY: Record<string, string> = {
   // AssetRegistry queries; route live, gate-free.
   unreal_open_mcp_asset_find: "asset",
   unreal_open_mcp_asset_get_data: "asset",
+  // P4.2 — Content Browser CRUD (asset_create_folder / asset_copy /
+  // asset_move / asset_delete / asset_refresh). The four create/copy/move/
+  // delete tools are mutating (route live, default gate Enforce,
+  // paths_hint required); asset_refresh is read-only.
+  unreal_open_mcp_asset_create_folder: "asset",
+  unreal_open_mcp_asset_copy: "asset",
+  unreal_open_mcp_asset_move: "asset",
+  unreal_open_mcp_asset_delete: "asset",
+  unreal_open_mcp_asset_refresh: "asset",
   // P3.5/P3.6 — gate + verify surface. Read-only meta-tools participate in
   // the gate workflow but bypass GatePolicy.Execute (no recursion).
   unreal_open_mcp_validate_edit: "gate-and-verify",

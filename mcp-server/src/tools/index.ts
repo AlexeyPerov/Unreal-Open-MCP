@@ -24,6 +24,16 @@ import { levelCreate } from "./level-create.js";
 // offset/limit pagination make asset_find a valid P4.5 smoke candidate.
 import { assetFind } from "./asset-find.js";
 import { assetGetData } from "./asset-get-data.js";
+// P4.2 — Content Browser CRUD (asset_create_folder / asset_copy /
+// asset_move / asset_delete / asset_refresh). The four create/copy/move/
+// delete tools are mutating (default gate Enforce; paths_hint required);
+// asset_refresh is read-only (ScanPathsSynchronous only updates the
+// in-memory registry cache, no on-disk delta for the gate to checkpoint).
+import { assetCreateFolder } from "./asset-create-folder.js";
+import { assetCopy } from "./asset-copy.js";
+import { assetMove } from "./asset-move.js";
+import { assetDelete } from "./asset-delete.js";
+import { assetRefresh } from "./asset-refresh.js";
 // P3.6 — gate meta-tools (validate_edit / checkpoint_create / delta). The
 // explicit checkpoint → mutate → delta surface; read-only (route live).
 import { validateEdit } from "./validate-edit.js";
@@ -93,6 +103,16 @@ import { capabilities } from "./capabilities.js";
 // `asset_get_data` (single-asset metadata read by path-or-name, with an
 // optional `paths` projection for token savings). Both are read-only (route
 // live, gate-free). asset_find is a valid P4.5 smoke candidate.
+// P4.2 adds the Content Browser CRUD family — `asset_create_folder`
+// (idempotent MakeDirectory; refuses engine roots), `asset_copy`
+// (DuplicateAsset; destination must not exist), `asset_move` (RenameAsset;
+// destination must not exist; redirector note surfaced), `asset_delete`
+// (DeleteAsset with a referencer guard — REFUSES with
+// delete_blocked_by_referencers unless force:true), and `asset_refresh`
+// (IAssetRegistry::ScanPathsSynchronous; read-only because the rescan only
+// updates the in-memory cache, no on-disk delta for the gate). The four
+// create/copy/move/delete tools are mutating (default gate Enforce;
+// paths_hint required); asset_refresh is read-only.
 export const ALL_TOOLS: Tool[] = [
   ping,
   actorFind,
@@ -121,4 +141,9 @@ export const ALL_TOOLS: Tool[] = [
   capabilities,
   assetFind,
   assetGetData,
+  assetCreateFolder,
+  assetCopy,
+  assetMove,
+  assetDelete,
+  assetRefresh,
 ];

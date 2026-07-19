@@ -60,6 +60,17 @@ import { applyFix } from "./apply-fix.js";
 // P3.8 — capabilities. Local-route discovery tool: resolves in-process from
 // the registered tool list + the static rule/fix catalog. No bridge hop.
 import { capabilities } from "./capabilities.js";
+// P5.1 — editor application state (PIE). get-state is read-only (isPlaying /
+// isPaused / isSimulating / editorMap); set-state is mutating (default gate
+// Enforce; paths_hint required) and returns latent `pending` for the deferred
+// start/stop transitions (agents poll get-state).
+import { editorApplicationGetState } from "./editor-application-get-state.js";
+import { editorApplicationSetState } from "./editor-application-set-state.js";
+// P5.2 — editor selection. get is read-only (selected actors as P2 identity
+// refs); set is mutating (default gate Enforce; paths_hint required),
+// replace-by-refs or explicit clear, resolve-before-mutate, refuse empty.
+import { editorSelectionGet } from "./editor-selection-get.js";
+import { editorSelectionSet } from "./editor-selection-set.js";
 
 // Tool registry. P1.7 registers the first real tool — `unreal_open_mcp_ping` —
 // which the MCP server routes to the bridge's `GET /ping`. Each subsequent tool
@@ -174,4 +185,8 @@ export const ALL_TOOLS: Tool[] = [
   materialModify,
   materialGetData,
   assetImport,
+  editorApplicationGetState,
+  editorApplicationSetState,
+  editorSelectionGet,
+  editorSelectionSet,
 ];

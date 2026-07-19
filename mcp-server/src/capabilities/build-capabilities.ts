@@ -104,6 +104,14 @@ const TOOL_CATEGORY: Record<string, string> = {
   unreal_open_mcp_apply_fix: "gate-and-verify",
   // P3.8 — capability discovery. Local-route, read-only.
   unreal_open_mcp_capabilities: "capability-discovery",
+  // P5.1 — editor application state (PIE). get-state read-only; set-state
+  // mutating (route live, default gate Enforce, paths_hint required).
+  unreal_open_mcp_editor_application_get_state: "editor",
+  unreal_open_mcp_editor_application_set_state: "editor",
+  // P5.2 — editor selection. get read-only; set mutating (route live,
+  // default gate Enforce, paths_hint required).
+  unreal_open_mcp_editor_selection_get: "editor",
+  unreal_open_mcp_editor_selection_set: "editor",
 };
 
 function categoryFor(toolName: string): string {

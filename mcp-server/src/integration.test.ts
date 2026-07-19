@@ -257,6 +257,10 @@ test("integration: tools/list advertises unreal_open_mcp_ping", async () => {
       "unreal_open_mcp_material_modify",
       "unreal_open_mcp_material_get_data",
       "unreal_open_mcp_asset_import",
+      "unreal_open_mcp_editor_application_get_state",
+      "unreal_open_mcp_editor_application_set_state",
+      "unreal_open_mcp_editor_selection_get",
+      "unreal_open_mcp_editor_selection_set",
     ]);
   } finally {
     await cleanup();

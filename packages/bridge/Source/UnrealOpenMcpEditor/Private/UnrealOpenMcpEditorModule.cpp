@@ -60,6 +60,10 @@
 // material-get-properties. MIC create + parameter edits over
 // UMaterialEditingLibrary; create/modify are mutating, get-data read-only.
 #include "Tools/UnrealOpenMcpMaterialTools.h"
+// P5.1/P5.2 — editor application state (PIE get/set) + editor selection
+// (get/set). The Unreal analog of Unity's editor-set-state / editor-status /
+// selection-get / selection-set; get tools read-only, set tools mutating.
+#include "Tools/UnrealOpenMcpEditorTools.h"
 
 #include "HAL/PlatformProcess.h"
 #include "Misc/EngineVersion.h"
@@ -269,6 +273,17 @@ private:
 			// Enforce; paths_hint required); get_data is read-only (parameter
 			// inventory read via UMaterialEditingLibrary).
 			FUnrealOpenMcpMaterialTools::Register(*ToolRegistry);
+
+				// P5.1 — editor application state (PIE get/set): a read-only
+				// snapshot (isPlaying / isPaused / isSimulating / editorMap) +
+				// a mutating start/stop/pause/resume driver that returns a
+				// latent `pending` for the deferred PIE transitions (agents
+				// poll get-state). P5.2 — editor selection (get/set): read the
+				// selected actors as P2 identity refs; replace-by-refs or
+				// explicit clear, resolve-before-mutate, refuse empty. get
+				// tools read-only; set tools mutating (gate Enforce; paths_hint
+				// required).
+				FUnrealOpenMcpEditorTools::Register(*ToolRegistry);
 	}
 
 	// Owned. Constructed in StartupModule, torn down in ShutdownModule. The

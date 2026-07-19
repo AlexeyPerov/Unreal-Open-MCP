@@ -89,6 +89,12 @@ const TOOL_CATEGORY: Record<string, string> = {
   unreal_open_mcp_asset_move: "asset",
   unreal_open_mcp_asset_delete: "asset",
   unreal_open_mcp_asset_refresh: "asset",
+  // P4.3 — material family (material_create / material_modify /
+  // material_get_data). create + modify are mutating (route live, default gate
+  // Enforce, paths_hint required); material_get_data is read-only.
+  unreal_open_mcp_material_create: "material",
+  unreal_open_mcp_material_modify: "material",
+  unreal_open_mcp_material_get_data: "material",
   // P3.5/P3.6 — gate + verify surface. Read-only meta-tools participate in
   // the gate workflow but bypass GatePolicy.Execute (no recursion).
   unreal_open_mcp_validate_edit: "gate-and-verify",

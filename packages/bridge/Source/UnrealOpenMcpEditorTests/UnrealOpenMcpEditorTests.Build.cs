@@ -59,6 +59,11 @@ public class UnrealOpenMcpEditorTests : ModuleRules
 			// mirroring the editor module's P4.1 private deps.
 			"AssetRegistry",
 			"AssetTools",
+			// P4.3 — the material-tools spec creates a UMaterialInstanceConstant
+			// from an engine parent material and reads/writes its parameters via
+			// UMaterialEditingLibrary (MaterialEditor module), mirroring the
+			// editor module's P4.3 private dep.
+			"MaterialEditor",
 		});
 
 		// Reach the editor module's PRIVATE headers so Automation specs can

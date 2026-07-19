@@ -32,10 +32,12 @@ const SERVER_ENTRY = resolve(here, "index.js");
 // added apply_fix; P3.8 added capabilities; P4.1 added the asset read pair
 // (asset_find / asset_get_data); P4.2 added the Content Browser CRUD family
 // (asset_create_folder / asset_copy / asset_move / asset_delete /
-// asset_refresh). Further tools land in later phases and append here.
+// asset_refresh); P4.3 added the material family (material_create /
+// material_modify / material_get_data). Further tools land in later phases and
+// append here.
 test("handleListTools returns the registered tools", async () => {
   const result = await handleListTools();
-  assert.equal(result.tools.length, 32);
+  assert.equal(result.tools.length, 35);
   assert.equal(result.tools[0].name, "unreal_open_mcp_ping");
   assert.equal(result.tools[1].name, "unreal_open_mcp_actor_find");
   assert.equal(result.tools[2].name, "unreal_open_mcp_actor_create");
@@ -125,7 +127,7 @@ test("handleCallTool resolves unreal_open_mcp_capabilities locally without a rou
   assert.ok(payload.rules.length > 0);
   assert.ok(payload.fixes.length > 0);
   // Every registered tool is surfaced (capabilities is itself included).
-  assert.equal(payload.counts.toolsImplemented, 32);
+  assert.equal(payload.counts.toolsImplemented, 35);
   assert.equal(payload.counts.rulesImplemented, 3);
 });
 
@@ -240,7 +242,7 @@ test("subprocess: boots, answers initialize + tools/list, exits 0 on EOF", async
     | undefined;
   assert.ok(list, "tools/list response missing");
   const tools = list?.result?.tools ?? [];
-  assert.equal(tools.length, 32);
+  assert.equal(tools.length, 35);
   assert.equal(tools[0].name, "unreal_open_mcp_ping");
   assert.equal(tools[1].name, "unreal_open_mcp_actor_find");
   assert.equal(tools[2].name, "unreal_open_mcp_actor_create");

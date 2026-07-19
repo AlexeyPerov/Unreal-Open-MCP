@@ -55,6 +55,11 @@
 // the shared asset helpers (path normalize / AssetData→JSON / writable-root
 // predicate) live next to the handlers for the later P4 mutators to reuse.
 #include "Tools/UnrealOpenMcpAssetTools.h"
+// P4.3 — material tools (material_create / material_modify / material_get_data),
+// the Unreal analog of Unity's material-create / material-set-property /
+// material-get-properties. MIC create + parameter edits over
+// UMaterialEditingLibrary; create/modify are mutating, get-data read-only.
+#include "Tools/UnrealOpenMcpMaterialTools.h"
 
 #include "HAL/PlatformProcess.h"
 #include "Misc/EngineVersion.h"
@@ -258,6 +263,12 @@ private:
 			// ordering, and offset/limit pagination make asset_find a valid
 			// P4.5 smoke candidate. No gate (pure reads).
 			FUnrealOpenMcpAssetTools::Register(*ToolRegistry);
+
+			// P4.3 — material tools (material_create / material_modify /
+			// material_get_data). create + modify are mutating (default gate
+			// Enforce; paths_hint required); get_data is read-only (parameter
+			// inventory read via UMaterialEditingLibrary).
+			FUnrealOpenMcpMaterialTools::Register(*ToolRegistry);
 	}
 
 	// Owned. Constructed in StartupModule, torn down in ShutdownModule. The

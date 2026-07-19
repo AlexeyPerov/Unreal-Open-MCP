@@ -34,6 +34,14 @@ import { assetCopy } from "./asset-copy.js";
 import { assetMove } from "./asset-move.js";
 import { assetDelete } from "./asset-delete.js";
 import { assetRefresh } from "./asset-refresh.js";
+// P4.3 — material tools (material_create / material_modify /
+// material_get_data). create + modify are mutating (default gate Enforce;
+// paths_hint required); get_data is read-only. MIC create from a parent
+// material interface + batch scalar/vector/texture parameter edits over
+// UMaterialEditingLibrary.
+import { materialCreate } from "./material-create.js";
+import { materialModify } from "./material-modify.js";
+import { materialGetData } from "./material-get-data.js";
 // P3.6 — gate meta-tools (validate_edit / checkpoint_create / delta). The
 // explicit checkpoint → mutate → delta surface; read-only (route live).
 import { validateEdit } from "./validate-edit.js";
@@ -113,6 +121,16 @@ import { capabilities } from "./capabilities.js";
 // updates the in-memory cache, no on-disk delta for the gate). The four
 // create/copy/move/delete tools are mutating (default gate Enforce;
 // paths_hint required); asset_refresh is read-only.
+// P4.3 adds the material family — `material_create` (create a
+// UMaterialInstanceConstant from a parent material interface via
+// UMaterialInstanceConstantFactoryNew + CreateAsset; destination must not
+// exist), `material_modify` (batch scalar/vector/texture parameter overrides
+// via UMaterialEditingLibrary; unknown names collected in `failed`, empty
+// modify rejected with nothing_to_modify; optional save:true), and
+// `material_get_data` (read-only parameter inventory + current values, shapes
+// aligned with material_modify input for chaining). create + modify are
+// mutating (default gate Enforce; paths_hint required); material_get_data is
+// read-only.
 export const ALL_TOOLS: Tool[] = [
   ping,
   actorFind,
@@ -146,4 +164,7 @@ export const ALL_TOOLS: Tool[] = [
   assetMove,
   assetDelete,
   assetRefresh,
+  materialCreate,
+  materialModify,
+  materialGetData,
 ];

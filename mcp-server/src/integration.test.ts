@@ -216,8 +216,10 @@ test("integration: tools/list advertises unreal_open_mcp_ping", async () => {
     // added apply_fix; P3.8 added capabilities; P4.1 added the asset read
     // pair — asset_find / asset_get_data; P4.2 added the Content Browser
     // CRUD family — asset_create_folder / asset_copy / asset_move /
-    // asset_delete / asset_refresh). Guard against accidental registry
-    // drift silently changing what the phase-gate smoke covers.
+    // asset_delete / asset_refresh; P4.3 added the material family —
+    // material_create / material_modify / material_get_data). Guard against
+    // accidental registry drift silently changing what the phase-gate smoke
+    // covers.
     assert.deepEqual(names, [
       "unreal_open_mcp_ping",
       "unreal_open_mcp_actor_find",
@@ -251,6 +253,9 @@ test("integration: tools/list advertises unreal_open_mcp_ping", async () => {
       "unreal_open_mcp_asset_move",
       "unreal_open_mcp_asset_delete",
       "unreal_open_mcp_asset_refresh",
+      "unreal_open_mcp_material_create",
+      "unreal_open_mcp_material_modify",
+      "unreal_open_mcp_material_get_data",
     ]);
   } finally {
     await cleanup();

@@ -30,6 +30,18 @@
 //     every P4.2 mutation that needs a gate already creates/copies/moves
 //     /deletes the package directly; refresh is just registry bookkeeping).
 //
+// P4.4 adds the import mutator — the Unreal analog of Unity Open MCP's asset
+// import / AssetDatabase ingest helpers, adapted to Unreal's task-driven
+// IAssetTools::ImportAssetTasks path:
+//   - `unreal_open_mcp_asset_import` — bring an absolute host filesystem file
+//     (texture / static mesh / sound, as the installed AssetTools/Interchange
+//     importers support) into a `/Game/...` content folder. Synchronous +
+//     GC-safe (the UAssetImportTask is GC-rooted for the import call);
+//     `replace_existing` (default false) refuses a collision, `save` (default
+//     false) leaves the package dirty in-memory. Mutating — registers with
+//     `FUnrealOpenMcpToolMetadata::Mutating()`; the `file` path is a HOST OS
+//     path and is NEVER treated as a content path (one-directional path jail).
+//
 // This file also owns the shared helpers the later P4 mutators (CRUD,
 // materials, import) build on:
 //   - `GetAssetRegistry()` — `IAssetRegistry&` from the AssetRegistry module.
@@ -111,6 +123,7 @@ class FUnrealOpenMcpToolRegistry;
  *   - `unreal_open_mcp_asset_move`         (mutating)
  *   - `unreal_open_mcp_asset_delete`       (mutating)
  *   - `unreal_open_mcp_asset_refresh`      (read-only)
+ *   - `unreal_open_mcp_asset_import`       (mutating)
  */
 namespace FUnrealOpenMcpAssetTools
 {

@@ -100,8 +100,11 @@ public class UnrealOpenMcpEditor : ModuleRules
 
 		// P3.5 scope: gate policy wired at the dispatch boundary. P4.1 adds
 		// AssetRegistry + AssetTools for the asset read family; P4.3 adds
-		// MaterialEditor for the material tools. The dependency surface stays
-		// minimal so the Editor/Runtime boundary guard (P1.8) stays green and
-		// later phases add deps as they add features.
+		// MaterialEditor for the material tools. P4.4 (asset_import) needs no
+		// new module — IAssetTools::ImportAssetTasks + UAssetImportTask come
+		// from AssetTools + UnrealEd (already deps), and FGCObjectScopeGuard
+		// from CoreUObject. The dependency surface stays minimal so the
+		// Editor/Runtime boundary guard (P1.8) stays green and later phases
+		// add deps as they add features.
 	}
 }

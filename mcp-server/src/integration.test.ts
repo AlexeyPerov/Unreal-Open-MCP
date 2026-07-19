@@ -256,6 +256,7 @@ test("integration: tools/list advertises unreal_open_mcp_ping", async () => {
       "unreal_open_mcp_material_create",
       "unreal_open_mcp_material_modify",
       "unreal_open_mcp_material_get_data",
+      "unreal_open_mcp_asset_import",
     ]);
   } finally {
     await cleanup();

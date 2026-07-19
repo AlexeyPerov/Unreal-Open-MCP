@@ -42,6 +42,12 @@ import { assetRefresh } from "./asset-refresh.js";
 import { materialCreate } from "./material-create.js";
 import { materialModify } from "./material-modify.js";
 import { materialGetData } from "./material-get-data.js";
+// P4.4 — asset import (asset_import). Mutating (default gate Enforce;
+// paths_hint required). Brings an absolute host filesystem source file
+// (texture / static mesh / sound as the installed importers support) into a
+// /Game content folder via IAssetTools::ImportAssetTasks; replace_existing /
+// save flags default false.
+import { assetImport } from "./asset-import.js";
 // P3.6 — gate meta-tools (validate_edit / checkpoint_create / delta). The
 // explicit checkpoint → mutate → delta surface; read-only (route live).
 import { validateEdit } from "./validate-edit.js";
@@ -167,4 +173,5 @@ export const ALL_TOOLS: Tool[] = [
   materialCreate,
   materialModify,
   materialGetData,
+  assetImport,
 ];

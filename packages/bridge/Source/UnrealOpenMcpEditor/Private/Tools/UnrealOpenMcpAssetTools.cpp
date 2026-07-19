@@ -40,9 +40,24 @@
 // FindAssetData) — accepts both "/Game/Foo/M.M" and "/Game/Foo/M", mirroring
 // the path-or-name convention the rest of the asset family uses.
 #include "EditorAssetLibrary.h"
+// AssetTools owns IAssetTools::ImportAssetTasks — the synchronous, task-driven
+// import path asset_import drives (host filesystem file → Content Browser).
+#include "AssetToolsModule.h"
+#include "IAssetTools.h"
+// UAssetImportTask is the per-file import request object (Filename +
+// DestinationPath/Name + bReplaceExisting/bSave/bAutomated). Rooted against GC
+// for the duration of the import call (see asset_import handler).
+#include "AssetImportTask.h"
+// FGCObjectScopeGuard roots the transient import task across ImportAssetTasks
+// so a GC pass mid-import cannot collect it (the P4.4 GC-discipline safeguard).
+#include "UObject/GCObjectScopeGuard.h"
 // FPackageName exposes IsValidLongPackageName / IsValidObjectPath used by
 // the path normalization helpers (shared with the level family).
 #include "Misc/PackageName.h"
+// IFileManager::FileExists validates the host `file` path exists on disk before
+// the import runs; FPaths::GetBaseFilename derives the default asset name.
+#include "HAL/FileManager.h"
+#include "Misc/Paths.h"
 #include "Modules/ModuleManager.h"
 
 #include "Dom/JsonObject.h"
@@ -100,6 +115,14 @@ namespace
 	IAssetRegistry& GetAssetRegistry()
 	{
 		return FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry")).Get();
+	}
+
+	/** Access the running AssetTools module (IAssetTools::ImportAssetTasks).
+	 *  Loaded checked — the bridge is an Editor module and AssetTools is always
+	 *  present in the editor. Used by the asset_import handler. */
+	IAssetTools& GetAssetTools()
+	{
+		return FModuleManager::LoadModuleChecked<FAssetToolsModule>(TEXT("AssetTools")).Get();
 	}
 
 	/**
@@ -1147,8 +1170,203 @@ void FUnrealOpenMcpAssetTools::Register(FUnrealOpenMcpToolRegistry& Registry)
 				WriteJson(MakeShared<FJsonValueObject>(Result)));
 		});
 
+	// =========================================================================
+	// P4.4 — asset_import (host filesystem → Content Browser)
+	// =========================================================================
+	//
+	// unreal_open_mcp_asset_import — bring a supported source file (texture /
+	// static mesh / sound, as the installed AssetTools/Interchange importers
+	// support) into `/Game/...` via IAssetTools::ImportAssetTasks.
+	//
+	// `file` is an ABSOLUTE host filesystem path (must exist on disk). It is
+	// NEVER treated as a content path — the path jail is one-directional: a
+	// host OS file is read, a content package under a writable root is written.
+	// `destination` is the content FOLDER the asset lands in (e.g.
+	// '/Game/McpTemp'); `name` optionally overrides the asset name (default:
+	// the source file's base name). `replace_existing` (default false) refuses
+	// a collision unless set; `save` (default false) writes the package to disk
+	// after import (default leaves it dirty in-memory).
+	//
+	// Sync + GC discipline (the P4.4 safeguards): the UAssetImportTask is
+	// created transient and GC-rooted via FGCObjectScopeGuard for the whole
+	// ImportAssetTasks call — a GC pass mid-import would otherwise collect the
+	// unreferenced task and crash. bAutomated=true suppresses interactive
+	// importer dialogs so the synchronous call never blocks on UI.
+	//
+	// Mutating (writes new packages on disk). Registered with
+	// FUnrealOpenMcpToolMetadata::Mutating() so the dispatcher wraps it in
+	// GatePolicy.Execute; the mandatory `paths_hint` is enforced by the
+	// dispatcher BEFORE the handler runs. Structured errors:
+	//   - invalid_parameter    — malformed body
+	//   - missing_parameter    — `file`/`destination` absent
+	//   - file_not_found       — `file` does not exist on disk
+	//   - invalid_content_root — destination under /Engine, /Script, /Temp
+	//   - invalid_path         — destination is not a valid content folder path
+	//   - asset_already_exists — destination asset exists (replace_existing:false)
+	//   - import_failed        — importer produced no asset (unsupported type or
+	//                            importer error)
+	// Result: { imported: string[], destination, saved, replace_existing }
+	Registry.Register(
+		TEXT("unreal_open_mcp_asset_import"),
+		[](const FString& Body) -> FUnrealOpenMcpToolDispatchResult
+		{
+			TSharedPtr<FJsonObject> Args = ParseBody(Body);
+			if (!Args.IsValid())
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("invalid_parameter"),
+					TEXT("Request body was not a valid JSON object."));
+			}
+
+			const FString File = Args->HasTypedField<EJson::String>(TEXT("file"))
+				? Args->GetStringField(TEXT("file")).TrimStartAndEnd()
+				: FString();
+			const FString Destination = Args->HasTypedField<EJson::String>(TEXT("destination"))
+				? Args->GetStringField(TEXT("destination")).TrimStartAndEnd()
+				: FString();
+			if (File.IsEmpty() || Destination.IsEmpty())
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("missing_parameter"),
+					TEXT("'file' (absolute host path) and 'destination' (/Game content folder) are required."));
+			}
+
+			// The `file` path is a HOST filesystem path, never a content path —
+			// validate it exists on disk before doing any content-side work so a
+			// typo'd path is a clean file_not_found rather than an importer error.
+			if (!IFileManager::Get().FileExists(*File))
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("file_not_found"),
+					FString::Printf(TEXT("Source file '%s' does not exist on disk."), *File));
+			}
+
+			// Normalize the destination FOLDER (strip any trailing slash) and
+			// refuse engine content roots — imports only write under project /
+			// plugin-mounted roots.
+			FString DestFolder = Destination;
+			while (DestFolder.EndsWith(TEXT("/")))
+			{
+				DestFolder.LeftChopInline(1);
+			}
+			if (DestFolder.IsEmpty() || !DestFolder.StartsWith(TEXT("/")))
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("invalid_path"),
+					FString::Printf(
+						TEXT("'%s' is not a valid content folder (expected '/Game/Folder')."),
+						*Destination));
+			}
+			if (!IsWritableContentRoot(DestFolder))
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("invalid_content_root"),
+					FString::Printf(
+						TEXT("Refusing to import into '%s' under an engine content root; use a project root like '/Game'."),
+						*DestFolder));
+			}
+
+			// Asset name: explicit `name` override, else the source file's base
+			// name (matching editor drag-drop import behaviour).
+			FString AssetName = Args->HasTypedField<EJson::String>(TEXT("name"))
+				? Args->GetStringField(TEXT("name")).TrimStartAndEnd()
+				: FString();
+			if (AssetName.IsEmpty())
+			{
+				AssetName = FPaths::GetBaseFilename(File);
+			}
+			if (AssetName.IsEmpty())
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("invalid_parameter"),
+					TEXT("Could not derive an asset name from 'file'; pass an explicit 'name'."));
+			}
+
+			const bool bReplaceExisting = Args->HasTypedField<EJson::Boolean>(TEXT("replace_existing"))
+				&& Args->GetBoolField(TEXT("replace_existing"));
+			const bool bSave = Args->HasTypedField<EJson::Boolean>(TEXT("save"))
+				&& Args->GetBoolField(TEXT("save"));
+
+			// Collision guard — refuse an existing destination asset unless
+			// replace_existing is set (no silent overwrite / content loss).
+			const FString DestObjectPath = FString::Printf(TEXT("%s/%s"), *DestFolder, *AssetName);
+			if (!bReplaceExisting && UEditorAssetLibrary::DoesAssetExist(DestObjectPath))
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("asset_already_exists"),
+					FString::Printf(
+						TEXT("An asset already exists at '%s'. Pass 'replace_existing':true to overwrite."),
+						*DestObjectPath));
+			}
+
+			// Build the import task. Created transient + GC-rooted for the whole
+			// ImportAssetTasks call (a GC pass mid-import would collect it and
+			// crash). bAutomated suppresses interactive importer dialogs so the
+			// synchronous call never blocks on UI.
+			UAssetImportTask* Task = NewObject<UAssetImportTask>();
+			FGCObjectScopeGuard TaskGuard(Task);
+			Task->Filename = File;
+			Task->DestinationPath = DestFolder;
+			Task->DestinationName = AssetName;
+			Task->bReplaceExisting = bReplaceExisting;
+			Task->bAutomated = true;
+			Task->bSave = bSave;
+			Task->bAsync = false;
+
+			TArray<UAssetImportTask*> Tasks;
+			Tasks.Add(Task);
+			GetAssetTools().ImportAssetTasks(Tasks);
+
+			// Collect the imported object paths. GetObjects() is the authoritative
+			// list on a synchronous import; ImportedObjectPaths is the string
+			// fallback when the importer only populated the path array.
+			TArray<FString> Imported;
+			for (UObject* Object : Task->GetObjects())
+			{
+				if (Object)
+				{
+					Imported.AddUnique(Object->GetPathName());
+				}
+			}
+			if (Imported.Num() == 0)
+			{
+				for (const FString& ObjectPath : Task->ImportedObjectPaths)
+				{
+					Imported.AddUnique(ObjectPath);
+				}
+			}
+
+			if (Imported.Num() == 0)
+			{
+				// No asset produced — either the extension has no registered
+				// importer (unsupported type) or the importer errored. The task
+				// does not distinguish the two reliably, so surface a single
+				// actionable import_failed with the source extension.
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("import_failed"),
+					FString::Printf(
+						TEXT("Import of '%s' produced no asset (unsupported file type or importer error; extension '%s')."),
+						*File, *FPaths::GetExtension(File)));
+			}
+
+			TArray<TSharedPtr<FJsonValue>> ImportedValues;
+			ImportedValues.Reserve(Imported.Num());
+			for (const FString& ObjectPath : Imported)
+			{
+				ImportedValues.Add(MakeShared<FJsonValueString>(ObjectPath));
+			}
+
+			TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+			Result->SetArrayField(TEXT("imported"), ImportedValues);
+			Result->SetStringField(TEXT("destination"), DestFolder);
+			Result->SetBoolField(TEXT("saved"), bSave);
+			Result->SetBoolField(TEXT("replace_existing"), bReplaceExisting);
+			return FUnrealOpenMcpToolDispatchResult::Ok(
+				WriteJson(MakeShared<FJsonValueObject>(Result)));
+		}, FUnrealOpenMcpToolMetadata::Mutating());
+
 	UE_LOG(
 		LogUnrealOpenMcp,
 		Log,
-		TEXT("[Unreal Open MCP] asset tools registered: unreal_open_mcp_asset_find, unreal_open_mcp_asset_get_data, unreal_open_mcp_asset_create_folder, unreal_open_mcp_asset_copy, unreal_open_mcp_asset_move, unreal_open_mcp_asset_delete, unreal_open_mcp_asset_refresh"));
+		TEXT("[Unreal Open MCP] asset tools registered: unreal_open_mcp_asset_find, unreal_open_mcp_asset_get_data, unreal_open_mcp_asset_create_folder, unreal_open_mcp_asset_copy, unreal_open_mcp_asset_move, unreal_open_mcp_asset_delete, unreal_open_mcp_asset_refresh, unreal_open_mcp_asset_import"));
 }

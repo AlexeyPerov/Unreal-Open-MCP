@@ -53,6 +53,12 @@ public class UnrealOpenMcpEditorTests : ModuleRules
 			// specs need the same module so they can reach FVerifyRunner /
 			// IVerifyRule.
 			"UnrealOpenMcpVerify",
+			// P4.1 — the asset-find / asset-get-data specs query the live
+			// AssetRegistry (IAssetRegistry + FARFilter + FAssetData) and use
+			// UEditorAssetLibrary (AssetTools module) for the get-data probe,
+			// mirroring the editor module's P4.1 private deps.
+			"AssetRegistry",
+			"AssetTools",
 		});
 
 		// Reach the editor module's PRIVATE headers so Automation specs can

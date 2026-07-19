@@ -76,6 +76,10 @@ const TOOL_CATEGORY: Record<string, string> = {
   unreal_open_mcp_level_unload_sublevel: "level",
   unreal_open_mcp_level_get_data: "level",
   unreal_open_mcp_level_create: "level",
+  // P4.1 — asset read family (asset_find / asset_get_data). Read-only
+  // AssetRegistry queries; route live, gate-free.
+  unreal_open_mcp_asset_find: "asset",
+  unreal_open_mcp_asset_get_data: "asset",
   // P3.5/P3.6 — gate + verify surface. Read-only meta-tools participate in
   // the gate workflow but bypass GatePolicy.Execute (no recursion).
   unreal_open_mcp_validate_edit: "gate-and-verify",

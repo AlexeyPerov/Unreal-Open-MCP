@@ -19,6 +19,11 @@ import { levelSetCurrent } from "./level-set-current.js";
 import { levelUnloadSublevel } from "./level-unload-sublevel.js";
 import { levelGetData } from "./level-get-data.js";
 import { levelCreate } from "./level-create.js";
+// P4.1 — asset read family (asset_find / asset_get_data). Read-only
+// AssetRegistry queries; the default /Game scope, stable ordering, and
+// offset/limit pagination make asset_find a valid P4.5 smoke candidate.
+import { assetFind } from "./asset-find.js";
+import { assetGetData } from "./asset-get-data.js";
 // P3.6 — gate meta-tools (validate_edit / checkpoint_create / delta). The
 // explicit checkpoint → mutate → delta surface; read-only (route live).
 import { validateEdit } from "./validate-edit.js";
@@ -82,6 +87,12 @@ import { capabilities } from "./capabilities.js";
 // capability surface (tools + rules + fixes) in-process from the static
 // rule-catalog + the registered tool list, with no bridge round-trip. An
 // agent calls this first to learn what is available before mutating.
+// P4.1 adds the asset read family — `asset_find` (filtered AssetRegistry
+// query with stable ordering + offset/limit pagination; empty filter
+// defaults to /Game, never the whole registry incl. /Engine) and
+// `asset_get_data` (single-asset metadata read by path-or-name, with an
+// optional `paths` projection for token savings). Both are read-only (route
+// live, gate-free). asset_find is a valid P4.5 smoke candidate.
 export const ALL_TOOLS: Tool[] = [
   ping,
   actorFind,
@@ -108,4 +119,6 @@ export const ALL_TOOLS: Tool[] = [
   delta,
   applyFix,
   capabilities,
+  assetFind,
+  assetGetData,
 ];

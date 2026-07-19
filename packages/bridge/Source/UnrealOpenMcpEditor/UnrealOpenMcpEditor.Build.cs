@@ -21,6 +21,12 @@
 // packages/verify/AGENTS.md). PRIVATE because the bridge's public headers do
 // not surface verify types — only the gate implementation files include
 // verify headers.
+//
+// P4.1 added PRIVATE deps on AssetRegistry + AssetTools — the asset read
+// family (asset_find / asset_get_data) queries the AssetRegistry directly
+// (IAssetRegistry::GetAssets + FARFilter + FAssetData) and uses
+// UEditorAssetLibrary (AssetTools module) for the get-data path-or-name
+// probe (DoesAssetExist / FindAssetData).
 using UnrealBuildTool;
 
 public class UnrealOpenMcpEditor : ModuleRules
@@ -76,9 +82,17 @@ public class UnrealOpenMcpEditor : ModuleRules
 			// VerifyResult / IssueKey types. PRIVATE: verify types do not
 			// surface in any bridge public header.
 			"UnrealOpenMcpVerify",
+			// P4.1 — asset read family (asset_find / asset_get_data). The
+			// AssetRegistry module owns IAssetRegistry + FARFilter + FAssetData
+			// (the query surface asset_find reads against); AssetTools owns
+			// UEditorAssetLibrary (DoesAssetExist / FindAssetData) the get-data
+			// path-or-name probe uses. Both are first-party editor modules.
+			"AssetRegistry",
+			"AssetTools",
 		});
 
-		// P3.5 scope: gate policy wired at the dispatch boundary. The dependency
+		// P3.5 scope: gate policy wired at the dispatch boundary. P4.1 adds
+		// AssetRegistry + AssetTools for the asset read family. The dependency
 		// surface stays minimal so the Editor/Runtime boundary guard (P1.8)
 		// stays green and later phases add deps as they add features.
 	}

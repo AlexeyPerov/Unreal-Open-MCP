@@ -50,6 +50,11 @@
 // not recurse through GatePolicy.Execute).
 #include "MetaTools/UnrealOpenMcpGateMetaTools.h"
 #include "MetaTools/UnrealOpenMcpApplyFixTool.h"
+// P4.1 — asset read family (asset_find / asset_get_data), the Unreal analog
+// of Unity's search_assets / read_asset. Read-only AssetRegistry queries;
+// the shared asset helpers (path normalize / AssetData→JSON / writable-root
+// predicate) live next to the handlers for the later P4 mutators to reuse.
+#include "Tools/UnrealOpenMcpAssetTools.h"
 
 #include "HAL/PlatformProcess.h"
 #include "Misc/EngineVersion.h"
@@ -247,6 +252,12 @@ private:
 			// routes non-dry-run applies through the ApplyFixGateRunner so a
 			// FixRollback snapshot protects the asset.
 			FUnrealOpenMcpApplyFixMetaTools::Register(*ToolRegistry);
+
+			// P4.1 — asset read family (asset_find / asset_get_data). Read-
+			// only AssetRegistry queries; the default /Game scope, stable
+			// ordering, and offset/limit pagination make asset_find a valid
+			// P4.5 smoke candidate. No gate (pure reads).
+			FUnrealOpenMcpAssetTools::Register(*ToolRegistry);
 	}
 
 	// Owned. Constructed in StartupModule, torn down in ShutdownModule. The

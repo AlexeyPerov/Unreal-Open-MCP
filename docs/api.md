@@ -24,6 +24,7 @@ This file is the index for external interfaces and protocol contracts exposed by
 - MCP resources source: `mcp-server/src/resources/` (when shipped)
 - Phase 1 parity smoke sources: `mcp-server/src/integration.test.ts` (in-process MCP client↔server over in-memory transport), `mcp-server/scripts/p1-parity-smoke.mjs` (scripted stdio smoke against the built `dist/index.js`)
 - Phase 2 parity smoke sources: `mcp-server/src/integration.test.ts` (P2.8 cases — `unreal_open_mcp_actor_find` round-trip over `POST /tools/{name}` with the `{ok,result,error}` envelope), `mcp-server/scripts/p2-parity-smoke.mjs` (scripted stdio smoke against the built `dist/index.js`; healthy / bridge-down / tool-error cases)
+- Phase 4 parity smoke sources: `mcp-server/src/integration.test.ts` (P4.5 cases — `unreal_open_mcp_asset_find` round-trip over `POST /tools/{name}` with the `{ok,result,error}` envelope), `mcp-server/scripts/p4-parity-smoke.mjs` (`npm run smoke:p4`; scripted stdio smoke against the built `dist/index.js`; healthy / bridge-down / tool-error cases — the mandatory gate before Phase 5)
 
 ## Contract documentation guidance
 

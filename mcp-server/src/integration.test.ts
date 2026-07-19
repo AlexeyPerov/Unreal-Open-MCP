@@ -543,3 +543,181 @@ test("P2.8 integration: tools/call actor_find surfaces the tool error envelope o
     await bridge.close();
   }
 });
+
+// ===========================================================================
+// P4.5 — Phase 4 parity smoke (asset-find round-trip)
+// ===========================================================================
+//
+// P2.8 pinned the first typed-tool round-trip (actor_find) through POST
+// /tools/{name} with the {ok,result,error} envelope. Phase 4 shipped the
+// asset family; P4.5 is the mandatory phase-gate before Phase 5 and proves
+// one asset-family tool survives the full MCP ↔ bridge path. asset_find is the
+// smoke default (read-only, no gate — the safest tool to prove the wiring
+// without a checkpoint/mutate dance).
+//
+// These cases mirror the P2.8 structure exactly, only swapping the tool name
+// and the canonical result body: healthy (the paginated {total,offset,count,
+// assets} body survives the round-trip verbatim after LiveClient.postTool
+// unwraps the envelope), bridge-down (the asset path inherits P1's
+// bridge_offline classification with the instance-lock hint), and tool-error
+// ({ok:false,error} surfaces as an MCP error carrying the tool-specific
+// invalid_class_path code so an agent can branch on the cause).
+
+/**
+ * Canonical asset-find result body the bridge emits — one resolved material
+ * asset under /Game. Pinned field set for a single AssetSummary
+ * ({ name, path, package, class }) wrapped in the offset/limit pagination
+ * envelope. The stub returns this inside {ok:true,result:<body>}; the MCP
+ * `bodyOf` helper sees the INNER object after LiveClient.postTool unwraps it.
+ */
+const ASSET_FIND_HIT = {
+  total: 1,
+  offset: 0,
+  count: 1,
+  assets: [
+    {
+      name: "M_Test",
+      path: "/Game/M_Test.M_Test",
+      package: "/Game/M_Test",
+      class: "/Script/Engine.Material",
+    },
+  ],
+};
+
+/**
+ * Bridge handler that serves GET /ping (healthy) AND POST
+ * /tools/unreal_open_mcp_asset_find with the canonical envelope. Every other
+ * request falls through to a 404 so a misrouted call surfaces as a clear
+ * bridge_http_error rather than a false positive.
+ */
+async function assetFindHandler(
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<void> {
+  if (req.method === "GET" && req.url === "/ping") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(HEALTHY_PING));
+    return;
+  }
+  if (req.method === "POST" && req.url === "/tools/unreal_open_mcp_asset_find") {
+    await readBody(req);
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: true, result: ASSET_FIND_HIT }));
+    return;
+  }
+  res.writeHead(404, { "Content-Type": "application/json" });
+  res.end(
+    JSON.stringify({
+      error: { code: "not_found", message: `${req.method} ${req.url}` },
+    }),
+  );
+}
+
+// --- P4.5 healthy: full typed-tool round-trip unwraps the result body -------
+
+test("P4.5 integration: tools/call asset_find returns the unwrapped result body on 200", async () => {
+  const bridge = await startHandlerStub(assetFindHandler);
+  try {
+    const { client, cleanup } = await setupClient(bridge.port);
+    try {
+      const result = await client.callTool({
+        name: "unreal_open_mcp_asset_find",
+        arguments: { path: "/Game", limit: 10 },
+      });
+      // Success envelope → isError:false and the INNER result object (not the
+      // {ok,result} wrapper) survives the MCP round-trip verbatim — the parity
+      // pin on the asset-find pagination + AssetSummary field set.
+      assert.equal(result.isError, false);
+      assert.deepEqual(bodyOf(result), ASSET_FIND_HIT);
+    } finally {
+      await cleanup();
+    }
+  } finally {
+    await bridge.close();
+  }
+});
+
+// --- P4.5 bridge-down: asset path inherits bridge_offline -------------------
+
+test("P4.5 integration: bridge-down tools/call asset_find surfaces bridge_offline with the lock hint", async () => {
+  // Port 1 — nothing listening. The asset path MUST classify exactly like the
+  // ping / actor_find paths: bridge_offline (NOT bridge_timeout), with the
+  // instance lock path named so an agent debugging a port mismatch knows where
+  // to look. Pass a projectPath via the router so the offline hint names a
+  // concrete lock file (assertion below checks for it).
+  const { client, cleanup } = await setupClient(1);
+  setLiveRouter(new LiveClient(1, undefined, "/tmp/MyGame"));
+  try {
+    const result = await client.callTool({
+      name: "unreal_open_mcp_asset_find",
+      arguments: { path: "/Game", limit: 10 },
+    });
+    assert.equal(result.isError, true);
+    const body = bodyOf(result) as { error: { code: string; message: string } };
+    assert.equal(body.error.code, "bridge_offline");
+    assert.match(
+      body.error.message,
+      /\.unreal-open-mcp\/instances\//,
+      "offline hint must name the instance lock dir",
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+// --- P4.5 tool error: {ok,false,error} surfaces as a structured MCP error ----
+
+test("P4.5 integration: tools/call asset_find surfaces the tool error envelope on ok:false", async () => {
+  // The bridge ran the handler and it returned a structured failure — here a
+  // malformed class_path (short dotless name rejected before the registry
+  // query). The {ok:false,error:{code,message}} envelope must surface as an
+  // MCP error (isError:true) carrying the tool-specific code verbatim so an
+  // agent can branch on invalid_class_path vs invalid_parameter.
+  const bridge = await startHandlerStub(async (req, res) => {
+    if (req.method === "POST" && req.url === "/tools/unreal_open_mcp_asset_find") {
+      await readBody(req);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          ok: false,
+          error: {
+            code: "invalid_class_path",
+            message:
+              "class_path 'Material' is not a '/Script/Module.Class' path.",
+          },
+        }),
+      );
+      return;
+    }
+    res.writeHead(404, { "Content-Type": "application/json" });
+    res.end(
+      JSON.stringify({
+        error: { code: "not_found", message: `${req.method} ${req.url}` },
+      }),
+    );
+  });
+  try {
+    const { client, cleanup } = await setupClient(bridge.port);
+    try {
+      const result = await client.callTool({
+        name: "unreal_open_mcp_asset_find",
+        arguments: { class_path: "Material" },
+      });
+      assert.equal(result.isError, true);
+      const body = bodyOf(result) as {
+        error: { code: string; message: string };
+      };
+      // The tool-specific error code rides through — an agent can branch on
+      // invalid_class_path rather than seeing an opaque transport error.
+      assert.equal(body.error.code, "invalid_class_path");
+      assert.equal(
+        body.error.message,
+        "class_path 'Material' is not a '/Script/Module.Class' path.",
+      );
+    } finally {
+      await cleanup();
+    }
+  } finally {
+    await bridge.close();
+  }
+});

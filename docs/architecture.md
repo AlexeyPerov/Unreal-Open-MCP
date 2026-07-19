@@ -190,6 +190,34 @@ The `/ping` cheat sheet above still applies to the typed-tool path — `bridge_o
 | `actor_not_found` | actor-find handler | Bad actor ref / no editor world / no match |
 | tool-specific (`invalid_parameter`, `no_editor_world`, …) | the tool handler that emitted it | See the tool's documented error codes |
 
+## Phase 4 parity smoke
+
+The phase-gate before Phase 5 begins. P2.8 proved the first typed-tool round-trip (`actor_find`) end-to-end; Phase 4 shipped the asset family — `asset_find` / `asset_get_data` (P4.1), Content Browser CRUD (P4.2), materials (P4.3), and import (P4.4). The P4 smoke proves one asset-family tool survives the full MCP ↔ bridge path once over the canonical route:
+
+```
+stdio MCP client  →  unreal_open_mcp_asset_find  →  POST /tools/unreal_open_mcp_asset_find
+                  →  {ok, result, error} envelope  →  unwrapped result body
+```
+
+`asset_find` is the smoke default because it is read-only (gate-free): it proves the wiring without a checkpoint → mutate → delta dance. (`material_create` is the documented mutator alternate if a write round-trip is preferred later; it would carry a `paths_hint` in the tools/call args.)
+
+Two layers guard the route, mirroring the Phase 1 / Phase 2 structure:
+
+1. **In-process integration tests** — `mcp-server/src/integration.test.ts` (P4.5 cases). Same in-memory MCP SDK `Client` ↔ `createServer()` wiring as the earlier cases, but the loopback HTTP stub now dispatches `POST /tools/unreal_open_mcp_asset_find` returning the canonical asset-find body wrapped in `{ok:true, result:<body>}`. Three outcomes are pinned — healthy (the INNER `result` body — the `{total, offset, count, assets}` pagination envelope with an `AssetSummary` carrying `{name, path, package, class}` — survives the round-trip verbatim), bridge-down (the asset path inherits `bridge_offline` with the instance-lock hint), and tool-error (`{ok:false, error:{code,message}}` surfaces as an MCP error carrying the tool-specific `invalid_class_path` code). Run via `npm test`.
+2. **Scripted stdio smoke** — `mcp-server/scripts/p4-parity-smoke.mjs` (`npm run smoke:p4`). Spawns the built `dist/index.js` and drives `initialize → tools/list → tools/call asset_find` over stdio, across three cases (healthy stub, dead-port bridge-down, `{ok:false}` tool-error stub). This is the gate that catches packaging, transport, and instance-discovery wiring drift the in-process suite cannot see. Pass `--port <n> --project <path>` to run the healthy case against a live Unreal Editor (the bridge-down + tool-error cases require the stub harness; they are skipped in `--port` mode).
+
+Both layers must be green before Phase 5 work starts. The typed-tool failure-signature cheat sheet above applies unchanged — the asset path classifies transport failures identically, and the tool-specific error surface for `asset_find` is `invalid_class_path` / `invalid_parameter` / `missing_parameter`.
+
+### Owner-area mapping (P4.5 failure triage)
+
+| Failure signature | Likely owner |
+|---|---|
+| `tools/list` missing `asset_find` | MCP `tools/index.ts` registration |
+| Stub `POST` never hit | `live-client` routing / tool name mismatch |
+| `bridge_offline` on a healthy stub | discovery / port / lock-path regression |
+| Envelope unwrap error | `live-client` result parsing |
+| Live-editor find empty under `/Game` | bridge AssetRegistry handler / content not scanned |
+
 ## Versioning
 
 The repo tracks a shared version for the npm MCP server, bridge plugin, and verify module from `version.json`. Generated version strings are synced by `scripts/sync-version.mjs`.

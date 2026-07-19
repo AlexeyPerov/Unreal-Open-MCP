@@ -64,7 +64,7 @@ A task is done when:
 - [ ] Test parity note is filled (ported test, new equivalent, or justified gap).
 - [ ] Tracked docs updated if behavior or contracts changed.
 - [ ] PR description includes the reuse evidence checklist (see `.github/pull_request_template.md`).
-- [ ] Early smoke tests pass where applicable (ping E2E after Phase 1; one actor tool after Phase 2 — see roadmap).
+- [ ] Early smoke tests pass where applicable (ping, typed-tool, and asset-family E2E routes — see [E2E smoke verification](architecture.md#e2e-smoke-verification)).
 
 ---
 

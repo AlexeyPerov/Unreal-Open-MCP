@@ -30,7 +30,7 @@
 // Live-editor path: to run the same smoke against a real Unreal Editor, drop
 // the stub and pass --port <editor bridge port> --project <project path>; the
 // server will discover the live bridge the same way. See docs/architecture.md
-// (Phase 1 parity smoke) for the failure-signature table.
+// (E2E smoke verification) for the failure-signature table.
 
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";

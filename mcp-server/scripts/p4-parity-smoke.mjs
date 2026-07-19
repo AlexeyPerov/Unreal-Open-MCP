@@ -35,7 +35,7 @@
 //
 // Live-editor path: to run the same smoke against a real Unreal Editor, pass
 // --port <editor bridge port> --project <project path>; the server discovers
-// the live bridge the same way. See docs/architecture.md (Phase 4 parity smoke)
+// the live bridge the same way. See docs/architecture.md (E2E smoke verification)
 // for the failure-signature table.
 //
 // Adapted from this repo's scripts/p2-parity-smoke.mjs (adapt fidelity, P4.5).

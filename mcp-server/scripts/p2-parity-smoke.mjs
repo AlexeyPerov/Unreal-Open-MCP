@@ -31,7 +31,7 @@
 //
 // Live-editor path: to run the same smoke against a real Unreal Editor, pass
 // --port <editor bridge port> --project <project path>; the server discovers
-// the live bridge the same way. See docs/architecture.md (Phase 2 parity smoke)
+// the live bridge the same way. See docs/architecture.md (E2E smoke verification)
 // for the failure-signature table.
 //
 // Adapted from Unity Open MCP's mcp-server/scripts/p1-parity-smoke.mjs (adapt

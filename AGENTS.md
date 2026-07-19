@@ -40,6 +40,8 @@
 
 - **No internal references in user-visible surfaces.** User-visible docs and UI strings must never reference internal data such as `specs/` paths, phase IDs (e.g. P0.3, M3), execution-plan task numbers, or porting-map citations. Source-code comments may reference specs for developer context; shipped documentation must be clean.
 
+- **No roadmap / phase-exit framing in tracked docs.** `README.md` and `docs/` describe current behavior and how to verify it — not which roadmap phase shipped a feature or closed a gate. Do not add sections, headings, or bullets like “Phase N parity smoke”, “mandatory gate before Phase N+1”, or “shipped in P2.2”. Smoke and integration coverage belongs under evergreen names (e.g. E2E smoke verification): document how to run the tests and what failure codes mean. Roadmap exit-gate narrative stays in `specs/` (gitignored) or in source/test comments.
+
 - **Docs are part of done.** If a change affects public behavior, API contracts, architecture boundaries, or developer workflows, update tracked docs in `README.md` and/or `docs/` in the same task.
 
 - **Docs layout and ownership.**

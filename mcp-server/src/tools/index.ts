@@ -82,6 +82,15 @@ import { consoleRunCommand } from "./console-run-command.js";
 // Enforce; paths_hint required; BlueprintCallable / CallInEditor only).
 import { reflectionMethodFind } from "./reflection-method-find.js";
 import { reflectionMethodCall } from "./reflection-method-call.js";
+// P5.5 — screenshot family (viewport / game_view / camera / isolated). Four
+// read-only image-capture tools returning a base64 PNG as MCP image content
+// (the bridge carries the image in a top-level `image` field; the LiveClient
+// unwraps it into an image content block). Gate-free (reads pixels, mutates
+// no editor/project state).
+import { screenshotViewport } from "./screenshot-viewport.js";
+import { screenshotGameView } from "./screenshot-game-view.js";
+import { screenshotCamera } from "./screenshot-camera.js";
+import { screenshotIsolated } from "./screenshot-isolated.js";
 
 // Tool registry. P1.7 registers the first real tool — `unreal_open_mcp_ping` —
 // which the MCP server routes to the bridge's `GET /ping`. Each subsequent tool
@@ -205,4 +214,8 @@ export const ALL_TOOLS: Tool[] = [
   consoleRunCommand,
   reflectionMethodFind,
   reflectionMethodCall,
+  screenshotViewport,
+  screenshotGameView,
+  screenshotCamera,
+  screenshotIsolated,
 ];

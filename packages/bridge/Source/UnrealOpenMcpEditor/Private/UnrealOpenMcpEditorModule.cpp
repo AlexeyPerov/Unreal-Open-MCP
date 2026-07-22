@@ -73,6 +73,12 @@
 // discovery + safety-gated ProcessEvent invoke (BlueprintCallable / CallInEditor
 // only; CDO path requires static / CallInEditor).
 #include "Tools/UnrealOpenMcpReflectionTools.h"
+// P5.5 — screenshot family (viewport / game_view / camera / isolated). Four
+// read-only image-capture tools returning a base64 PNG as MCP image content
+// (via the FUnrealOpenMcpToolDispatchResult image payload). Dimension-capped,
+// opaque-PNG, byte-capped; transient capture actors + render targets cleaned
+// up on every path.
+#include "Tools/UnrealOpenMcpScreenshotTools.h"
 
 #include "HAL/PlatformProcess.h"
 #include "Misc/EngineVersion.h"
@@ -316,7 +322,13 @@ private:
 				// a safety-gated ProcessEvent invoke (mutating; gate Enforce;
 				// paths_hint required).
 				FUnrealOpenMcpReflectionTools::Register(*ToolRegistry);
-	}
+
+				// P5.5 — screenshot family (viewport / game_view / camera /
+				// isolated). Four read-only image-capture tools returning a
+				// base64 PNG as MCP image content. Gate-free (reads pixels,
+				// mutates no editor/project state).
+				FUnrealOpenMcpScreenshotTools::Register(*ToolRegistry);
+		}
 
 	// Owned. Constructed in StartupModule, torn down in ShutdownModule. The
 	// dispatcher itself lives in the Runtime module (packaging-safe); only its

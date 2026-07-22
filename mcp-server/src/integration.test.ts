@@ -266,6 +266,10 @@ test("integration: tools/list advertises unreal_open_mcp_ping", async () => {
       "unreal_open_mcp_console_run_command",
       "unreal_open_mcp_reflection_method_find",
       "unreal_open_mcp_reflection_method_call",
+      "unreal_open_mcp_screenshot_viewport",
+      "unreal_open_mcp_screenshot_game_view",
+      "unreal_open_mcp_screenshot_camera",
+      "unreal_open_mcp_screenshot_isolated",
     ]);
   } finally {
     await cleanup();

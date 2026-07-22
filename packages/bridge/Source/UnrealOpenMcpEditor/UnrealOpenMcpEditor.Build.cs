@@ -96,7 +96,16 @@ public class UnrealOpenMcpEditor : ModuleRules
 			// UMaterialInstanceConstant / UTexture classes live in Engine
 			// (already a dep). First-party editor module.
 			"MaterialEditor",
-		});
+			// P5.5 — screenshot family (screenshot_viewport / _game_view /
+			// _camera / _isolated). FImageUtils::PNGCompressImageArray drives
+			// the opaque-PNG encode of the captured FColor buffer (ImageWrapper
+			// module); FViewport::ReadPixels + render-target read-back for the
+			// SceneCapture2D path pull types from RHI / RenderCore. First-party
+			// engine modules; editor-only (the module is Type: Editor).
+			"ImageWrapper",
+			"RenderCore",
+			"RHI",
+			});
 
 		// P3.5 scope: gate policy wired at the dispatch boundary. P4.1 adds
 		// AssetRegistry + AssetTools for the asset read family; P4.3 adds

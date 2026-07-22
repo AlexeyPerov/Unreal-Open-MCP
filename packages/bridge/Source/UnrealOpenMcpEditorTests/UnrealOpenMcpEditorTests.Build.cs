@@ -64,7 +64,15 @@ public class UnrealOpenMcpEditorTests : ModuleRules
 			// UMaterialEditingLibrary (MaterialEditor module), mirroring the
 			// editor module's P4.3 private dep.
 			"MaterialEditor",
-		});
+			// P5.5 — the screenshot spec drives the handlers directly (dimension
+			// clamp, opaque-force, PNG signature, byte-cap refuse, arg validation
+			// — all GPU-free branches). The encode path pulls FImageUtils from
+			// Engine (already a dep) + the PNG compressor from ImageWrapper; the
+			// camera/isolated validation branches resolve actors via
+			// UnrealOpenMcpEditor (already a dep). Mirrors the editor module's
+			// P5.5 private deps for the encode surface.
+			"ImageWrapper",
+			});
 
 		// Reach the editor module's PRIVATE headers so Automation specs can
 		// drive its internals directly. The runtime path is PUBLIC, so it is

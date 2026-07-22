@@ -19,7 +19,7 @@ import {
   type IncomingMessage,
   type ServerResponse,
 } from "node:http";
-import { LiveClient, isAbortError } from "./live-client.js";
+import { LiveClient, isAbortError, unwrapImage } from "./live-client.js";
 
 /** Canonical 200 /ping body the Unreal bridge emits (pinned field order). */
 const HEALTHY_PING = {
@@ -591,4 +591,90 @@ test("postTool: read-only success omits the gate block (P2.1 shape preserved)", 
   } finally {
     await bridge.close();
   }
+});
+
+// --- P5.5 image envelope (screenshot unwrap) --------------------------------
+
+test("postTool: image envelope unwraps into an MCP image content block", async () => {
+  // P5.5 — screenshot tools carry a top-level `image` block alongside `result`.
+  // The LiveClient must split the envelope into an MCP image content block
+  // (the base64 PNG) + a text metadata block (the `result`). The base64 must
+  // NEVER surface as a text dump — pinning that contract here.
+  const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMBAQDJ/pLvAAAAAElFTkSuQmCC";
+  const metadata = { source: "editor viewport", width: 1, height: 1, mimeType: "image/png", byteSize: 82 };
+  const bridge = await startBridgeStub((_req, res) => {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: true, result: metadata, image: { data: png, mediaType: "image/png" } }));
+  });
+  try {
+    const client = new LiveClient(bridge.port);
+    const result = await client.route("unreal_open_mcp_screenshot_viewport", {});
+    assert.equal(result.isError, false);
+    assert.equal(result.content.length, 2, "image + text blocks");
+    // First block is the image — clients render the first content block.
+    const imageBlock = result.content[0] as { type: string; data: string; mimeType: string };
+    assert.equal(imageBlock.type, "image");
+    assert.equal(imageBlock.data, png);
+    assert.equal(imageBlock.mimeType, "image/png");
+    // Second block is the metadata text.
+    const textBlock = result.content[1] as { type: string; text: string };
+    assert.equal(textBlock.type, "text");
+    assert.deepEqual(JSON.parse(textBlock.text), metadata);
+  } finally {
+    await bridge.close();
+  }
+});
+
+test("postTool: image envelope defaults mediaType to image/png when absent", async () => {
+  // The bridge always emits mediaType, but the LiveClient must default it to
+  // image/png when absent (Unity parity) so a malformed envelope never yields
+  // an image block with an empty mimeType.
+  const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMBAQDJ/pLvAAAAAElFTkSuQmCC";
+  const bridge = await startBridgeStub((_req, res) => {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: true, result: {}, image: { data: png } }));
+  });
+  try {
+    const client = new LiveClient(bridge.port);
+    const result = await client.route("unreal_open_mcp_screenshot_camera", { camera: "Cam1" });
+    const imageBlock = result.content[0] as { type: string; data: string; mimeType: string };
+    assert.equal(imageBlock.type, "image");
+    assert.equal(imageBlock.mimeType, "image/png");
+  } finally {
+    await bridge.close();
+  }
+});
+
+test("postTool: non-image tool's envelope is unchanged (no image field)", async () => {
+  // Every non-screenshot tool has NO `image` field — its CallToolResult must be
+  // byte-identical to the P3.5 shape (a single text block). Pinned so a
+  // regression that injects an empty image block into every result is caught.
+  const bridge = await startBridgeStub((_req, res) => {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: true, result: { actors: [] } }));
+  });
+  try {
+    const client = new LiveClient(bridge.port);
+    const result = await client.route("unreal_open_mcp_actor_find", {});
+    assert.equal(result.content.length, 1, "exactly one block (text only)");
+    assert.equal(result.content[0].type, "text");
+  } finally {
+    await bridge.close();
+  }
+});
+
+test("unwrapImage: null/empty/malformed payloads return null", () => {
+  // The unwrap helper is the gatekeeper — a malformed image field must NOT
+  // produce a partial image block. It returns null so the caller falls back to
+  // the plain text path.
+  assert.equal(unwrapImage(null), null);
+  assert.equal(unwrapImage(undefined), null);
+  assert.equal(unwrapImage({}), null);
+  assert.equal(unwrapImage({ data: "" }), null);                // empty data
+  assert.equal(unwrapImage({ data: 123 }), null);               // non-string data
+  assert.equal(unwrapImage({ mediaType: "image/png" }), null);  // missing data
+  assert.equal(unwrapImage("not-an-object"), null);
+  // A valid payload returns { data, mediaType }.
+  assert.deepEqual(unwrapImage({ data: "abc" }), { data: "abc", mediaType: "image/png" });
+  assert.deepEqual(unwrapImage({ data: "abc", mediaType: "image/jpeg" }), { data: "abc", mediaType: "image/jpeg" });
 });

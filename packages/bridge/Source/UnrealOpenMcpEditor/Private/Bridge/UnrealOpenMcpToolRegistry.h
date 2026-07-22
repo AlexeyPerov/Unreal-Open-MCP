@@ -26,6 +26,14 @@
 // (the safe default for tools that only read editor state — no gate path).
 // Mutating tools use the Register(Name, Handler, Metadata) overload with
 // bIsMutating=true so the dispatch path runs them through the gate.
+//
+// P5.5 scope: the dispatch result carries an OPTIONAL image payload
+// (base64 bytes + media type) so the screenshot family can return a PNG
+// alongside its `result` metadata. The envelope emits it as a top-level
+// `image` field next to `result`; read-only image tools stay gate-free (they
+// read pixels but mutate no editor/project state). The MCP LiveClient unwraps
+// the `image` field into an MCP image content block so the base64 never
+// surfaces as text.
 #pragma once
 
 #include "CoreMinimal.h"
@@ -88,11 +96,39 @@ struct FUnrealOpenMcpToolMetadata
 };
 
 /**
+ * Optional image payload carried alongside the success `result`. P5.5 — the
+ * screenshot family returns a base64-encoded PNG as MCP image content; the
+ * envelope emits this as a top-level `image` field next to `result`, and the
+ * MCP LiveClient unwraps it into an MCP image content block so the base64
+ * never surfaces as a text block. Empty `Base64Data` means "no image" (the
+ * common case — every non-screenshot tool).
+ *
+ * Mirrors the Unity Open MCP inlineImage transport: same base64-without-data-
+ * URI-prefix + mimeType contract, surfaced as a dedicated field rather than a
+ * magic key inside `result` so the LiveClient unwraps it generically without
+ * inspecting per-tool result schemas.
+ */
+struct UNREALOPENMCPEDITOR_API FUnrealOpenMcpImagePayload
+{
+	/** Base64-encoded image bytes (no `data:` URI prefix). Empty = no image. */
+	FString Base64Data;
+	/** MIME type (e.g. "image/png"). Defaults to "image/png" when unset. */
+	FString MediaType = TEXT("image/png");
+
+	/** True when the payload carries a non-empty base64 image. */
+	bool HasImage() const { return !Base64Data.IsEmpty(); }
+};
+
+/**
  * Outcome of a single tool dispatch. The HTTP layer maps this to the canonical
  * {ok, result, error} envelope via FUnrealOpenMcpBridgeEnvelope.
  *
  * Mirrors Unity's ToolDispatchResult factory pair (Ok(output) / Fail(code,
  * message)) at copy fidelity; fields renamed to Unreal conventions.
+ *
+ * P5.5 adds an optional Image payload: a success result may carry a base64 PNG
+ * alongside its `result` metadata. The envelope builder appends a top-level
+ * `image` field when present. Failures never carry an image.
  */
 struct UNREALOPENMCPEDITOR_API FUnrealOpenMcpToolDispatchResult
 {
@@ -107,6 +143,10 @@ struct UNREALOPENMCPEDITOR_API FUnrealOpenMcpToolDispatchResult
 	FString Code;
 	/** Human-readable error message. Empty on success. */
 	FString Message;
+	/** P5.5 — optional image payload for screenshot tools. Emitted as a
+	 *  top-level `image` field in the success envelope when present. Ignored
+	 *  on failure (the builder never emits image on a Fail result). */
+	FUnrealOpenMcpImagePayload Image;
 
 	/** Build a success result. OutputJson is the pre-serialized `result` value. */
 	static FUnrealOpenMcpToolDispatchResult Ok(const FString& OutputJson = FString())
@@ -114,6 +154,23 @@ struct UNREALOPENMCPEDITOR_API FUnrealOpenMcpToolDispatchResult
 		FUnrealOpenMcpToolDispatchResult R;
 		R.bOk = true;
 		R.Output = OutputJson;
+		return R;
+	}
+
+	/** P5.5 — build a success result carrying an image payload (base64 bytes +
+	 *  media type) alongside the `result` metadata. The screenshot family uses
+	 *  this so the envelope emits `{ok:true, result:<metadata>, image:{data,
+	 *  mediaType}}` and the LiveClient unwraps `image` into an MCP image block. */
+	static FUnrealOpenMcpToolDispatchResult OkWithImage(
+		const FString& OutputJson,
+		const FString& Base64Data,
+		const FString& MediaType = TEXT("image/png"))
+	{
+		FUnrealOpenMcpToolDispatchResult R;
+		R.bOk = true;
+		R.Output = OutputJson;
+		R.Image.Base64Data = Base64Data;
+		R.Image.MediaType = MediaType;
 		return R;
 	}
 

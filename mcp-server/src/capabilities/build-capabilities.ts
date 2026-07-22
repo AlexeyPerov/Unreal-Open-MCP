@@ -121,6 +121,12 @@ const TOOL_CATEGORY: Record<string, string> = {
   // (route live, default gate Enforce, paths_hint required).
   unreal_open_mcp_reflection_method_find: "reflection",
   unreal_open_mcp_reflection_method_call: "reflection",
+  // P5.5 — screenshot family. Four read-only image-capture tools (route live,
+  // gate-free; return a base64 PNG as MCP image content).
+  unreal_open_mcp_screenshot_viewport: "screenshot",
+  unreal_open_mcp_screenshot_game_view: "screenshot",
+  unreal_open_mcp_screenshot_camera: "screenshot",
+  unreal_open_mcp_screenshot_isolated: "screenshot",
 };
 
 function categoryFor(toolName: string): string {

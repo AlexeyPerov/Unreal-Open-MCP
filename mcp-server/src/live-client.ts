@@ -23,6 +23,13 @@
 // validate_scan_failed). The P2.1 `result` value stays the primary payload —
 // the gate block is additive metadata, not a replacement.
 //
+// P5.5: when the envelope carries a top-level `image` block (screenshot
+// tools), the base64 payload is unwrapped into a dedicated MCP image content
+// block and the `result` metadata becomes the text block — so the base64 PNG
+// is returned as viewable image content, never a text dump. A non-image tool's
+// envelope has no `image` field and its CallToolResult is byte-identical to
+// before.
+//
 // postTool maps {ok:false} + HTTP error bodies to a structured MCP error
 // result carrying the bridge's own error code/message. When a gate block is
 // present on a failure (e.g. ValidateScanFailed), the gate summary rides
@@ -43,7 +50,7 @@
 //                          Carries the bridge's own error body when it sent one.
 //
 // Adapted from Unity Open MCP's mcp-server/src/live-client.ts (copy fidelity,
-// P1.7 + P2.1 + P3.5). Intentional deltas:
+// P1.7 + P2.1 + P3.5 + P5.5). Intentional deltas:
 //   - `unrealVersion` in PingResponse (not `unityVersion`), plus `status` /
 //     `port` fields the Unreal bridge emits.
 //   - Minimal class: no PingCache, no compile-wait, no endpoint-refresh. The
@@ -51,6 +58,10 @@
 //     later phases require.
 //   - Canonical {ok,result,error} envelope (P2.1) widens with a `gate` block
 //     in P3.5 — ok + error.code stay stable, so a P2.1 parser keeps working.
+//   - P5.5 image envelope: screenshot tools carry a top-level `image` block
+//     (the Unreal bridge's dedicated field, not Unity's inlineImage-inside-
+//     result key). Unwrapped into an MCP image content block so the base64 PNG
+//     is returned as image content, never text.
 //   - Offline hint points at `~/.unreal-open-mcp/instances/...`.
 
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
@@ -77,6 +88,9 @@ export interface Router {
  * P3.5 widening: mutating dispatches add a `gate` summary alongside result.
  * `result` is a raw JSON value (object, array, string, number, bool, null).
  * `gate` is optional — read-only tools omit it.
+ * P5.5 widening: screenshot tools add a top-level `image` field
+ * ({ data: base64, mediaType }) alongside result. The LiveClient unwraps it
+ * into an MCP image content block so the base64 never surfaces as text.
  */
 interface ToolDispatchOk {
   ok: true;
@@ -85,6 +99,24 @@ interface ToolDispatchOk {
    *  and on mutating dispatches whose gate did not run (gate:"off") or did not
    *  produce a non-passing outcome. */
   gate?: GateSummary;
+  /** P5.5 — inline image payload for screenshot tools. Absent on every non-
+   *  screenshot tool. When present, the LiveClient splits the envelope into
+   *  an MCP image content block (the base64 PNG) + a text block (the `result`
+   *  metadata) so the base64 never surfaces as a text dump. */
+  image?: ImageEnvelope;
+}
+
+/**
+ * P5.5 — inline image payload the bridge emits alongside `result` for
+ * screenshot tools. Mirrors the bridge's FUnrealOpenMcpImagePayload:
+ * { data: <base64 bytes, no data: prefix>, mediaType: "image/png" }.
+ * The LiveClient maps this 1:1 onto an MCP ImageContent block.
+ */
+export interface ImageEnvelope {
+  /** Base64-encoded image bytes (no `data:` URI prefix). */
+  data: string;
+  /** MIME type (e.g. "image/png"). */
+  mediaType: string;
 }
 
 /**
@@ -232,6 +264,30 @@ export function isAbortError(err: unknown): boolean {
   return name === "AbortError";
 }
 
+/**
+ * P5.5 — extract a valid image payload from a bridge success envelope's
+ * top-level `image` field. Returns null when the field is absent, or when the
+ * payload is malformed (non-string data, empty data, or a non-string
+ * mediaType that cannot be defaulted). A null return means "this is not an
+ * image-carrying envelope" — the caller falls back to the plain text-block
+ * path, preserving the exact P2.1/P3.5 shape for every non-screenshot tool.
+ *
+ * Mirrors Unity Open MCP's inlineImage unwrap contract: base64 bytes without a
+ * `data:` URI prefix, a mediaType that defaults to "image/png" when absent.
+ */
+export function unwrapImage(
+  image: unknown,
+): { data: string; mediaType: string } | null {
+  if (image == null || typeof image !== "object") return null;
+  const obj = image as { data?: unknown; mediaType?: unknown };
+  if (typeof obj.data !== "string" || obj.data.length === 0) return null;
+  const mediaType =
+    typeof obj.mediaType === "string" && obj.mediaType.length > 0
+      ? obj.mediaType
+      : "image/png";
+  return { data: obj.data, mediaType };
+}
+
 export class LiveClient implements Router {
   private baseUrl: string;
   /**
@@ -372,14 +428,28 @@ export class LiveClient implements Router {
     // branch on `gate.outcome` (passed / warned / failed / skipped /
     // validate_scan_failed). Read-only tools omit the gate block and the
     // surfaced result is the bare `result` value (P2.1 behavior preserved).
+    //
+    // P5.5: when the envelope carries a top-level `image` block (screenshot
+    // tools), the base64 payload is unwrapped into a dedicated MCP image
+    // content block and `result` becomes the text metadata block — so the
+    // base64 PNG is returned as viewable image content, never a text dump.
+    // The image block is emitted FIRST (clients render the first content
+    // block prominently), followed by the metadata text block.
     if (envelope.ok === true) {
+      const image = unwrapImage(envelope.image);
       const payload = envelope.gate
         ? { result: envelope.result, gate: envelope.gate }
         : envelope.result;
-      return {
-        content: [{ type: "text", text: JSON.stringify(payload) }],
-        isError: false,
-      };
+      const content: CallToolResult["content"] = [];
+      if (image) {
+        content.push({
+          type: "image",
+          data: image.data,
+          mimeType: image.mediaType,
+        });
+      }
+      content.push({ type: "text", text: JSON.stringify(payload) });
+      return { content, isError: false };
     }
 
     // ok:false → structured tool failure. The bridge ran the tool and it

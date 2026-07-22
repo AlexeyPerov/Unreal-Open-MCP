@@ -12,6 +12,14 @@
 // on the gate decision. Read-only tools and structured tool failures keep the
 // P2.1 shape exactly — the widening only adds fields, never renames or removes.
 //
+// P5.5 adds an optional top-level `image` field to the success envelope so the
+// screenshot family can return a base64 PNG alongside its `result` metadata.
+// Shape: `{ok:true, result:<metadata>, image:{data:<base64>, mediaType:"image/png"}}`.
+// The field is emitted ONLY when the dispatch result carries an image payload;
+// every non-screenshot tool's envelope is byte-identical to before. The MCP
+// LiveClient unwraps `image` into an MCP image content block so the base64
+// never surfaces as a text dump.
+//
 // Adapted from Unity Open MCP's BridgeJson gate-envelope builders
 // (packages/bridge/Editor/Bridge/BridgeJson.cs) at copy fidelity for the
 // escape/append primitives, greenfield for the envelope shape (the {ok,result}
@@ -23,6 +31,7 @@
 // failures; only tool_not_found / method errors use 4xx):
 //   Read-only success: {"ok":true,"result":<result-json-value>}
 //   Mutating success:  {"ok":true,"result":<value>,"gate":{...}}
+//   Image success:     {"ok":true,"result":<metadata>,"image":{"data":"<base64>","mediaType":"image/png"}}
 //   Failure:           {"ok":false,"error":{"code":"...","message":"..."}}
 //
 // `result` is a raw JSON value (object, array, string, number, bool, null) —
@@ -50,9 +59,15 @@ struct UNREALOPENMCPEDITOR_API FUnrealOpenMcpBridgeEnvelope
 	 * of the `result` field — it must already be valid JSON (the builder does
 	 * not validate or re-serialize it). Pass an empty string to emit `null`.
 	 *
+	 * P5.5: when @p Image carries a non-empty base64 payload, a top-level
+	 * `image:{data,mediaType}` field is appended after `result`. Omit it (or
+	 * pass the default-constructed payload) for the plain P2.1 shape.
+	 *
 	 * Example: BuildSuccess("{\"echo\":123}") → {"ok":true,"result":{"echo":123}}
 	 */
-	static FString BuildSuccess(const FString& ResultJson);
+	static FString BuildSuccess(
+		const FString& ResultJson,
+		const FUnrealOpenMcpImagePayload& Image = FUnrealOpenMcpImagePayload());
 
 	/**
 	 * Build the success envelope with a gate summary. P3.5 widening — every
@@ -66,10 +81,14 @@ struct UNREALOPENMCPEDITOR_API FUnrealOpenMcpBridgeEnvelope
 	 *           checkpointMs?, validateMs?, totalMs?, agentNextSteps? }
 	 * Optional fields (marked `?`) are emitted only when the gate ran and the
 	 * value is non-empty / meaningful.
+	 *
+	 * P5.5: @p Image appends a top-level `image` field (after the gate block)
+	 * when it carries a non-empty payload.
 	 */
 	static FString BuildSuccessWithGate(
 		const FString& ResultJson,
-		const FUnrealOpenMcpGateDispatchResult& GateResult);
+		const FUnrealOpenMcpGateDispatchResult& GateResult,
+		const FUnrealOpenMcpImagePayload& Image = FUnrealOpenMcpImagePayload());
 
 	/**
 	 * Build the success envelope with a gate summary + apply_fix rollback
@@ -83,6 +102,9 @@ struct UNREALOPENMCPEDITOR_API FUnrealOpenMcpBridgeEnvelope
 	 *                                        rollbackDisabled? } }
 	 * The rollback block is emitted ONLY when bRolledBack or bRollbackDisabled
 	 * is true. Optional rollback fields (`?`) are omitted when empty.
+	 *
+	 * P5.5: @p Image appends a top-level `image` field (after the rollback
+	 * block) when it carries a non-empty payload.
 	 */
 	struct FApplyFixRollbackFields
 	{
@@ -94,7 +116,8 @@ struct UNREALOPENMCPEDITOR_API FUnrealOpenMcpBridgeEnvelope
 	static FString BuildSuccessWithGateAndRollback(
 		const FString& ResultJson,
 		const FUnrealOpenMcpGateDispatchResult& GateResult,
-		const FApplyFixRollbackFields& Rollback);
+		const FApplyFixRollbackFields& Rollback,
+		const FUnrealOpenMcpImagePayload& Image = FUnrealOpenMcpImagePayload());
 
 	/**
 	 * Build the failure envelope with a structured error code + message. Used

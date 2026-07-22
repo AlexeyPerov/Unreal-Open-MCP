@@ -253,6 +253,68 @@ which gate mode was applied when the hint was missing:
 }
 ```
 
+### Image envelope (screenshot tools)
+
+The screenshot family (`screenshot_viewport` / `screenshot_game_view` /
+`screenshot_camera` / `screenshot_isolated`) widens the success envelope with a
+top-level `image` field carrying the base64 PNG. The MCP server's `LiveClient`
+unwraps `image` into a dedicated MCP image content block, so the base64 is
+returned to the agent as viewable image content — never a text dump. Every
+non-screenshot tool's envelope is byte-identical to before (no `image` field).
+
+Image success (HTTP 200):
+
+```json
+{
+  "ok": true,
+  "result": {
+    "source": "editor viewport",
+    "width": 1920,
+    "height": 1080,
+    "mimeType": "image/png",
+    "byteSize": 2048576
+  },
+  "image": {
+    "data": "iVBORw0KGgoAAAANSUhEUgAA...",
+    "mediaType": "image/png"
+  }
+}
+```
+
+- `result` is the metadata object (`source`, `width`, `height`, `mimeType`,
+  `byteSize`). `source` distinguishes the origin (`editor viewport`,
+  `PIE game view`, `camera '<name>'`, `isolated actor '<name>'`).
+- `image.data` is the raw base64 PNG (no `data:` URI prefix).
+- `image.mediaType` is always `"image/png"` for the screenshot family.
+
+Caps + guarantees (all four tools):
+
+- Dimensions clamped to `[1, 2048]` per side; default 1024 (viewport/game-view
+  default to the native size when both are omitted, deriving the other axis
+  from the native aspect when only one is given).
+- Pixels forced opaque (alpha → 255) so a viewport/render-target alpha of 0
+  never yields a transparent PNG.
+- Encoded byte cap 40 MiB — exceeded captures return `image_too_large` rather
+  than truncating the IPC frame.
+- Transient capture actors + render targets are cleaned up on every return
+  path (`ON_SCOPE_EXIT` destroy + `FGCObjectScopeGuard`); the editor world is
+  never dirtied.
+
+Screenshot error codes (structured, returned via the standard `{ok:false,
+error:{code,message}}` shape):
+
+| Code | Cause |
+|---|---|
+| `invalid_parameter` | Malformed body, or (isolated) a malformed `background` hex. |
+| `missing_parameter` | (camera) `camera` absent, or (isolated) `actor` absent. |
+| `actor_not_found` | (camera/isolated) the actor ref did not resolve. |
+| `no_editor_world` | (camera/isolated) no editor world available. |
+| `rendering_unavailable` | Headless / `-nullrhi` — capture requires a GPU-backed (windowed) editor. |
+| `editor_unavailable` | (viewport) no active editor viewport. |
+| `pie_not_running` | (game-view) no PIE session is active. |
+| `capture_failed` | Zero-sized viewport, spawn failure, or read-back failure. |
+| `image_too_large` | Encoded PNG exceeds the 40 MiB byte cap — request a smaller width/height. |
+
 #### Smoke stub: `unreal_open_mcp_echo`
 
 The bridge ships a read-only echo stub registered at boot so the dispatch

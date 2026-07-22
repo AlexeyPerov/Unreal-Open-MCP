@@ -1015,15 +1015,15 @@ void FUnrealOpenMcpBridgeHttpServer::HandleToolDispatch(
 				Rollback.bRollbackDisabled = Outcome.bRollbackDisabled;
 				Rollback.RollbackReason = Outcome.RollbackReason;
 				Rollback.RestoredPaths = Outcome.RestoredPaths;
-				SendJson(Client, 200, FUnrealOpenMcpBridgeEnvelope::BuildSuccessWithGateAndRollback(ToolResult.Output, Outcome.Gate, Rollback));
+				SendJson(Client, 200, FUnrealOpenMcpBridgeEnvelope::BuildSuccessWithGateAndRollback(ToolResult.Output, Outcome.Gate, Rollback, ToolResult.Image));
 			}
 			else if (bEmitGateBlock)
 			{
-				SendJson(Client, 200, FUnrealOpenMcpBridgeEnvelope::BuildSuccessWithGate(ToolResult.Output, Outcome.Gate));
+				SendJson(Client, 200, FUnrealOpenMcpBridgeEnvelope::BuildSuccessWithGate(ToolResult.Output, Outcome.Gate, ToolResult.Image));
 			}
 			else
 			{
-				SendJson(Client, 200, FUnrealOpenMcpBridgeEnvelope::BuildSuccess(ToolResult.Output));
+				SendJson(Client, 200, FUnrealOpenMcpBridgeEnvelope::BuildSuccess(ToolResult.Output, ToolResult.Image));
 			}
 		}
 		else

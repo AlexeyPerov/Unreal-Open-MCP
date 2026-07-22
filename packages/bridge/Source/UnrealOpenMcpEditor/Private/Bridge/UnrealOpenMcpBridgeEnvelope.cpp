@@ -94,10 +94,32 @@ namespace UnrealOpenMcpEnvelopeInternal
 
 		Out += TEXT('}');
 	}
+
+	// P5.5 — append the optional top-level `image` field when the dispatch
+	// result carries a non-empty base64 payload. Emitted as the LAST field of
+	// the success envelope so the JSON object's tail is predictable. Shape:
+	//   "image":{"data":"<base64 no data: prefix>","mediaType":"image/png"}
+	// The MCP LiveClient unwraps this into an MCP image content block; if it
+	// ever surfaces as text it would be an MCP-side regression.
+	void AppendImage(FString& Out, const FUnrealOpenMcpImagePayload& Image)
+	{
+		if (!Image.HasImage())
+		{
+			return;
+		}
+		Out += TEXT(",\"image\":{\"data\":");
+		FUnrealOpenMcpBridgeJson::AppendJsonString(Out, Image.Base64Data);
+		Out += TEXT(",\"mediaType\":");
+		FUnrealOpenMcpBridgeJson::AppendJsonString(Out, Image.MediaType);
+		Out += TEXT('}');
+	}
 } // namespace UnrealOpenMcpEnvelopeInternal
 
-FString FUnrealOpenMcpBridgeEnvelope::BuildSuccess(const FString& ResultJson)
+FString FUnrealOpenMcpBridgeEnvelope::BuildSuccess(
+	const FString& ResultJson,
+	const FUnrealOpenMcpImagePayload& Image)
 {
+	namespace Internal = UnrealOpenMcpEnvelopeInternal;
 	// Splice the pre-serialized result JSON verbatim. An empty/whitespace-only
 	// result is emitted as `null` so the envelope always carries a value (a
 	// tool that returns nothing is a `null` result, not a missing field).
@@ -112,13 +134,15 @@ FString FUnrealOpenMcpBridgeEnvelope::BuildSuccess(const FString& ResultJson)
 	{
 		Out += ResultJson;
 	}
+	Internal::AppendImage(Out, Image);
 	Out += TEXT('}');
 	return Out;
 }
 
 FString FUnrealOpenMcpBridgeEnvelope::BuildSuccessWithGate(
 	const FString& ResultJson,
-	const FUnrealOpenMcpGateDispatchResult& GateResult)
+	const FUnrealOpenMcpGateDispatchResult& GateResult,
+	const FUnrealOpenMcpImagePayload& Image)
 {
 	namespace Internal = UnrealOpenMcpEnvelopeInternal;
 	FString Out;
@@ -134,6 +158,7 @@ FString FUnrealOpenMcpBridgeEnvelope::BuildSuccessWithGate(
 	}
 	Out += TEXT(',');
 	Internal::AppendGateSummary(Out, GateResult);
+	Internal::AppendImage(Out, Image);
 	Out += TEXT('}');
 	return Out;
 }
@@ -141,7 +166,8 @@ FString FUnrealOpenMcpBridgeEnvelope::BuildSuccessWithGate(
 FString FUnrealOpenMcpBridgeEnvelope::BuildSuccessWithGateAndRollback(
 	const FString& ResultJson,
 	const FUnrealOpenMcpGateDispatchResult& GateResult,
-	const FApplyFixRollbackFields& Rollback)
+	const FApplyFixRollbackFields& Rollback,
+	const FUnrealOpenMcpImagePayload& Image)
 {
 	namespace Internal = UnrealOpenMcpEnvelopeInternal;
 	FString Out;
@@ -187,6 +213,7 @@ FString FUnrealOpenMcpBridgeEnvelope::BuildSuccessWithGateAndRollback(
 		}
 		Out += TEXT('}');
 	}
+	Internal::AppendImage(Out, Image);
 	Out += TEXT('}');
 	return Out;
 }

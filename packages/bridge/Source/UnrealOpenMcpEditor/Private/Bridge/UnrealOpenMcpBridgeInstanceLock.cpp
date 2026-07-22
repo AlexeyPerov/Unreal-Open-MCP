@@ -2,6 +2,7 @@
 // See header for the lifecycle + cross-side parity contract.
 #include "Bridge/UnrealOpenMcpBridgeInstanceLock.h"
 
+#include "Bridge/UnrealOpenMcpBridgeAuthToken.h"
 #include "Bridge/UnrealOpenMcpBridgeJson.h"
 #include "Bridge/UnrealOpenMcpInstancePortResolver.h"
 #include "UnrealOpenMcpLog.h"
@@ -59,6 +60,10 @@ void FUnrealOpenMcpBridgeInstanceLock::Acquire(
 	AcquiredProjectHash = FUnrealOpenMcpInstancePortResolver::ProjectHash(ProjectPath);
 	Pid = FPlatformProcess::GetCurrentProcessId();
 	StartedAt = FDateTime::UtcNow();
+	// Mint a fresh token on every Acquire so a bridge restart invalidates any
+	// previously discovered token. The token is always minted (even in
+	// authMode "none") so a project can flip to "required" with no restart.
+	AuthToken = FUnrealOpenMcpBridgeAuthToken::Generate();
 	BridgeVersionForLock = BridgeVersion;
 	UnrealVersionForLock = UnrealVersion;
 
@@ -87,6 +92,7 @@ void FUnrealOpenMcpBridgeInstanceLock::Release()
 		IFileManager::Get().Delete(*Path);
 	}
 	bAcquired = false;
+	AuthToken.Reset();
 }
 
 FString FUnrealOpenMcpBridgeInstanceLock::ReadCurrentJson() const
@@ -205,9 +211,9 @@ FString FUnrealOpenMcpBridgeInstanceLock::BuildJson(const FString& State, bool b
 	const FString StartedAtIso = FormatIsoUtc(StartedAt);
 	const FString NowIso = FormatIsoUtc(Now);
 
-	// Pinned field order — mirrors Unity's BridgeInstanceLock.BuildJson minus
-	// authToken (deferred to P5.6). Field names are identical so the TS reader
-	// (instance-discovery.ts InstanceLock) parses without modification.
+	// Pinned field order — mirrors Unity's BridgeInstanceLock.BuildJson. Field
+	// names are identical so the TS reader (instance-discovery.ts InstanceLock)
+	// parses without modification.
 	//
 	// Uses the shared FUnrealOpenMcpBridgeJson::AppendJsonString appender for
 	// every string value per packages/bridge/AGENTS.md §Transport (no inline
@@ -224,9 +230,11 @@ FString FUnrealOpenMcpBridgeInstanceLock::BuildJson(const FString& State, bool b
 	Out += TEXT(",\"port\":");
 	Out += FString::FromInt(AcquiredPort);
 
-	// authToken intentionally OMITTED (P5.6 deferred per P1.4 plan). When P5.6
-	// adds it, insert here (between port and projectPath) so the TS reader's
-	// optional-field tolerance is unchanged. Absence is pinned in the spec.
+	// authToken — always written so the MCP server can present it. Mirrors the
+	// TS-side InstanceLock.authToken field in instance-discovery.ts (optional
+	// there for back-compat with locks written by older bridges).
+	Out += TEXT(",\"authToken\":");
+	FUnrealOpenMcpBridgeJson::AppendJsonString(Out, AuthToken);
 
 	// projectPath
 	Out += TEXT(",\"projectPath\":");

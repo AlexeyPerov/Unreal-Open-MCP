@@ -60,16 +60,18 @@ The deny-list of editor headers/modules lives in the script so the policy is rea
 
 ## Transport
 
-- Bridge HTTP server binds `127.0.0.1` by default. Remote bind is opt-in and requires auth when enabled.
+- Bridge HTTP server binds `127.0.0.1` by default. Remote bind (`0.0.0.0`) is opt-in via `bindAddress` in project settings and requires `authMode: "required"` (refused at Start otherwise — see Auth).
 - All UObject / editor API calls happen on the game thread via `GameThreadDispatcher`. Never call editor APIs from the HTTP listener worker thread.
 - Paths use Unreal content paths (`/Game/...`, `/Engine/...`) and project-relative source paths under `Source/`.
 
 ## Auth
 
-- A per-session bearer token is minted into the instance lock on bridge start and mirrored as `authToken` in the lock JSON. The TS-side `InstanceLock` interface must carry the same field.
-- **P1.4 deferral:** `authToken` is NOT yet minted — the field is omitted from the lock JSON and its absence is pinned in `UnrealOpenMcpInstanceLockSpec`. When auth enforcement lands (later phase), add the field between `port` and `projectPath` (Unity's order) and update the TS reader + spec in the same task.
-- Enforcement is opt-in via `authMode` in project settings (`"none"` default | `"required"`).
-- Token comparison must be constant-time.
+- A per-session bearer token is minted into the instance lock on bridge start (`FUnrealOpenMcpBridgeInstanceLock::Acquire` → `FUnrealOpenMcpBridgeAuthToken::Generate`) and mirrored as `authToken` in the lock JSON (field #3, between `port` and `projectPath`). The TS-side `InstanceLock` interface carries the same field (optional for back-compat with older locks).
+- The token is a 64-char lowercase-hex string (256 bits), rotated on every Acquire (per listener start) so a bridge restart invalidates any previously discovered token. Never log the full token.
+- Enforcement is opt-in via `authMode` in project settings (`FUnrealOpenMcpBridgeProjectSettings` reads `<project>/.unreal-open-mcp/settings.json`): `"none"` default | `"required"`.
+- The HTTP auth gate (`FUnrealOpenMcpBridgeHttpServer::CheckAuth` → `FUnrealOpenMcpBridgeAuthCheck::IsAuthorized`) runs on **every** endpoint before routing — no exemptions (`/ping`, `/tools/*`, ...). An unknown `authMode` (null/corrupt/typo) fails closed (deny).
+- Token comparison is constant-time (`FUnrealOpenMcpBridgeAuthToken::EqualsConstantTime`).
+- Bind address (`FUnrealOpenMcpBridgeBindAddress::Decide`): loopback (`127.0.0.1`) is always allowed; remote (`0.0.0.0`) is refused unless `authMode` is `"required"`. An invalid `bindAddress` coerces to loopback (never remote).
 
 ## Multi-instance port + discovery
 

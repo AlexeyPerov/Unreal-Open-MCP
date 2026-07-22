@@ -50,13 +50,16 @@ export type InstanceState =
 /**
  * Shape of ~/.unreal-open-mcp/instances/<hash>.json (bridge
  * FUnrealOpenMcpBridgeInstanceLock). Field order mirrors the C++ BuildJson;
- * `authToken` is optional because the bridge omits it until P5.6.
+ * `authToken` is optional for back-compat with locks written by older bridges
+ * that predate the token field.
  */
 export interface InstanceLock {
   pid: number;
   port: number;
   /** Per-session bearer token. Optional for back-compat with locks written by
-   *  bridges that predate P5.6; when absent the MCP client sends no header. */
+   *  older bridges that predate the token field; when absent the MCP client
+   *  sends no Authorization header (the bridge must then be in authMode
+   *  "none"). */
   authToken?: string;
   projectPath: string;
   projectHash: string;
@@ -193,8 +196,8 @@ export function resolvePort(projectPath: string, envPort?: number): number {
  * no lock file to read, so this returns undefined — in that case the MCP
  * client sends no Authorization header and the bridge must be in authMode
  * "none" for the request to succeed. Returns undefined when the lock is
- * missing, stale (dead pid), or predates the token field (P5.6 deferred —
- * the bridge omits the field today).
+ * missing, stale (dead pid), or written by an older bridge that predates the
+ * token field (kept optional on the TS interface for that back-compat).
  *
  * @param projectPath absolute Unreal project root
  * @param envPort     parsed UNREAL_OPEN_MCP_BRIDGE_PORT, or undefined. When set,
@@ -290,6 +293,8 @@ export function classifyInstance(
 //  - Skipped Unity TestRunner `hasRecentPendingTestRun` / pending TTL — Unreal
 //    has no equivalent test-runner heartbeat-freeze path in P1, so the
 //    dead-bridge classifier has no pending-file suppression to apply.
-//  - `authToken` stays optional and is not written by the bridge until P5.6;
-//    resolveAuthToken returns undefined today but is wired so P5.6 is a pure
-//    additive change on the bridge side.
+//  - `authToken` is optional on the TS interface for back-compat with locks
+//    written by older bridges that predate the token field; current bridges
+//    always mint + write it. resolveAuthToken returns undefined when the field
+//    is absent or the lock is stale (the MCP client then sends no
+//    Authorization header and the bridge must be in authMode "none").

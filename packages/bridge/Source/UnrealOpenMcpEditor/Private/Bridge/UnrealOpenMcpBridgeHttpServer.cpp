@@ -2,6 +2,9 @@
 // See header for threading + scope rationale.
 #include "Bridge/UnrealOpenMcpBridgeHttpServer.h"
 
+#include "Bridge/UnrealOpenMcpBridgeAuthCheck.h"
+#include "Bridge/UnrealOpenMcpBridgeAuthPolicy.h"
+#include "Bridge/UnrealOpenMcpBridgeBindAddress.h"
 #include "Bridge/UnrealOpenMcpBridgeEnvelope.h"
 #include "Bridge/UnrealOpenMcpBridgeJson.h"
 #include "Bridge/UnrealOpenMcpBridgeRequestQueue.h"
@@ -311,6 +314,14 @@ FUnrealOpenMcpBridgeHttpServer::~FUnrealOpenMcpBridgeHttpServer()
 
 bool FUnrealOpenMcpBridgeHttpServer::Start(uint16 Port, const FString& ProjectPath)
 {
+	// Convenience overload: loopback bind, no auth. Used by specs and the
+	// default project layout. The auth gate stays in "none" mode until SetAuth
+	// runs.
+	return Start(Port, ProjectPath, FUnrealOpenMcpBridgeBindAddress::Default(), FUnrealOpenMcpBridgeAuthPolicy::Default());
+}
+
+bool FUnrealOpenMcpBridgeHttpServer::Start(uint16 Port, const FString& ProjectPath, const FString& BindAddress, const FString& AuthMode)
+{
 	LastStartError.Reset();
 	if (bRunning)
 	{
@@ -320,6 +331,19 @@ bool FUnrealOpenMcpBridgeHttpServer::Start(uint16 Port, const FString& ProjectPa
 
 	ProjectPathForPing = ProjectPath;
 
+	// P5.6 — resolve the bind address through the policy BEFORE touching the
+	// socket. Remote (0.0.0.0) is refused unless authMode is "required"; an
+	// invalid bindAddress coerces to loopback. Failing fast here means a
+	// misconfigured project never opens an unauthenticated network port.
+	const FUnrealOpenMcpBridgeBindAddress::FBindDecision Decision =
+		FUnrealOpenMcpBridgeBindAddress::Decide(BindAddress, AuthMode);
+	if (!Decision.bAllowed)
+	{
+		LastStartError = Decision.RefusalReason;
+		UE_LOG(LogUnrealOpenMcp, Error, TEXT("[Unreal Open MCP] bridge HTTP start refused: %s"), *LastStartError);
+		return false;
+	}
+
 	ISocketSubsystem* SocketSubsystem = ISocketSubsystem::Get(PLATFORM_SOCKETSUBSYSTEM);
 	if (SocketSubsystem == nullptr)
 	{
@@ -328,17 +352,22 @@ bool FUnrealOpenMcpBridgeHttpServer::Start(uint16 Port, const FString& ProjectPa
 		return false;
 	}
 
-	// Loopback-only bind. FTcpSocketBuilder with BoundToAddress(127.0.0.1)
-	// gives the same guarantee Unity's HttpListener prefix does — no remote
-	// peer can ever reach this socket. P1.3 DoD: "Server does not bind to
-	// non-loopback addresses."
-	const FIPv4Address Loopback(127, 0, 0, 1);
+	// Parse the resolved bind literal into an FIPv4Address. Decide() only
+	// returns one of the two valid literals (loopback or remote), so this parse
+	// always succeeds.
+	FIPv4Address BindIp;
+	if (!FIPv4Address::Parse(Decision.ResolvedAddress, BindIp))
+	{
+		// Defensive — Decide never hands back an unparseable literal.
+		BindIp = FIPv4Address(127, 0, 0, 1);
+	}
+
 	const int32 RequestedPort = (Port == 0) ? 0 : static_cast<int32>(Port);
 
 	ListenSocket = FTcpSocketBuilder(TEXT("UnrealOpenMcpBridgeHttpListener"))
 		.AsNonBlocking()
 		.WithReceiveBufferSize(RecvBufferSize)
-		.BoundToAddress(Loopback)
+		.BoundToAddress(BindIp)
 		.BoundToPort(RequestedPort)
 		.Listening(8)
 		.Build();
@@ -346,8 +375,8 @@ bool FUnrealOpenMcpBridgeHttpServer::Start(uint16 Port, const FString& ProjectPa
 	if (ListenSocket == nullptr)
 	{
 		LastStartError = FString::Printf(
-			TEXT("Failed to bind 127.0.0.1:%d (in use or unavailable)"),
-			RequestedPort);
+			TEXT("Failed to bind %s:%d (in use or unavailable)"),
+			*Decision.ResolvedAddress, RequestedPort);
 		UE_LOG(LogUnrealOpenMcp, Error, TEXT("[Unreal Open MCP] bridge HTTP start refused: %s"), *LastStartError);
 		return false;
 	}
@@ -364,14 +393,29 @@ bool FUnrealOpenMcpBridgeHttpServer::Start(uint16 Port, const FString& ProjectPa
 	// Output Log / profiler traces clearly identify the bridge.
 	Thread = FRunnableThread::Create(this, TEXT("UnrealOpenMcpBridgeHttp"), 0, TPri_Normal);
 
+	const bool bIsRemoteBind = FUnrealOpenMcpBridgeBindAddress::IsRemote(Decision.ResolvedAddress);
 	UE_LOG(
 		LogUnrealOpenMcp,
 		Log,
-		TEXT("[Unreal Open MCP] bridge HTTP listening on http://127.0.0.1:%u/ping (bridge version %s)"),
+		TEXT("[Unreal Open MCP] bridge HTTP listening on http://%s:%u/ping%s (bridge version %s)"),
+		*Decision.ResolvedAddress,
 		static_cast<uint32>(BoundPort),
+		bIsRemoteBind ? TEXT(" (remote — authMode required)") : TEXT(""),
 		FUnrealOpenMcpBridgeSession::GetBridgeVersion());
 
 	return true;
+}
+
+void FUnrealOpenMcpBridgeHttpServer::SetAuth(const FString& InAuthMode, const FString& InExpectedToken)
+{
+	// The worker thread reads AuthMode / ExpectedAuthToken on every request.
+	// The module calls this from the game thread in StartupModule right after
+	// the instance lock is acquired (and before the first MCP request can
+	// arrive), so no concurrent read/write race exists in practice. The fields
+	// are plain FStrings; if a future settings tab mutates these at runtime a
+	// FCriticalSection should wrap them.
+	AuthMode = InAuthMode;
+	ExpectedAuthToken = InExpectedToken;
 }
 
 void FUnrealOpenMcpBridgeHttpServer::RequestStop()
@@ -473,12 +517,23 @@ void FUnrealOpenMcpBridgeHttpServer::HandleConnection(FSocket* Client)
 	FString Method;
 	FString Path;
 	FString AgentId;
+	FString Authorization;
 	TArray<uint8> Body;
-	const bool bParsed = ReadRequest(*Client, Method, Path, AgentId, Body);
+	const bool bParsed = ReadRequest(*Client, Method, Path, AgentId, Authorization, Body);
 
 	if (!bParsed)
 	{
 		// Peer sent no complete request within the window — close.
+		Client->Close();
+		ISocketSubsystem::Get(PLATFORM_SOCKETSUBSYSTEM)->DestroySocket(Client);
+		return;
+	}
+
+	// P5.6 — auth gate runs BEFORE routing so every endpoint (/ping,
+	// /tools/*, ...) is gated equally. No endpoint is exempt. On failure the
+	// 401 has already been written; close and return.
+	if (!CheckAuth(Authorization, *Client))
+	{
 		Client->Close();
 		ISocketSubsystem::Get(PLATFORM_SOCKETSUBSYSTEM)->DestroySocket(Client);
 		return;
@@ -492,12 +547,13 @@ void FUnrealOpenMcpBridgeHttpServer::HandleConnection(FSocket* Client)
 }
 
 bool FUnrealOpenMcpBridgeHttpServer::ReadRequest(
-	FSocket& Client, FString& OutMethod, FString& OutPath, FString& OutAgentId, TArray<uint8>& OutBody)
+	FSocket& Client, FString& OutMethod, FString& OutPath, FString& OutAgentId, FString& OutAuthorization, TArray<uint8>& OutBody)
 {
 	// P2.1 full request reader. Accumulates bytes until the header terminator
-	// (\r\n\r\n), parses the request line + the two headers the bridge needs
-	// (Content-Length, X-Agent-Id), then reads the body. Serves both /ping
-	// (no body — Content-Length defaults to 0) and /tools/{name} (with body).
+	// (\r\n\r\n), parses the request line + the three headers the bridge needs
+	// (Content-Length, X-Agent-Id, Authorization), then reads the body. Serves
+	// both /ping (no body — Content-Length defaults to 0) and /tools/{name}
+	// (with body).
 	//
 	// All recv is on a non-blocking socket with a deadline, so a stalled peer
 	// can't hang the accept loop.
@@ -571,6 +627,7 @@ bool FUnrealOpenMcpBridgeHttpServer::ReadRequest(
 	// Walk the headers. Case-insensitive name match per RFC 7230 §3.2.
 	int32 ContentLength = 0;
 	OutAgentId.Reset();
+	OutAuthorization.Reset();
 	for (int32 i = 1; i < Lines.Num(); ++i)
 	{
 		const FString& Line = Lines[i];
@@ -593,6 +650,10 @@ bool FUnrealOpenMcpBridgeHttpServer::ReadRequest(
 		else if (Name.Equals(TEXT("X-Agent-Id"), ESearchCase::IgnoreCase))
 		{
 			OutAgentId = Value;
+		}
+		else if (Name.Equals(TEXT("Authorization"), ESearchCase::IgnoreCase))
+		{
+			OutAuthorization = Value;
 		}
 	}
 
@@ -645,6 +706,26 @@ bool FUnrealOpenMcpBridgeHttpServer::ReadRequest(
 	}
 
 	return true;
+}
+
+bool FUnrealOpenMcpBridgeHttpServer::CheckAuth(const FString& AuthorizationHeader, FSocket& Client)
+{
+	// P5.6 — the auth gate. Runs BEFORE routing on every request; no endpoint
+	// (/ping, /tools/*, ...) is exempt. The pure decision lives in
+	// FUnrealOpenMcpBridgeAuthCheck so the matrix is unit-testable without a
+	// socket. On failure we write the 401 with the stable `unauthorized` code
+	// and return false so the caller closes without routing.
+	if (FUnrealOpenMcpBridgeAuthCheck::IsAuthorized(AuthMode, AuthorizationHeader, ExpectedAuthToken))
+	{
+		return true;
+	}
+
+	const FString Body = FUnrealOpenMcpBridgeJson::BuildErrorJson(
+		TEXT("unauthorized"),
+		TEXT("Missing or invalid Authorization header. Set authMode to \"none\" in ")
+			TEXT(".unreal-open-mcp/settings.json, or send Authorization: Bearer <token>."));
+	SendJson(Client, 401, Body);
+	return false;
 }
 
 void FUnrealOpenMcpBridgeHttpServer::RouteRequest(
@@ -1117,6 +1198,7 @@ void FUnrealOpenMcpBridgeHttpServer::SendJson(FSocket& Client, uint16 StatusCode
 	{
 		case 200: Reason = TEXT("OK"); break;
 		case 400: Reason = TEXT("Bad Request"); break;
+		case 401: Reason = TEXT("Unauthorized"); break;
 		case 404: Reason = TEXT("Not Found"); break;
 		case 405: Reason = TEXT("Method Not Allowed"); break;
 		case 500: Reason = TEXT("Internal Server Error"); break;

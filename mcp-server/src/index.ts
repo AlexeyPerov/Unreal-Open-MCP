@@ -228,8 +228,10 @@ export function createServer(): Server {
  *
  * The resolved port is logged with its source (override / lock / hash) so
  * users can see which bridge was picked. The auth token is discovered from
- * the same lock when present; until P5.6 the bridge omits it and the token
- * resolves to undefined (the LiveClient wiring lands in P1.7).
+ * the same lock when present; the LiveClient attaches it as a Bearer header
+ * on every request. When the lock omits the token (older bridge) or an env
+ * port override is in use, the token resolves to undefined and no
+ * Authorization header is sent (the bridge must then be in authMode "none").
  */
 function getEnv(): {
   projectPath: string;

@@ -17,7 +17,6 @@
 //
 // P1.3 scope: GET /ping only.
 //   - Tool dispatch (POST /tools/{name}) lands in P2.1.
-//   - Bearer auth (P5.6) is a later opt-in; not enforced here.
 //   - Instance lock + deterministic port resolver landed in P1.4. The
 //     FUnrealOpenMcpInstancePortResolver (Runtime) owns the formula and the
 //     override precedence; this server delegates to it and no longer carries a
@@ -27,6 +26,14 @@
 // (the P1.3 reader only needed the request line), routes to the tool registry,
 // and marshals handler execution onto the game thread via the dispatcher. The
 // fair request queue keys on the X-Agent-Id header.
+//
+// P5.6 adds the bearer auth gate: CheckAuth runs BEFORE routing on EVERY
+// endpoint (no exemptions — /ping, /tools/*, ...). The policy ("none" default
+// | "required") and the expected token come from the project settings + the
+// instance lock; the module sets them via SetAuth after Acquire (the token is
+// minted with the bound port, so it is not known at Start time). Bind address
+// is resolved through FUnrealOpenMcpBridgeBindAddress::Decide — remote bind is
+// refused unless authMode is "required".
 //
 // Threading (see packages/bridge/AGENTS.md §Transport):
 //   - The server IS an FRunnable: Run() is the accept loop, on its own thread.
@@ -86,8 +93,8 @@ public:
 	/** Env var name mirroring Unity's BridgeConstants.PortEnvVar. */
 	static const TCHAR* PortEnvVar();
 
-	/** True only for the loopback literal 127.0.0.1 (the only address Start
-	 *  will bind). Pinning the bind-address contract at the type level. */
+	/** True only for the loopback literal 127.0.0.1. Remote bind (0.0.0.0) is
+	 *  an opt-in gated by FUnrealOpenMcpBridgeBindAddress + authMode "required". */
 	static bool IsLoopbackAddress(const FString& Address);
 
 	FUnrealOpenMcpBridgeHttpServer(
@@ -102,6 +109,8 @@ public:
 
 	/**
 	 * Bind the loopback listener and start the worker thread. Idempotent.
+	 * Convenience overload for the loopback-only, no-auth case (used by specs
+	 * and the default project layout). The auth gate stays in "none" mode.
 	 *
 	 * @param Port      explicit port (already resolved by the caller — typically
 	 *                  ResolvePort()). When 0, the kernel picks an ephemeral
@@ -112,6 +121,33 @@ public:
 	 *         the reason.
 	 */
 	bool Start(uint16 Port, const FString& ProjectPath);
+
+	/**
+	 * Bind + start with an explicit bind address (loopback or remote). The bind
+	 * decision is resolved through FUnrealOpenMcpBridgeBindAddress::Decide — a
+	 * remote bindAddress is refused unless authMode is "required", and an
+	 * invalid bindAddress coerces to loopback. The caller wires the auth policy
+	 * + token via SetAuth after the instance lock is acquired (the token is
+	 * minted with the bound port, so it is not known at Start time). Until
+	 * SetAuth runs, the gate is in "none" mode.
+	 *
+	 * @return true on a successful bind; false if refused (remote without
+	 *         required auth), the port was in use, or the socket subsystem was
+	 *         unavailable. LastStartError carries the refusal reason.
+	 */
+	bool Start(uint16 Port, const FString& ProjectPath, const FString& BindAddress, const FString& AuthMode);
+
+	/**
+	 * Configure the bearer auth gate. Call AFTER the instance lock is acquired
+	 * (the token is minted there) and BEFORE serving traffic. When AuthMode is
+	 * "required", every request must carry `Authorization: Bearer <ExpectedToken>`
+	 * or receive HTTP 401. "none" (the default) preserves localhost-trust
+	 * behavior. Unknown modes fail closed (deny). Thread-safe via atomic flags
+	 * — safe to call from the game thread while the worker is running.
+	 *
+	 * The token is never logged.
+	 */
+	void SetAuth(const FString& AuthMode, const FString& ExpectedToken);
 
 	/**
 	 * Stop the worker thread, close the listener, and join. Idempotent and
@@ -146,9 +182,17 @@ private:
 	 *  response, close. HTTP/1.0 no keep-alive. */
 	void HandleConnection(FSocket* Client);
 
+	/**
+	 * Auth gate. Runs BEFORE routing on every request (no endpoint is exempt).
+	 * Returns true when the request may proceed; when it returns false the 401
+	 * response has already been written. Pure decision lives in
+	 * FUnrealOpenMcpBridgeAuthCheck so it is unit-testable in isolation.
+	 */
+	bool CheckAuth(const FString& AuthorizationHeader, FSocket& Client);
+
 	/** Route a parsed method + path. Dispatches to the /ping handler, the tool
 	 *  dispatch handler, or writes the right error body (404 / 405). */
-	void RouteRequest(const FString& Method, const FString& Path, FSocket& Client);
+	void RouteRequest(const FString& Method, const FString& Path, const FString& AgentId, const TArray<uint8>& Body, FSocket& Client);
 
 	/** Build the /ping payload on the game thread via the dispatcher and write
 	 *  the 200 or 503 response. */
@@ -173,14 +217,15 @@ private:
 
 	/** Read the full HTTP request (request line + headers + optional body) from
 	 *  Client. Parses the method, path, and the small set of headers the bridge
-	 *  needs (Content-Length, X-Agent-Id) and returns the raw body bytes.
-	 *  Returns false if no complete request arrived within the receive window.
-	 *  Serves both /ping (no body) and /tools/{name} (with body). */
+	 *  needs (Content-Length, X-Agent-Id, Authorization) and returns the raw
+	 *  body bytes. Returns false if no complete request arrived within the
+	 *  receive window. Serves both /ping (no body) and /tools/{name} (with body). */
 	bool ReadRequest(
 		FSocket& Client,
 		FString& OutMethod,
 		FString& OutPath,
 		FString& OutAgentId,
+		FString& OutAuthorization,
 		TArray<uint8>& OutBody);
 
 	/** Dispatcher reference (not owned — owned by FUnrealOpenMcpEditorModule).
@@ -214,4 +259,13 @@ private:
 
 	/** Last Start failure message (bind refusal, subsystem missing). */
 	FString LastStartError;
+
+	/** P5.6 auth gate state. Set via SetAuth (after the instance lock mints the
+	 *  token). The worker thread reads these on every request — FString writes
+	 *  are not atomic, so the module calls SetAuth from the game thread BEFORE
+	 *  the first request can arrive (the lock is acquired in StartupModule
+	 *  immediately after Start succeeds). Until SetAuth runs, the defaults
+	 *  ("none" / empty) preserve the open localhost behavior. */
+	FString AuthMode = TEXT("none");
+	FString ExpectedAuthToken;
 };

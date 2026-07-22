@@ -29,10 +29,13 @@
 // reload. On-disk continuity (PID + projectHash) is what makes stale recovery
 // work across reloads, not in-process identity.
 //
-// authToken: deferred to P5.6 per the P1.4 plan. The field is OMITTED from the
-// JSON (not written as null/empty) — absence is pinned in the spec. When P5.6
-// lands, it will be added between port and projectPath (Unity's order) and the
-// TS reader already tolerates its absence.
+// authToken: minted on Acquire and written as field #3 (between `port` and
+// `projectPath`, Unity's order). The token is a 256-bit hex value generated
+// per bridge start; the HTTP auth check reads it as the expected Bearer token
+// when authMode is "required". The MCP server discovers it from the lock file
+// (resolveAuthToken) and attaches `Authorization: Bearer <token>` on every
+// request. Rotated on every Acquire (per listener start) so a bridge restart
+// invalidates any previously discovered token.
 //
 // Threading: Acquire/UpdateState/Release may be called from the game thread or
 // the listener worker. File I/O is atomic via rename; concurrent UpdateState
@@ -72,6 +75,12 @@ public:
 
 	/** The port written into the lock (0 when not acquired). */
 	int32 GetCurrentPort() const { return AcquiredPort; }
+
+	/**
+	 * The per-session bearer token minted on Acquire. Empty when not acquired.
+	 * Read by the HTTP auth check (expected token) when authMode is "required".
+	 */
+	const FString& GetAuthToken() const { return AuthToken; }
 
 	/**
 	 * Write the initial lock and sweep stale locks. Safe to call on the
@@ -154,6 +163,7 @@ private:
 	int32 AcquiredPort = 0;
 	uint32 Pid = 0;
 	FDateTime StartedAt;
+	FString AuthToken;
 	FString BridgeVersionForLock;
 	FString UnrealVersionForLock;
 	FString InstancesDirOverrideForLock;

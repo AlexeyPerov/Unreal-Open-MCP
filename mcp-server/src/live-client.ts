@@ -294,8 +294,8 @@ export class LiveClient implements Router {
    * Per-session bearer token auto-discovered from the instance lock. Undefined
    * when no live lock was found (older bridge / env port override); in that
    * case no Authorization header is sent and the bridge must be in authMode
-   * "none" for requests to succeed. The bridge omits the token until a later
-   * phase; the wiring here is additive so that phase is a no-op on this side.
+   * "none" for requests to succeed. When present, fetchWithTimeout attaches
+   * `Authorization: Bearer <token>` to every request.
    */
   private authToken: string | undefined;
   /**
@@ -565,9 +565,9 @@ export class LiveClient implements Router {
   /**
    * fetch with an AbortController timeout. When `authToken` is set, attaches
    * `Authorization: Bearer <token>` to every request (merged with any caller-
-   * supplied header so a per-request value always wins). The token path is
-   * inert today (the bridge omits authToken until a later phase); wiring it
-   * now keeps that later phase additive.
+   * supplied header so a per-request value always wins). The token is
+   * auto-discovered from the instance lock at startup; when the bridge is in
+   * authMode "required" a missing token yields HTTP 401 (`unauthorized`).
    */
   private fetchWithTimeout(
     path: string,

@@ -17,8 +17,9 @@
 // Editor→Runtime boundary invariant.
 //
 // P1.4 scope: deterministic port + lock path + env/CLI override precedence.
-//   - authToken minting is deferred to P5.6 (the lock omits the field; absence
-//     is pinned in the spec).
+//   - authToken minting lives in FUnrealOpenMcpBridgeInstanceLock (Editor) +
+//     FUnrealOpenMcpBridgeAuthToken (Editor); this Runtime type owns only the
+//     path formula.
 //   - The TS discovery parity lands in P1.6 — the formula here is the source of
 //     truth both sides pin to.
 #pragma once

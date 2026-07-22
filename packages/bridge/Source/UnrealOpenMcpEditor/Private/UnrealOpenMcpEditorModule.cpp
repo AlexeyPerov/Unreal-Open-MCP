@@ -32,9 +32,12 @@
 #include "Modules/ModuleManager.h"
 
 #include "UnrealOpenMcpLog.h"
+#include "Bridge/UnrealOpenMcpBridgeAuthPolicy.h"
+#include "Bridge/UnrealOpenMcpBridgeBindAddress.h"
 #include "Bridge/UnrealOpenMcpBridgeEnvelope.h"
 #include "Bridge/UnrealOpenMcpBridgeHttpServer.h"
 #include "Bridge/UnrealOpenMcpBridgeInstanceLock.h"
+#include "Bridge/UnrealOpenMcpBridgeProjectSettings.h"
 #include "Bridge/UnrealOpenMcpBridgeRequestQueue.h"
 #include "Bridge/UnrealOpenMcpBridgeSession.h"
 #include "Bridge/UnrealOpenMcpInstancePortResolver.h"
@@ -131,15 +134,26 @@ public:
 		// -UNREAL_OPEN_MCP_BRIDGE_PORT=<n> (CLI) overrides. The project path is
 		// captured BEFORE Start so both the resolver and the /ping body share
 		// the same canonical absolute path.
+		//
+		// P5.6: bind address + authMode are read from project settings
+		// (<project>/.unreal-open-mcp/settings.json). Remote bind (0.0.0.0) is
+		// refused unless authMode is "required"; the server enforces this in
+		// Start via FUnrealOpenMcpBridgeBindAddress::Decide. The bearer token
+		// is minted by the instance lock on Acquire (it is not known until the
+		// port is bound), so SetAuth runs AFTER Acquire.
 		HttpServer = MakeUnique<FUnrealOpenMcpBridgeHttpServer>(*Dispatcher, *ToolRegistry, *RequestQueue);
 		const FString ProjectPath = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir());
 		const uint16 Port = FUnrealOpenMcpBridgeHttpServer::ResolvePort(ProjectPath);
-		if (!HttpServer->Start(Port, ProjectPath))
+		ProjectSettings = MakeUnique<FUnrealOpenMcpBridgeProjectSettings>();
+		ProjectSettings->BindToProject(ProjectPath);
+		const FString AuthMode = ProjectSettings->GetAuthMode();
+		const FString BindAddress = ProjectSettings->GetBindAddress();
+		if (!HttpServer->Start(Port, ProjectPath, BindAddress, AuthMode))
 		{
-			// A failed bind is logged but NOT fatal — the editor still runs,
-			// and the operator can free the port and reload the plugin. The
-			// dispatcher stays up so a later Start (hot reload after freeing
-			// the port) works without reconstructing it.
+			// A failed bind (or a refused remote-without-auth) is logged but
+			// NOT fatal — the editor still runs, and the operator can free the
+			// port / fix settings and reload the plugin. The dispatcher stays
+			// up so a later Start (hot reload) works without reconstructing it.
 			UE_LOG(
 				LogUnrealOpenMcp,
 				Error,
@@ -152,11 +166,19 @@ public:
 			// advertises a port that is actually listening (the MCP server
 			// reads the lock to discover the port without an HTTP round-trip).
 			// The lock is also the heartbeat surface — a future ticker (P5.7)
-			// will call UpdateState on a cadence.
+			// will call UpdateState on a cadence. The lock mints the per-session
+			// bearer token written as `authToken` in the lock JSON.
 			const FString UnrealVersion = FEngineVersion::Current().ToString();
 			const FString BridgeVersion = FUnrealOpenMcpBridgeSession::GetBridgeVersion();
 			InstanceLock = MakeUnique<FUnrealOpenMcpBridgeInstanceLock>();
 			InstanceLock->Acquire(ProjectPath, HttpServer->GetPort(), BridgeVersion, UnrealVersion);
+
+			// Wire the auth gate: the policy from settings + the freshly minted
+			// token. Runs before the first request can arrive. In "none" mode
+			// the token is ignored (but still minted + advertised so a project
+			// can flip to "required" with no restart). The token is never
+			// logged.
+			HttpServer->SetAuth(AuthMode, InstanceLock->GetAuthToken());
 		}
 	}
 
@@ -180,6 +202,7 @@ public:
 			InstanceLock->Release();
 			InstanceLock.Reset();
 		}
+		ProjectSettings.Reset();
 
 		// Tear down the HTTP server BEFORE the registry/queue/dispatcher: the
 		// server holds references to all three, and in-flight dispatches must
@@ -352,6 +375,11 @@ private:
 	// Owned. Constructed after the HTTP server binds (P1.4), torn down before
 	// the server stops. The lock advertises the bound port to the MCP server.
 	TUniquePtr<FUnrealOpenMcpBridgeInstanceLock> InstanceLock;
+
+	// Owned. P5.6 project settings reader (<project>/.unreal-open-mcp/
+	// settings.json). Read once at StartupModule for bind address + authMode;
+	// torn down alongside the instance lock.
+	TUniquePtr<FUnrealOpenMcpBridgeProjectSettings> ProjectSettings;
 };
 
 IMPLEMENT_MODULE(FUnrealOpenMcpEditorModule, UnrealOpenMcpEditor)

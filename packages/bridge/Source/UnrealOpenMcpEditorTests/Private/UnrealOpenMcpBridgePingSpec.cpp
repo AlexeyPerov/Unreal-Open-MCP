@@ -23,10 +23,12 @@
 #include "Misc/AutomationTest.h"
 #include "HAL/PlatformProcess.h"
 
+#include "Bridge/UnrealOpenMcpBridgeAuthPolicy.h"
 #include "Bridge/UnrealOpenMcpBridgeHttpServer.h"
 #include "Bridge/UnrealOpenMcpBridgeJson.h"
 #include "Bridge/UnrealOpenMcpBridgeRequestQueue.h"
 #include "Bridge/UnrealOpenMcpBridgeSession.h"
+#include "Bridge/UnrealOpenMcpBridgeAuthToken.h"
 #include "Bridge/UnrealOpenMcpInstancePortResolver.h"
 #include "Bridge/UnrealOpenMcpToolRegistry.h"
 #include "Dispatch/UnrealOpenMcpGameThreadDispatcher.h"
@@ -87,6 +89,57 @@ namespace
 			if (!bOk || BytesRead == 0)
 			{
 				break; // peer closed or errored
+			}
+			Response += FString(UE_PTRDIFF_TO_INT32(BytesRead), reinterpret_cast<const ANSICHAR*>(Received.GetData()));
+		}
+
+		Client->Close();
+		ISocketSubsystem::Get(PLATFORM_SOCKETSUBSYSTEM)->DestroySocket(Client);
+		return Response;
+	}
+
+	// Header-capable variant for the P5.6 auth tests. Adds an `Authorization`
+	// header line when AuthHeader is non-empty; otherwise identical to
+	// SendRawHttpRequest.
+	FString SendRawHttpRequestWithAuth(uint16 Port, const FString& Method, const FString& Path, const FString& AuthHeader)
+	{
+		const FIPv4Address Loopback(127, 0, 0, 1);
+		const FIPv4Endpoint Endpoint(Loopback, Port);
+
+		FSocket* Client = FTcpSocketBuilder(TEXT("UnrealOpenMcpTestClient"))
+			.AsBlocking()
+			.Build();
+		if (Client == nullptr)
+		{
+			return FString();
+		}
+
+		Client->Connect(*Endpoint.ToInternetAddr());
+
+		FString RequestLine = FString::Printf(
+			TEXT("%s %s HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n"),
+			*Method, *Path);
+		if (!AuthHeader.IsEmpty())
+		{
+			RequestLine += FString::Printf(TEXT("Authorization: %s\r\n"), *AuthHeader);
+		}
+		RequestLine += TEXT("\r\n");
+		const FTCHARToUTF8 RequestUtf8(*RequestLine);
+
+		int32 Sent = 0;
+		Client->Send(reinterpret_cast<const uint8*>(RequestUtf8.Get()), RequestUtf8.Length(), Sent);
+
+		TArray<uint8> Received;
+		Received.SetNumUninitialized(4096);
+		FString Response;
+		const FTimespan WaitTimeout = FTimespan::FromSeconds(10.0);
+		while (Client->Wait(ESocketWaitConditions::WaitForRead, WaitTimeout))
+		{
+			int32 BytesRead = 0;
+			const bool bOk = Client->Recv(Received.GetData(), Received.Num(), BytesRead);
+			if (!bOk || BytesRead == 0)
+			{
+				break;
 			}
 			Response += FString(UE_PTRDIFF_TO_INT32(BytesRead), reinterpret_cast<const ANSICHAR*>(Received.GetData()));
 		}
@@ -470,6 +523,114 @@ void FUnrealOpenMcpBridgePingSpec::Define()
 			// backslash-escaped).
 			TestTrue(TEXT("quote escaped"), Json.Contains(TEXT("\\\"quotes\\\"")));
 		});
+	});
+
+	Describe("Auth gate", [this]()
+	{
+		// P5.6 — the bearer auth gate runs on EVERY endpoint (no exemptions).
+		// These latent specs spin an ephemeral server, flip authMode to
+		// "required" with a known token via SetAuth, and assert the policy
+		// matrix end-to-end through a real loopback TCP connection.
+
+		LatentIt(
+			"required mode: rejects a missing Bearer with 401 unauthorized",
+			FTimespan::FromSeconds(30),
+			[this](const FDoneDelegate& Done)
+			{
+				Async(EAsyncExecution::Thread, [this, Done]()
+				{
+					FPingHarness Harness;
+					if (!TestTrue(TEXT("server started"), Harness.Start(TEXT("/tmp/auth-test"))))
+					{
+						Done.Execute();
+						return;
+					}
+					const FString Token = FUnrealOpenMcpBridgeAuthToken::Generate();
+					Harness.Server->SetAuth(FUnrealOpenMcpBridgeAuthPolicy::Required(), Token);
+
+					const FString Response = SendRawHttpRequestWithAuth(
+						Harness.Server->GetPort(), TEXT("GET"), TEXT("/ping"), FString());
+					TestEqual(TEXT("HTTP 401"), ExtractHttpStatus(Response), uint16(401));
+					TestTrue(TEXT("unauthorized code"), ExtractHttpBody(Response).Contains(TEXT("\"unauthorized\"")));
+
+					Done.Execute();
+				});
+			});
+
+		LatentIt(
+			"required mode: rejects a wrong Bearer with 401 unauthorized",
+			FTimespan::FromSeconds(30),
+			[this](const FDoneDelegate& Done)
+			{
+				Async(EAsyncExecution::Thread, [this, Done]()
+				{
+					FPingHarness Harness;
+					if (!TestTrue(TEXT("server started"), Harness.Start(TEXT("/tmp/auth-test"))))
+					{
+						Done.Execute();
+						return;
+					}
+					const FString Token = FUnrealOpenMcpBridgeAuthToken::Generate();
+					Harness.Server->SetAuth(FUnrealOpenMcpBridgeAuthPolicy::Required(), Token);
+
+					const FString Response = SendRawHttpRequestWithAuth(
+						Harness.Server->GetPort(), TEXT("GET"), TEXT("/ping"), TEXT("Bearer deadbeef"));
+					TestEqual(TEXT("HTTP 401"), ExtractHttpStatus(Response), uint16(401));
+					TestTrue(TEXT("unauthorized code"), ExtractHttpBody(Response).Contains(TEXT("\"unauthorized\"")));
+
+					Done.Execute();
+				});
+			});
+
+		LatentIt(
+			"required mode: accepts a correct Bearer with 200",
+			FTimespan::FromSeconds(30),
+			[this](const FDoneDelegate& Done)
+			{
+				Async(EAsyncExecution::Thread, [this, Done]()
+				{
+					FPingHarness Harness;
+					if (!TestTrue(TEXT("server started"), Harness.Start(TEXT("/tmp/auth-test"))))
+					{
+						Done.Execute();
+						return;
+					}
+					const FString Token = FUnrealOpenMcpBridgeAuthToken::Generate();
+					Harness.Server->SetAuth(FUnrealOpenMcpBridgeAuthPolicy::Required(), Token);
+
+					const FString Response = SendRawHttpRequestWithAuth(
+						Harness.Server->GetPort(), TEXT("GET"), TEXT("/ping"),
+						FString::Printf(TEXT("Bearer %s"), *Token));
+					TestEqual(TEXT("HTTP 200"), ExtractHttpStatus(Response), uint16(200));
+					TestTrue(TEXT("connected on success"), ExtractHttpBody(Response).Contains(TEXT("\"connected\":true")));
+
+					Done.Execute();
+				});
+			});
+
+		LatentIt(
+			"none mode: allows a missing Bearer (localhost trust)",
+			FTimespan::FromSeconds(30),
+			[this](const FDoneDelegate& Done)
+			{
+				Async(EAsyncExecution::Thread, [this, Done]()
+				{
+					FPingHarness Harness;
+					if (!TestTrue(TEXT("server started"), Harness.Start(TEXT("/tmp/auth-test"))))
+					{
+						Done.Execute();
+						return;
+					}
+					// Default authMode is "none" — SetAuth not called. The token
+					// is irrelevant; a missing header must still be allowed.
+					const FString Response = SendRawHttpRequest(
+						Harness.Server->GetPort(), TEXT("GET"), TEXT("/ping"));
+					TestEqual(TEXT("HTTP 200"), ExtractHttpStatus(Response), uint16(200));
+					TestTrue(TEXT("connected on success"), ExtractHttpBody(Response).Contains(TEXT("\"connected\":true")));
+
+					Done.Execute();
+				});
+			});
 	});
 }
 

@@ -1,24 +1,99 @@
 # Bridge HTTP API
 
-The Unreal Open MCP bridge exposes a minimal loopback-only HTTP surface. It is
-the MCP server's live entry point — every tool call eventually becomes a
-loopback HTTP request. The bridge binds `127.0.0.1` only; remote bind is an
-opt-in that lands later with bearer auth.
+The Unreal Open MCP bridge exposes a minimal loopback HTTP surface by default.
+It is the MCP server's live entry point — every tool call eventually becomes a
+loopback HTTP request. The bridge binds `127.0.0.1` by default; a remote bind
+is an opt-in that requires bearer auth (see [Remote bind](#remote-bind)).
 
 The health endpoint (`GET /ping`) is the base readiness probe and is wrapped by
 the MCP `unreal_open_mcp_ping` tool (the first end-to-end live probe: stdio →
 instance discovery → HTTP). Tool dispatch (`POST /tools/{name}`) is the
-canonical tool-call path every typed tool family rides on. Bearer auth lands in
-a later phase.
+canonical tool-call path every typed tool family rides on. A bearer auth gate
+runs on every endpoint when `authMode` is `"required"` (see [Auth](#auth)).
 
 ## Bind surface
 
 | | |
 |---|---|
-| Address | `127.0.0.1` only. The bridge never binds a non-loopback address. Remote bind is an opt-in (later). |
-| Port | Resolved from: (1) `UNREAL_OPEN_MCP_BRIDGE_PORT` CLI arg, (2) `UNREAL_OPEN_MCP_BRIDGE_PORT` env var, (3) documented default `21111`. A deterministic per-project port resolver lands in a later phase. |
+| Address | `127.0.0.1` by default. Remote bind (`0.0.0.0`) is an opt-in that requires `authMode: "required"` (see [Remote bind](#remote-bind)). |
+| Port | Resolved from: (1) `UNREAL_OPEN_MCP_BRIDGE_PORT` env var, (2) `-UNREAL_OPEN_MCP_BRIDGE_PORT=<n>` CLI arg, (3) deterministic per-project hash `20000 + (sha256(projectPath) % 10000)`. |
 | Transport | HTTP/1.1, `Connection: close` (HTTP/1.0 no keep-alive). One request per TCP connection. |
-| Auth | None enforced (P1.3 scope). Bearer auth is a later opt-in. |
+| Auth | None enforced by default (`authMode: "none"`). Opt-in bearer-token gate via `authMode: "required"` (see [Auth](#auth)). |
+
+## Auth
+
+The bridge mints a per-session bearer token on startup and writes it into the
+instance lock JSON as `authToken` (field #3, between `port` and `projectPath`).
+The token is a 64-char lowercase-hex string (256 bits of entropy), rotated on
+every bridge start so a restart invalidates any previously discovered token.
+Enforcement is opt-in via `authMode` in
+[project settings](#project-settings):
+
+| `authMode` | Behavior |
+|---|---|
+| `"none"` (default) | Open. Any request is allowed regardless of the `Authorization` header. The token is still minted + advertised so a project can flip to `"required"` with no restart. |
+| `"required"` | Every request MUST carry `Authorization: Bearer <token>` matching the lock's `authToken`, or receive HTTP 401. |
+| (anything else) | Fail closed — treated as deny. An unrecognized value (null/corrupt/typo) never silently opens the bridge. |
+
+The auth gate runs on **every** endpoint before routing — `/ping`,
+`/tools/{name}`, and any future endpoint. No endpoint is exempt. Token
+comparison is constant-time (no early-exit timing leak).
+
+A 401 response carries the stable `unauthorized` code:
+
+```json
+{
+  "error": {
+    "code": "unauthorized",
+    "message": "Missing or invalid Authorization header. Set authMode to \"none\" in .unreal-open-mcp/settings.json, or send Authorization: Bearer <token>."
+  }
+}
+```
+
+The MCP server auto-discovers the token from the live instance lock
+(`resolveAuthToken` in `instance-discovery.ts`) and attaches
+`Authorization: Bearer <token>` to every request when a token is present. When
+no lock exists (e.g. an `UNREAL_OPEN_MCP_BRIDGE_PORT` override bypasses the
+lock), no header is sent and the bridge must be in `authMode: "none"`. This is
+fully automatic — operators do not need to configure the token on the MCP side.
+
+### Project settings
+
+The bridge reads `<project-root>/.unreal-open-mcp/settings.json` at startup.
+Schema (only the fields the bridge reads today):
+
+```json
+{
+  "authMode": "none",
+  "bindAddress": "127.0.0.1"
+}
+```
+
+| Field | Values | Default | Notes |
+|---|---|---|---|
+| `authMode` | `"none"` \| `"required"` | `"none"` | Invalid values coerce to `"none"` at load. |
+| `bindAddress` | `"127.0.0.1"` \| `"0.0.0.0"` | `"127.0.0.1"` | Invalid values coerce to loopback (never remote). Remote requires `authMode: "required"`. |
+
+A missing file, an unparseable JSON body, or an invalid value all fall back to
+the safe defaults (loopback + open) — the bridge never fails to start over a
+malformed settings file.
+
+### Remote bind
+
+A remote bind (`bindAddress: "0.0.0.0"`) opens the bridge to the network. To
+avoid an unauthenticated open port, the bridge **refuses to start** on a remote
+interface unless `authMode` is `"required"`:
+
+```log
+[Unreal Open MCP] bridge HTTP start refused: Remote bind (0.0.0.0) requires
+authMode "required". ... set authMode to "required" in
+.unreal-open-mcp/settings.json before enabling remote bind.
+```
+
+This couples the bind decision to the auth policy so a misconfigured project
+fails fast at startup instead of exposing an open port. Loopback binds are
+always allowed regardless of `authMode`. An invalid `bindAddress` coerces to
+loopback (never remote).
 
 ## Endpoints
 
@@ -529,6 +604,11 @@ curl -s http://127.0.0.1:$UNREAL_OPEN_MCP_BRIDGE_PORT/ping | jq .
 # Tool dispatch (echo stub)
 curl -s -X POST http://127.0.0.1:$UNREAL_OPEN_MCP_BRIDGE_PORT/tools/unreal_open_mcp_echo \
   -H 'Content-Type: application/json' -d '{"smoke":1}' | jq .
+
+# Auth (when authMode is "required"): the token is in the instance lock.
+TOKEN=$(jq -r .authToken ~/.unreal-open-mcp/instances/*.json | head -1)
+curl -s http://127.0.0.1:$UNREAL_OPEN_MCP_BRIDGE_PORT/ping \
+  -H "Authorization: Bearer $TOKEN" | jq .
 ```
 
 The bridge logs `[Unreal Open MCP] bridge HTTP listening on http://127.0.0.1:<port>/ping`
@@ -550,6 +630,7 @@ the caller can branch on cause:
 | `/tools/{name}` 200 `{ok:true}` (read-only) | success (the `result` value verbatim — P2.1 shape) |
 | `/tools/{name}` 200 `{ok:true,...,"gate":{...}}` (mutating) | success; `result` is the primary payload and `gate` rides through as metadata so an agent can branch on `gate.outcome` |
 | `/tools/{name}` 200 `{ok:false}` | error carrying the tool's `error.code` / `error.message`; when a `gate` block is present it rides through as `detail.gate` |
+| `/ping` or `/tools/{name}` 401 | error carrying `unauthorized` (only when `authMode: "required"` and the Bearer token is missing/wrong) |
 | `/tools/{name}` 404 / 405 / 500 | error carrying the bridge's `error.code` |
 | no listener / ECONNREFUSED | `bridge_offline` |
 | listener accepts but never responds | `bridge_timeout` |
@@ -557,8 +638,7 @@ the caller can branch on cause:
 
 ## Planned endpoints (not shipped)
 
-| Endpoint | Phase | Notes |
-|---|---|---|
-| `GET /instance` | P1.4 | Live instance-lock JSON for the MCP server's discovery path. |
-| `GET /tools` | P3.8 | Compiled-state tool inventory + group→tools map. |
-| Bearer auth | P5.6 | Per-session token minted into the instance lock; `authMode: none \| required`. |
+| Endpoint | Notes |
+|---|---|
+| `GET /instance` | Live instance-lock JSON for the MCP server's discovery path. |
+| `GET /tools` | Compiled-state tool inventory + group→tools map. |

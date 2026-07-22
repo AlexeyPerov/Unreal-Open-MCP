@@ -9,9 +9,11 @@
 // PID), so the stale-lock test plants a fake lock JSON with a guaranteed-dead
 // PID before calling Acquire, then verifies it disappeared.
 //
-// authToken: the field is OMITTED from the JSON per the P1.4 plan (deferred to
-// P5.6). Its absence is pinned below — when P5.6 adds the field, update this
-// spec and the corresponding TS reader in the same task.
+// authToken: minted on Acquire and written as field #3 (between `port` and
+// `projectPath`). Pinned below — the field is present, is 64 lowercase-hex
+// chars, and varies across Acquires (a bridge restart invalidates the old
+// token). The HTTP auth check reads it as the expected Bearer token when
+// authMode is "required"; the MCP server discovers it via resolveAuthToken.
 #if WITH_DEV_AUTOMATION_TESTS
 
 #include "CoreMinimal.h"
@@ -84,9 +86,11 @@ void FUnrealOpenMcpInstanceLockSpec::Define()
 			ReadFile(LockPath, Json);
 
 			// Required fields present. Field names mirror the TS-side
-			// InstanceLock type in instance-discovery.ts.
+			// InstanceLock type in instance-discovery.ts. authToken is field #3
+			// (between port and projectPath).
 			const TArray<FString> RequiredFields = {
-				TEXT("\"pid\""), TEXT("\"port\""), TEXT("\"projectPath\""), TEXT("\"projectHash\""),
+				TEXT("\"pid\""), TEXT("\"port\""), TEXT("\"authToken\""),
+				TEXT("\"projectPath\""), TEXT("\"projectHash\""),
 				TEXT("\"startedAt\""), TEXT("\"updatedAt\""), TEXT("\"heartbeatAt\""),
 				TEXT("\"state\""), TEXT("\"isPlaying\""), TEXT("\"isCompiling\""),
 				TEXT("\"bridgeVersion\""), TEXT("\"unrealVersion\"")
@@ -137,9 +141,10 @@ void FUnrealOpenMcpInstanceLockSpec::Define()
 			RemoveDirRecursive(TempDir);
 		});
 
-		// P1.4: authToken is deferred to P5.6. Pin its ABSENCE in the JSON so a
-		// later phase adding it is a deliberate, visible change.
-		It("omits the authToken field (P5.6 deferred)", [this, TestProjectPath]()
+		// P5.6: authToken is minted on Acquire and written between `port` and
+		// `projectPath` (Unity's field order). Pin its presence + format so a
+		// later change removing it is a deliberate, visible regression.
+		It("mints a 64-char hex authToken between port and projectPath", [this, TestProjectPath]()
 		{
 			const FString TempDir = MakeTempInstancesDir();
 			FUnrealOpenMcpBridgeInstanceLock Lock;
@@ -149,11 +154,47 @@ void FUnrealOpenMcpInstanceLockSpec::Define()
 			FString Json;
 			ReadFile(LockPath, Json);
 
-			TestFalse(
-				TEXT("authToken NOT present in JSON (P5.6 deferred)"),
-				Json.Contains(TEXT("\"authToken\"")));
+			TestTrue(TEXT("authToken present in JSON"), Json.Contains(TEXT("\"authToken\"")));
+
+			// Field order: authToken must appear AFTER port and BEFORE
+			// projectPath (Unity parity — the TS reader is order-tolerant, but
+			// the writer emits this exact order).
+			const int32 PortIdx = Json.Find(TEXT("\"port\""), ESearchCase::CaseSensitive);
+			const int32 AuthIdx = Json.Find(TEXT("\"authToken\""), ESearchCase::CaseSensitive);
+			const int32 PathIdx = Json.Find(TEXT("\"projectPath\""), ESearchCase::CaseSensitive);
+			TestTrue(TEXT("port before authToken"), PortIdx != INDEX_NONE && AuthIdx != INDEX_NONE && PortIdx < AuthIdx);
+			TestTrue(TEXT("authToken before projectPath"), PathIdx != INDEX_NONE && AuthIdx < PathIdx);
+
+			// The token is a 64-char lowercase-hex string. Extract it via the
+			// lock's getter and assert the format.
+			const FString Token = Lock.GetAuthToken();
+			TestEqual(TEXT("token is 64 hex chars"), Token.Len(), 64);
+			for (int32 i = 0; i < Token.Len(); ++i)
+			{
+				const TCHAR c = Token[i];
+				const bool bOk = (c >= TEXT('0') && c <= TEXT('9')) || (c >= TEXT('a') && c <= TEXT('f'));
+				TestTrue(FString::Printf(TEXT("char %d is lowercase hex"), i), bOk);
+			}
 
 			Lock.Release();
+			RemoveDirRecursive(TempDir);
+		});
+
+		It("rotates the authToken across Acquires", [this, TestProjectPath]()
+		{
+			const FString TempDir = MakeTempInstancesDir();
+			FUnrealOpenMcpBridgeInstanceLock Lock;
+			Lock.Acquire(TestProjectPath, 22028, TEXT("0.0.1"), TEXT("5.8.0"), TempDir);
+			const FString First = Lock.GetAuthToken();
+
+			FUnrealOpenMcpBridgeInstanceLock Lock2;
+			Lock2.Acquire(TestProjectPath, 22029, TEXT("0.0.1"), TEXT("5.8.0"), TempDir);
+			const FString Second = Lock2.GetAuthToken();
+
+			TestNotEqual(TEXT("token rotates on re-acquire"), First, Second);
+
+			Lock.Release();
+			Lock2.Release();
 			RemoveDirRecursive(TempDir);
 		});
 	});

@@ -91,6 +91,14 @@ import { screenshotViewport } from "./screenshot-viewport.js";
 import { screenshotGameView } from "./screenshot-game-view.js";
 import { screenshotCamera } from "./screenshot-camera.js";
 import { screenshotIsolated } from "./screenshot-isolated.js";
+// P5.7 — bridge_status. Operator / recovery-oriented health snapshot: composes
+// the instance-lock classifier (`classifyInstance`) with one /ping probe into a
+// coarse status token (running / compiling / stopped / unreachable /
+// dead_bridge). Local-route (resolved in-process by `handleLocalTool`; no
+// bridge POST); read-only, gate-free, never spawns the editor. The dead_bridge
+// recovery hint points at console_get_logs as the interim offline surface
+// (the dedicated offline compile-error reader is deferred).
+import { bridgeStatus } from "./bridge-status.js";
 
 // Tool registry. P1.7 registers the first real tool — `unreal_open_mcp_ping` —
 // which the MCP server routes to the bridge's `GET /ping`. Each subsequent tool
@@ -218,4 +226,5 @@ export const ALL_TOOLS: Tool[] = [
   screenshotGameView,
   screenshotCamera,
   screenshotIsolated,
+  bridgeStatus,
 ];

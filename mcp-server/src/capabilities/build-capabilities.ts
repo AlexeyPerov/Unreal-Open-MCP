@@ -44,6 +44,9 @@ export type RoutePolicy = "live" | "offline" | "local";
 
 const LOCAL_TOOLS: ReadonlySet<string> = new Set([
   "unreal_open_mcp_capabilities",
+  // P5.7 — bridge_status composes the lock classifier + one /ping probe
+  // in-process; no bridge POST round-trip.
+  "unreal_open_mcp_bridge_status",
 ]);
 
 function routePolicyFor(toolName: string): RoutePolicy {
@@ -127,6 +130,10 @@ const TOOL_CATEGORY: Record<string, string> = {
   unreal_open_mcp_screenshot_game_view: "screenshot",
   unreal_open_mcp_screenshot_camera: "screenshot",
   unreal_open_mcp_screenshot_isolated: "screenshot",
+  // P5.7 — bridge_status. Operator / recovery health snapshot. Local-route
+  // (composes the lock classifier + one /ping probe in-process), read-only,
+  // gate-free. Sits in the core meta bucket alongside ping / capabilities.
+  unreal_open_mcp_bridge_status: "core",
 };
 
 function categoryFor(toolName: string): string {

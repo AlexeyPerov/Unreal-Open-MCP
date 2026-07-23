@@ -217,9 +217,11 @@ test("integration: tools/list advertises unreal_open_mcp_ping", async () => {
     // pair — asset_find / asset_get_data; P4.2 added the Content Browser
     // CRUD family — asset_create_folder / asset_copy / asset_move /
     // asset_delete / asset_refresh; P4.3 added the material family —
-    // material_create / material_modify / material_get_data). Guard against
-    // accidental registry drift silently changing what the phase-gate smoke
-    // covers.
+    // material_create / material_modify / material_get_data; P5.1 added the
+    // editor family; P5.2 added editor selection; P5.3 added the console
+    // family; P5.4 added the reflection family; P5.5 added the screenshot
+    // family; P5.7 added bridge_status). Guard against accidental registry
+    // drift silently changing what the phase-gate smoke covers.
     assert.deepEqual(names, [
       "unreal_open_mcp_ping",
       "unreal_open_mcp_actor_find",
@@ -270,6 +272,7 @@ test("integration: tools/list advertises unreal_open_mcp_ping", async () => {
       "unreal_open_mcp_screenshot_game_view",
       "unreal_open_mcp_screenshot_camera",
       "unreal_open_mcp_screenshot_isolated",
+      "unreal_open_mcp_bridge_status",
     ]);
   } finally {
     await cleanup();

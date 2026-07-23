@@ -36,8 +36,18 @@ import {
   PORT_OVERRIDE_ENV_VAR,
   readInstanceLock,
   isPidAlive,
+  classifyInstance,
+  lockPath,
+  type InstanceLock,
 } from "./instance-discovery.js";
 import { LiveClient, type Router } from "./live-client.js";
+import {
+  deriveBridgeStatus,
+  summarizeInstanceLock,
+  bridgeStatusRecoveryHint,
+  bridgeStatusNextStep,
+  type PingProbe,
+} from "./tools/bridge-status-helpers.js";
 
 /** Name advertised in the MCP `initialize` response. */
 export const SERVER_NAME = "unreal-open-mcp";
@@ -55,24 +65,34 @@ const TOOL_BY_NAME = new Map(ALL_TOOLS.map((t) => [t.name, t]));
 
 /**
  * Local-route tools — resolved in-process by {@link handleLocalTool} without a
- * bridge round-trip. The capabilities tool is the first (P3.8): it builds the
- * capability surface from the registered tool list + the static rule/fix
- * catalog, so it works with the editor down. Adding a local-route tool means
- * extending this set AND adding a handler branch in {@link handleLocalTool}.
+ * bridge POST round-trip. `capabilities` (P3.8) builds the capability surface
+ * from the registered tool list + the static rule/fix catalog, so it works with
+ * the editor down. `bridge_status` (P5.7) composes the instance-lock classifier
+ * with one /ping probe (fired through the live router when one is installed); a
+ * dead/stopped bridge is a successful status read, not an error. Adding a
+ * local-route tool means extending this set AND adding a handler branch in
+ * {@link handleLocalTool}.
  */
 const LOCAL_TOOLS: ReadonlySet<string> = new Set([
   "unreal_open_mcp_capabilities",
+  "unreal_open_mcp_bridge_status",
 ]);
 
 /**
  * Resolve a local-route tool call in-process. Returns `null` when the tool is
  * not a local-route tool (the caller then routes it through the live bridge).
- * Exported so unit tests can drive the local dispatch directly without booting
- * the live router.
+ *
+ * `router` is the currently-installed live router (the same one `handleCallTool`
+ * dispatches live tools through). It is optional and threaded in only so
+ * `bridge_status` can fire its /ping probe through the installed router;
+ * capabilities ignores it. When null, bridge_status treats the ping as failed
+ * (it still reports a status from the lock alone). Exported so unit tests can
+ * drive the local dispatch directly without booting the live router.
  */
 export async function handleLocalTool(
   name: string,
   args: Record<string, unknown>,
+  router: Router | null = null,
 ): Promise<CallToolResult | null> {
   if (!LOCAL_TOOLS.has(name)) {
     return null;
@@ -95,6 +115,9 @@ export async function handleLocalTool(
       content: [{ type: "text", text: JSON.stringify(result) }],
       isError: false,
     };
+  }
+  if (name === "unreal_open_mcp_bridge_status") {
+    return resolveBridgeStatus(router);
   }
   // Unreachable: LOCAL_TOOLS membership is checked above and every member has
   // a handler branch. Defensive fallback keeps the call honest.
@@ -139,6 +162,122 @@ export function resetLiveRouterForTest(): void {
 }
 
 /**
+ * The Unreal project path the server is bound to, set by {@link getEnv} during
+ * `main()`. Exported so unit tests can point it at a temp dir to plant/read an
+ * instance lock without going through `main()`.
+ */
+let boundProjectPath: string | null = null;
+
+/**
+ * Set the bound project path used by {@link resolveBridgeStatus} to read the
+ * instance lock. Installed by `main()` after env resolution; exported so tests
+ * can drive bridge_status against a temp project without booting stdio.
+ */
+export function setBoundProjectPath(projectPath: string | null): void {
+  boundProjectPath = projectPath;
+}
+
+/**
+ * Resolve `unreal_open_mcp_bridge_status` in-process. Composes the instance-lock
+ * classifier with one /ping probe fired through the installed `router`, then
+ * maps the result with the pure `deriveBridgeStatus`. A dead / stopped bridge is
+ * a *successful* status read — this never returns `isError:true`.
+ *
+ * The project path comes from {@link boundProjectPath} (set by `main()`); when
+ * unset (a unit test that drives the handler directly), no lock is read and the
+ * lock-derived signals are absent (classification defaults to `gone`).
+ */
+async function resolveBridgeStatus(
+  router: Router | null,
+): Promise<CallToolResult> {
+  const projectPath = boundProjectPath;
+  const lock: InstanceLock | null = projectPath
+    ? readInstanceLock(projectPath)
+    : null;
+  const classification = classifyInstance(lock);
+
+  // Fire one /ping probe through the installed router. When no router is
+  // installed (pre-main wiring / a direct unit test), the probe is treated as
+  // failed — the status is then derived from the lock alone (stopped unless a
+  // stale-heartbeat lock classifies dead_bridge).
+  const ping = await probeBridge(router);
+
+  const status = deriveBridgeStatus({ classification, ping });
+
+  const body = {
+    status,
+    ready: status === "running",
+    projectPath: projectPath ?? null,
+    classification,
+    recoveryHint: bridgeStatusRecoveryHint(status),
+    instance: {
+      lockPath: projectPath ? lockPath(projectPath) : null,
+      classification,
+      lock: summarizeInstanceLock(lock),
+    },
+    ping:
+      ping !== null && ping.kind === "ok"
+        ? {
+            reachable: true,
+            connected: ping.connected,
+            compiling: ping.compiling ?? null,
+            isPlaying: ping.isPlaying ?? null,
+            unrealVersion: ping.unrealVersion ?? null,
+            bridgeVersion: ping.bridgeVersion ?? null,
+            mode: ping.mode ?? null,
+          }
+        : { reachable: false },
+    nextStep: bridgeStatusNextStep(status),
+  };
+
+  return {
+    content: [{ type: "text", text: JSON.stringify(body) }],
+    isError: false,
+  };
+}
+
+/**
+ * Fire one /ping probe through the router and parse the body into a
+ * {@link PingProbe}. Returns `{ kind: "fail" }` when the router is null, the
+ * probe returned an error, or the body did not parse — the status mapper only
+ * needs reachable-vs-fail plus the health fields on success.
+ */
+async function probeBridge(router: Router | null): Promise<PingProbe> {
+  if (!router) return { kind: "fail" };
+  let result: CallToolResult;
+  try {
+    result = await router.route("unreal_open_mcp_ping", {});
+  } catch {
+    return { kind: "fail" };
+  }
+  if (result.isError) return { kind: "fail" };
+  const first = result.content[0];
+  if (!first || first.type !== "text" || typeof first.text !== "string") {
+    return { kind: "fail" };
+  }
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(first.text);
+  } catch {
+    return { kind: "fail" };
+  }
+  if (!parsed || typeof parsed !== "object") return { kind: "fail" };
+  return {
+    kind: "ok",
+    connected: parsed.connected === true,
+    compiling:
+      typeof parsed.compiling === "boolean" ? parsed.compiling : undefined,
+    isPlaying:
+      typeof parsed.isPlaying === "boolean" ? parsed.isPlaying : undefined,
+    unrealVersion:
+      typeof parsed.unrealVersion === "string" ? parsed.unrealVersion : null,
+    bridgeVersion:
+      typeof parsed.bridgeVersion === "string" ? parsed.bridgeVersion : undefined,
+    mode: typeof parsed.mode === "string" ? parsed.mode : undefined,
+  };
+}
+
+/**
  * tools/list handler. Returns the visible tool set. The registry is empty in
  * P1.5; per-session group filtering lands later. Exported so unit tests can
  * call it directly without booting a stdio transport.
@@ -171,13 +310,15 @@ export async function handleCallTool(
       content: [{ type: "text", text: `Unknown tool: ${name}.${suffix}` }],
     };
   }
-  // Local-route tools resolve in-process — no bridge round-trip. The
-  // capabilities tool (P3.8) is the first; it works with the editor down
-  // because the rule/fix catalog is static and the tool list is in-memory.
+  // Local-route tools resolve in-process — no bridge POST round-trip. The
+  // capabilities tool (P3.8) works with the editor down because the rule/fix
+  // catalog is static and the tool list is in-memory. bridge_status (P5.7)
+  // composes the lock classifier + one /ping probe through the installed
+  // router; a dead/stopped bridge is a successful status read.
   // Resolve before the live-router check so a missing router never blocks a
   // local tool (and so a unit test with no router installed can still call
   // capabilities directly).
-  const localResult = await handleLocalTool(name, args ?? {});
+  const localResult = await handleLocalTool(name, args ?? {}, liveRouter);
   if (localResult !== null) {
     return localResult;
   }
@@ -287,6 +428,10 @@ function getEnv(): {
     );
   }
 
+  // Record the bound project path so bridge_status (P5.7) can read this
+  // project's instance lock without re-resolving env at call time.
+  setBoundProjectPath(projectPath);
+
   return { projectPath, port, authToken, envPort };
 }
 
@@ -344,8 +489,12 @@ if (entrypointUrl === import.meta.url) {
 //    CLI dispatch yet. P3.8 adds the first **local-route** tool
 //    (`unreal_open_mcp_capabilities`) — resolved in-process by
 //    `handleLocalTool` before the live-router check, so it works with the
-//    editor down. The full per-tool router (live / offline / local / batch)
-//    lands in Phase 8 and will absorb this dispatch into a `ToolRouter`.
+//    editor down. P5.7 adds the second local-route tool
+//    (`unreal_open_mcp_bridge_status`) — composes the lock classifier with one
+//    /ping probe fired through the installed router; `handleLocalTool` now
+//    receives the router so the probe reuses the same LiveClient path. The full
+//    per-tool router (live / offline / local / batch) lands in Phase 8 and will
+//    absorb this dispatch into a `ToolRouter`.
 //  - Handlers (`handleListTools`, `handleCallTool`) are exported standalone so
 //    tests can exercise them directly. Unity inlines them inside `createServer`
 //    and tests other modules; we export them so the dispatch + fallback paths

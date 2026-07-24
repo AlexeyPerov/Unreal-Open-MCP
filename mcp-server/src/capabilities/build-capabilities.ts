@@ -134,6 +134,11 @@ const TOOL_CATEGORY: Record<string, string> = {
   // (composes the lock classifier + one /ping probe in-process), read-only,
   // gate-free. Sits in the core meta bucket alongside ping / capabilities.
   unreal_open_mcp_bridge_status: "core",
+  // P6.1 — Blueprint family (blueprint_create / blueprint_get). create is
+  // mutating (route live, default gate Enforce, paths_hint required); get is
+  // read-only.
+  unreal_open_mcp_blueprint_create: "blueprint",
+  unreal_open_mcp_blueprint_get: "blueprint",
 };
 
 function categoryFor(toolName: string): string {

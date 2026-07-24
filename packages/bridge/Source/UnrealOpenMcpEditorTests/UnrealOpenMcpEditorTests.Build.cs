@@ -72,6 +72,13 @@ public class UnrealOpenMcpEditorTests : ModuleRules
 			// UnrealOpenMcpEditor (already a dep). Mirrors the editor module's
 			// P5.5 private deps for the encode surface.
 			"ImageWrapper",
+			// P6.1 — the blueprint-tools spec invokes the create/get handlers
+			// directly (Register + Invoke), stages an engine parent class, and
+			// asserts on the JSON output. It needs no Kismet headers of its own
+			// (the tool header forward-declares FEdGraphPinType) — UEditorAssetLibrary
+			// (AssetTools, already a dep) covers scratch-tree cleanup, and Json
+			// (already a dep) covers result parsing. The editor module's Kismet
+			// dep propagates transitively.
 			});
 
 		// Reach the editor module's PRIVATE headers so Automation specs can

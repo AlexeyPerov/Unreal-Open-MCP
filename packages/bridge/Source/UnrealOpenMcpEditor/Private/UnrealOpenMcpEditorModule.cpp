@@ -82,6 +82,15 @@
 // opaque-PNG, byte-capped; transient capture actors + render targets cleaned
 // up on every path.
 #include "Tools/UnrealOpenMcpScreenshotTools.h"
+// P6.1 — Blueprint family (blueprint_create / blueprint_get). create is
+// mutating (gate Enforce; paths_hint required) — FKismetEditorUtilities::
+// CreateBlueprint from a resolvable parent class with the any-UObject
+// collision probe. get is read-only — scoped graph summary for LLM
+// inspection (variables / components / functions / events / interfaces /
+// parent chain). The shared helpers (ResolveBlueprint, path normalize, name
+// validation, BlueprintRef JSON, pin-type reverse map) are the spine every
+// later P6 sub-plan builds on.
+#include "Tools/UnrealOpenMcpBlueprintTools.h"
 
 #include "HAL/PlatformProcess.h"
 #include "Misc/EngineVersion.h"
@@ -351,6 +360,14 @@ private:
 				// base64 PNG as MCP image content. Gate-free (reads pixels,
 				// mutates no editor/project state).
 				FUnrealOpenMcpScreenshotTools::Register(*ToolRegistry);
+
+				// P6.1 — Blueprint family (blueprint_create / blueprint_get).
+				// create is mutating (gate Enforce; paths_hint required) — new
+				// Blueprint class from a resolvable parent via
+				// FKismetEditorUtilities::CreateBlueprint, with the any-UObject
+				// collision probe + MarkAsGarbage cleanup on failure. get is
+				// read-only — scoped graph summary for LLM inspection.
+				FUnrealOpenMcpBlueprintTools::Register(*ToolRegistry);
 		}
 
 	// Owned. Constructed in StartupModule, torn down in ShutdownModule. The

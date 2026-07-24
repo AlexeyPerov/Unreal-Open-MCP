@@ -99,6 +99,16 @@ import { screenshotIsolated } from "./screenshot-isolated.js";
 // recovery hint points at console_get_logs as the interim offline surface
 // (the dedicated offline compile-error reader is deferred).
 import { bridgeStatus } from "./bridge-status.js";
+// P6.1 — Blueprint family (blueprint_create / blueprint_get). create is
+// mutating (default gate Enforce; paths_hint required) — new Blueprint class
+// from a resolvable parent via FKismetEditorUtilities::CreateBlueprint, with
+// the any-UObject collision probe. get is read-only — scoped graph summary
+// for inspection (variables / components / functions / events / interfaces /
+// parent chain). The shared bridge helpers (ResolveBlueprint, path normalize,
+// name validation, BlueprintRef JSON, pin-type reverse map) are the spine
+// every later P6 sub-plan builds on.
+import { blueprintCreate } from "./blueprint-create.js";
+import { blueprintGet } from "./blueprint-get.js";
 
 // Tool registry. P1.7 registers the first real tool — `unreal_open_mcp_ping` —
 // which the MCP server routes to the bridge's `GET /ping`. Each subsequent tool
@@ -227,4 +237,6 @@ export const ALL_TOOLS: Tool[] = [
   screenshotCamera,
   screenshotIsolated,
   bridgeStatus,
+  blueprintCreate,
+  blueprintGet,
 ];

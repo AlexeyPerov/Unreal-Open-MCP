@@ -220,7 +220,8 @@ test("integration: tools/list advertises unreal_open_mcp_ping", async () => {
     // material_create / material_modify / material_get_data; P5.1 added the
     // editor family; P5.2 added editor selection; P5.3 added the console
     // family; P5.4 added the reflection family; P5.5 added the screenshot
-    // family; P5.7 added bridge_status). Guard against accidental registry
+    // family; P5.7 added bridge_status; P6.1 added the Blueprint family —
+    // blueprint_create / blueprint_get). Guard against accidental registry
     // drift silently changing what the phase-gate smoke covers.
     assert.deepEqual(names, [
       "unreal_open_mcp_ping",
@@ -273,6 +274,8 @@ test("integration: tools/list advertises unreal_open_mcp_ping", async () => {
       "unreal_open_mcp_screenshot_camera",
       "unreal_open_mcp_screenshot_isolated",
       "unreal_open_mcp_bridge_status",
+      "unreal_open_mcp_blueprint_create",
+      "unreal_open_mcp_blueprint_get",
     ]);
   } finally {
     await cleanup();

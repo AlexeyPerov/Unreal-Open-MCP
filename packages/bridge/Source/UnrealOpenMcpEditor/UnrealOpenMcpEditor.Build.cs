@@ -105,6 +105,14 @@ public class UnrealOpenMcpEditor : ModuleRules
 			"ImageWrapper",
 			"RenderCore",
 			"RHI",
+			// P6.1 — Blueprint family (blueprint_create / blueprint_get). The
+			// Kismet module owns FKismetEditorUtilities (CreateBlueprint /
+			// CanCreateBlueprintOfClass) + FKismetNameValidator (name
+			// well-formedness). UBlueprint / UBlueprintGeneratedClass / the SCS
+			// node surface live in Engine (already a dep); the EdGraph + K2
+			// event node types live in Engine too. AssetRegistry (already a
+			// dep) owns FAssetRegistryModule::AssetCreated. Editor-only.
+			"Kismet",
 			});
 
 		// P3.5 scope: gate policy wired at the dispatch boundary. P4.1 adds

@@ -30,8 +30,11 @@
 #include "Engine/BlueprintGeneratedClass.h"
 #include "Engine/SimpleConstructionScript.h"
 #include "Engine/SCS_Node.h"
+#include "Components/ActorComponent.h"
+#include "Components/SceneComponent.h"
 
 #include "Kismet2/KismetEditorUtilities.h"
+#include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/Kismet2NameValidators.h"
 #include "EdGraphSchema_K2.h"
 #include "EdGraph/EdGraph.h"
@@ -40,6 +43,7 @@
 
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "UObject/UObjectGlobals.h"
+#include "UObject/UnrealType.h"
 #include "Misc/PackageName.h"
 
 #include "Dom/JsonObject.h"
@@ -534,7 +538,312 @@ void FUnrealOpenMcpBlueprintTools::Register(FUnrealOpenMcpToolRegistry& Registry
 				WriteJson(MakeShared<FJsonValueObject>(Out)));
 		});
 
+	// =========================================================================
+	// unreal_open_mcp_blueprint_add_component — add a node to the SCS graph.
+	// =========================================================================
+	//
+	// `path` is the Blueprint asset object path (package-path form also accepted
+	// via ResolveBlueprint's FindObject-first chain). `component_class` is a
+	// UActorComponent subclass path or short name resolved via the shared
+	// FUnrealOpenMcpObjectRef::ResolveClass. `name` is the new component's
+	// variable name. Optional `parent_component` attaches the new node under an
+	// existing SCS scene-component node; omitted → added as a root node.
+	//
+	// Guards (each maps to a structured error code, never an engine assert):
+	//   - no SimpleConstructionScript   → no_scs
+	//   - class not a UActorComponent   → invalid_component_class
+	//   - abstract / deprecated class   → abstract_component
+	//     (SCS CreateNode -> NewObject on such a class fatally asserts, e.g.
+	//     '/Script/Engine.LightComponentBase'; the ClassFlags check runs BEFORE
+	//     CreateNode so the fatal path is unreachable)
+	//   - name collision in the SCS     → name_collision
+	//   - name collides with a member var → name_collision
+	//     (SCS component names, member-variable names, and inherited parent
+	//     properties all share the generated class's property namespace, so a
+	//     clash only surfaces later at blueprint-compile — pre-check so the
+	//     agent gets a structured error instead of a delayed compile failure)
+	//   - name collides with a parent
+	//     class property                 → name_collision
+	//   - parent_component not found     → parent_not_found
+	//   - new class or parent not a
+	//     USceneComponent                → invalid_attachment
+	//     (attachment is a scene-graph op: both sides must be USceneComponents,
+	//     otherwise AddChildNode produces a non-attachable hierarchy)
+	//
+	// On success: USCS_Node minted via CreateNode, attached under the parent
+	// (AddChildNode) or added as a root (AddNode), then
+	// MarkBlueprintAsStructurallyModified so a later compile rebuilds the CDO.
+	//
+	// Mutating. The gate's mandatory `paths_hint` is enforced by the dispatcher
+	// BEFORE the handler runs.
+	Registry.Register(
+		TEXT("unreal_open_mcp_blueprint_add_component"),
+		[](const FString& Body) -> FUnrealOpenMcpToolDispatchResult
+		{
+			TSharedPtr<FJsonObject> Args = ParseBody(Body);
+			if (!Args.IsValid())
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("invalid_parameter"),
+					TEXT("Request body was not a valid JSON object."));
+			}
+
+			const FString Path = Args->HasTypedField<EJson::String>(TEXT("path"))
+				? Args->GetStringField(TEXT("path"))
+				: FString();
+			if (Path.IsEmpty())
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("missing_parameter"),
+					TEXT("'path' is required (Blueprint asset object path)."));
+			}
+
+			UBlueprint* Blueprint = FUnrealOpenMcpBlueprintHelpers::ResolveBlueprint(Path);
+			if (!Blueprint)
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("blueprint_not_found"),
+					FString::Printf(TEXT("Blueprint not found at '%s'."), *Path));
+			}
+
+			USimpleConstructionScript* SCS = Blueprint->SimpleConstructionScript;
+			if (!SCS)
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("no_scs"),
+					FString::Printf(TEXT("'%s' has no Simple Construction Script (not an Actor-based Blueprint?)."), *Blueprint->GetName()));
+			}
+
+			const FString CompName = Args->HasTypedField<EJson::String>(TEXT("name"))
+				? Args->GetStringField(TEXT("name"))
+				: FString();
+			if (CompName.IsEmpty())
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("missing_parameter"),
+					TEXT("'name' is required (variable name for the new component)."));
+			}
+
+			FString NameError;
+			if (!IsNameWellFormed(Blueprint, CompName, NameError))
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(TEXT("invalid_name"), NameError);
+			}
+
+			// Resolve the component class. Accept both `component_class`
+			// (snake_case) and the `componentClass` camelCase alias the way the
+			// create tool accepts parent_class / parentClass.
+			FString CompClassPath;
+			if (Args->HasTypedField<EJson::String>(TEXT("component_class")))
+			{
+				CompClassPath = Args->GetStringField(TEXT("component_class"));
+			}
+			else if (Args->HasTypedField<EJson::String>(TEXT("componentClass")))
+			{
+				CompClassPath = Args->GetStringField(TEXT("componentClass"));
+			}
+			if (CompClassPath.IsEmpty())
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("missing_parameter"),
+					TEXT("'component_class' is required (UActorComponent subclass path or short name)."));
+			}
+
+			UClass* CompClass = FUnrealOpenMcpObjectRef::ResolveClass(CompClassPath);
+			if (!CompClass || !CompClass->IsChildOf(UActorComponent::StaticClass()))
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("invalid_component_class"),
+					FString::Printf(TEXT("'%s' is not a UActorComponent subclass."), *CompClassPath));
+			}
+			// SCS CreateNode -> NewObject on the class; an abstract/deprecated
+			// class fatally asserts there (e.g. LightComponentBase). Reject up
+			// front with a structured error so the fatal path is unreachable.
+			if (CompClass->HasAnyClassFlags(CLASS_Abstract | CLASS_Deprecated | CLASS_NewerVersionExists))
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("abstract_component"),
+					FString::Printf(TEXT("'%s' is abstract/deprecated and cannot be instantiated as a component."), *CompClass->GetName()));
+			}
+
+			// Cross-namespace collision checks. SCS component names, member-
+			// variable names, and inherited parent properties all share the
+			// generated class's property namespace, so a clash only fails later
+			// at blueprint-compile. Pre-check each namespace and surface a
+			// structured name_collision instead of a delayed compile failure.
+			if (SCS->FindSCSNode(FName(*CompName)) != nullptr)
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("name_collision"),
+					FString::Printf(TEXT("a component named '%s' already exists."), *CompName));
+			}
+			if (FBlueprintEditorUtils::FindNewVariableIndex(Blueprint, FName(*CompName)) != INDEX_NONE)
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("name_collision"),
+					FString::Printf(TEXT("a variable named '%s' already exists, so a component cannot reuse that name."), *CompName));
+			}
+			if (Blueprint->ParentClass && FindFProperty<FProperty>(Blueprint->ParentClass, FName(*CompName)) != nullptr)
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("name_collision"),
+					FString::Printf(TEXT("'%s' is already a property on parent class '%s', so a component cannot reuse that name."), *CompName, *Blueprint->ParentClass->GetName()));
+			}
+
+			// Resolve the optional attach parent. Empty → root node.
+			FString ParentName;
+			if (Args->HasTypedField<EJson::String>(TEXT("parent_component")))
+			{
+				ParentName = Args->GetStringField(TEXT("parent_component"));
+			}
+			else if (Args->HasTypedField<EJson::String>(TEXT("parentComponent")))
+			{
+				ParentName = Args->GetStringField(TEXT("parentComponent"));
+			}
+			USCS_Node* ParentNode = ParentName.IsEmpty() ? nullptr : SCS->FindSCSNode(FName(*ParentName));
+			if (!ParentName.IsEmpty() && !ParentNode)
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("parent_not_found"),
+					FString::Printf(TEXT("parent component '%s' not found."), *ParentName));
+			}
+			// Attachment is a scene-graph operation: both the new component and
+			// its parent must be USceneComponents, otherwise AddChildNode
+			// produces an invalid (non-attachable) hierarchy.
+			if (ParentNode)
+			{
+				if (!CompClass->IsChildOf(USceneComponent::StaticClass()))
+				{
+					return FUnrealOpenMcpToolDispatchResult::Fail(
+						TEXT("invalid_attachment"),
+						FString::Printf(TEXT("'%s' is not a USceneComponent, so it cannot be attached under a parent component."), *CompClass->GetName()));
+				}
+				if (!ParentNode->ComponentClass || !ParentNode->ComponentClass->IsChildOf(USceneComponent::StaticClass()))
+				{
+					return FUnrealOpenMcpToolDispatchResult::Fail(
+						TEXT("invalid_attachment"),
+						FString::Printf(TEXT("parent component '%s' is not a USceneComponent and cannot host child components."), *ParentName));
+				}
+			}
+
+			USCS_Node* NewNode = SCS->CreateNode(CompClass, FName(*CompName));
+			if (!NewNode)
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("create_failed"),
+					TEXT("USimpleConstructionScript::CreateNode returned null."));
+			}
+
+			if (ParentNode)
+			{
+				ParentNode->AddChildNode(NewNode);
+			}
+			else
+			{
+				SCS->AddNode(NewNode);
+			}
+
+			FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+
+			UE_LOG(
+				LogUnrealOpenMcp, Log,
+				TEXT("[Unreal Open MCP] blueprint_add_component: '%s' (%s)%s on '%s'."),
+				*CompName, *CompClass->GetName(),
+				ParentNode ? *FString::Printf(TEXT(" under '%s'"), *ParentName) : TEXT(""),
+				*Blueprint->GetName());
+
+			TSharedRef<FJsonObject> Out = MakeShared<FJsonObject>();
+			Out->SetStringField(TEXT("component"), CompName);
+			Out->SetStringField(TEXT("class"), CompClass->GetName());
+			return FUnrealOpenMcpToolDispatchResult::Ok(
+				WriteJson(MakeShared<FJsonValueObject>(Out)));
+		}, FUnrealOpenMcpToolMetadata::Mutating());
+
+	// =========================================================================
+	// unreal_open_mcp_blueprint_remove_component — delete an SCS node.
+	// =========================================================================
+	//
+	// `path` is the Blueprint asset object path; `name` is the variable name of
+	// the SCS node to remove. RemoveNodeAndPromoteChildren deletes the node and
+	// re-parents any child scene-component nodes onto the removed node's parent
+	// (so a subtree is never orphaned). MarkBlueprintAsStructurallyModified
+	// follows so a later compile rebuilds the CDO without the component.
+	//
+	// Structured errors:
+	//   - blueprint_not_found  — no Blueprint at `path`
+	//   - no_scs               — Blueprint has no SimpleConstructionScript
+	//   - component_not_found  — no SCS node with that variable name
+	//
+	// Mutating. The gate's mandatory `paths_hint` is enforced by the dispatcher
+	// BEFORE the handler runs.
+	Registry.Register(
+		TEXT("unreal_open_mcp_blueprint_remove_component"),
+		[](const FString& Body) -> FUnrealOpenMcpToolDispatchResult
+		{
+			TSharedPtr<FJsonObject> Args = ParseBody(Body);
+			if (!Args.IsValid())
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("invalid_parameter"),
+					TEXT("Request body was not a valid JSON object."));
+			}
+
+			const FString Path = Args->HasTypedField<EJson::String>(TEXT("path"))
+				? Args->GetStringField(TEXT("path"))
+				: FString();
+			if (Path.IsEmpty())
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("missing_parameter"),
+					TEXT("'path' is required (Blueprint asset object path)."));
+			}
+
+			UBlueprint* Blueprint = FUnrealOpenMcpBlueprintHelpers::ResolveBlueprint(Path);
+			if (!Blueprint)
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("blueprint_not_found"),
+					FString::Printf(TEXT("Blueprint not found at '%s'."), *Path));
+			}
+
+			USimpleConstructionScript* SCS = Blueprint->SimpleConstructionScript;
+			if (!SCS)
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("no_scs"),
+					FString::Printf(TEXT("'%s' has no Simple Construction Script."), *Blueprint->GetName()));
+			}
+
+			const FString CompName = Args->HasTypedField<EJson::String>(TEXT("name"))
+				? Args->GetStringField(TEXT("name"))
+				: FString();
+			if (CompName.IsEmpty())
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("missing_parameter"),
+					TEXT("'name' is required (variable name of the SCS component node to remove)."));
+			}
+
+			USCS_Node* Node = SCS->FindSCSNode(FName(*CompName));
+			if (!Node)
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("component_not_found"),
+					FString::Printf(TEXT("component '%s' not found on '%s'."), *CompName, *Blueprint->GetName()));
+			}
+
+			SCS->RemoveNodeAndPromoteChildren(Node);
+			FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+
+			UE_LOG(
+				LogUnrealOpenMcp, Log,
+				TEXT("[Unreal Open MCP] blueprint_remove_component: '%s' from '%s'."),
+				*CompName, *Blueprint->GetName());
+
+			return FUnrealOpenMcpToolDispatchResult::Ok();
+		}, FUnrealOpenMcpToolMetadata::Mutating());
+
 	UE_LOG(
 		LogUnrealOpenMcp, Log,
-		TEXT("[Unreal Open MCP] blueprint tools registered: unreal_open_mcp_blueprint_create, unreal_open_mcp_blueprint_get"));
+		TEXT("[Unreal Open MCP] blueprint tools registered: unreal_open_mcp_blueprint_create, unreal_open_mcp_blueprint_get, unreal_open_mcp_blueprint_add_component, unreal_open_mcp_blueprint_remove_component"));
 }

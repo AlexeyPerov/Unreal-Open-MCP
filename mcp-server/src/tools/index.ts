@@ -109,6 +109,19 @@ import { bridgeStatus } from "./bridge-status.js";
 // every later P6 sub-plan builds on.
 import { blueprintCreate } from "./blueprint-create.js";
 import { blueprintGet } from "./blueprint-get.js";
+// P6.2 — Blueprint SCS components (blueprint_add_component /
+// blueprint_remove_component). Both mutating (default gate Enforce;
+// paths_hint required). add_component creates an SCS node via the public SCS
+// surface (CreateNode + AddChildNode under an optional scene-component parent,
+// or AddNode for a root) with guards that reject abstract/deprecated classes
+// (CreateNode -> NewObject would fatally assert), cross-namespace name
+// collisions (SCS ↔ member vars ↔ parent properties), and non-scene
+// attachment. remove_component deletes a node via
+// RemoveNodeAndPromoteChildren (children re-parented onto the removed node's
+// parent). Both mark the Blueprint structurally modified so a later compile
+// rebuilds the CDO.
+import { blueprintAddComponent } from "./blueprint-add-component.js";
+import { blueprintRemoveComponent } from "./blueprint-remove-component.js";
 
 // Tool registry. P1.7 registers the first real tool — `unreal_open_mcp_ping` —
 // which the MCP server routes to the bridge's `GET /ping`. Each subsequent tool
@@ -239,4 +252,6 @@ export const ALL_TOOLS: Tool[] = [
   bridgeStatus,
   blueprintCreate,
   blueprintGet,
+  blueprintAddComponent,
+  blueprintRemoveComponent,
 ];

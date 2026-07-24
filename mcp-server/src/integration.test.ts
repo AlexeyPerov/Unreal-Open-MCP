@@ -221,8 +221,10 @@ test("integration: tools/list advertises unreal_open_mcp_ping", async () => {
     // editor family; P5.2 added editor selection; P5.3 added the console
     // family; P5.4 added the reflection family; P5.5 added the screenshot
     // family; P5.7 added bridge_status; P6.1 added the Blueprint family —
-    // blueprint_create / blueprint_get). Guard against accidental registry
-    // drift silently changing what the phase-gate smoke covers.
+    // blueprint_create / blueprint_get; P6.2 added the Blueprint SCS component
+    // pair — blueprint_add_component / blueprint_remove_component). Guard
+    // against accidental registry drift silently changing what the phase-gate
+    // smoke covers.
     assert.deepEqual(names, [
       "unreal_open_mcp_ping",
       "unreal_open_mcp_actor_find",
@@ -276,6 +278,8 @@ test("integration: tools/list advertises unreal_open_mcp_ping", async () => {
       "unreal_open_mcp_bridge_status",
       "unreal_open_mcp_blueprint_create",
       "unreal_open_mcp_blueprint_get",
+      "unreal_open_mcp_blueprint_add_component",
+      "unreal_open_mcp_blueprint_remove_component",
     ]);
   } finally {
     await cleanup();

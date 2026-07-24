@@ -139,6 +139,12 @@ const TOOL_CATEGORY: Record<string, string> = {
   // read-only.
   unreal_open_mcp_blueprint_create: "blueprint",
   unreal_open_mcp_blueprint_get: "blueprint",
+  // P6.2 — Blueprint SCS components (blueprint_add_component /
+  // blueprint_remove_component). Both mutating (route live, default gate
+  // Enforce, paths_hint required) — add/remove nodes on the Blueprint's
+  // Simple Construction Script.
+  unreal_open_mcp_blueprint_add_component: "blueprint",
+  unreal_open_mcp_blueprint_remove_component: "blueprint",
 };
 
 function categoryFor(toolName: string): string {

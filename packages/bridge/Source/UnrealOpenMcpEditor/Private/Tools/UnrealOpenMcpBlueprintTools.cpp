@@ -44,7 +44,9 @@
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "UObject/UObjectGlobals.h"
 #include "UObject/UnrealType.h"
+#include "UObject/Object.h"            // FPropertyChangedEvent + PreEditChange/PostEditChangeProperty
 #include "Misc/PackageName.h"
+#include "Misc/OutputDevice.h"         // FOutputDevice base for the import-error capture device
 
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
@@ -180,6 +182,78 @@ namespace
 			Obj->SetStringField(TEXT("parentClass"), Blueprint->ParentClass->GetPathName());
 		}
 		return Obj;
+	}
+
+	// ---- §3.2 pin-type forward mapping (type string -> FEdGraphPinType) --------
+	//
+	// The forward twin of the FUnrealOpenMcpBlueprintHelpers::PinTypeToString
+	// reverse map that blueprint_get already uses. Shared by the variable add +
+	// modify handlers so the type tokens round-trip through the same string space
+	// the read surface reports. Behavior reference (read-only): Unreal-MCP's
+	// MakePinType.
+
+	/** Map a friendly type token to a Blueprint pin type. Recognised primitives
+	 *  plus the common math structs; anything else is resolved as an object /
+	 *  struct path (a UClass via the shared resolver, or a UScriptStruct via a
+	 *  quiet load). Returns false when the token names an object/struct path that
+	 *  cannot be resolved. `bIsArray` wraps the type in an array container. */
+	bool MakePinType(const FString& InType, bool bIsArray, FEdGraphPinType& OutPinType, FString& OutError)
+	{
+		const FString Type = InType.TrimStartAndEnd();
+		const FString Lower = Type.ToLower();
+
+		auto Set = [&OutPinType](FName Category, FName SubCategory, UObject* SubObject)
+		{
+			OutPinType = FEdGraphPinType();
+			OutPinType.PinCategory = Category;
+			OutPinType.PinSubCategory = SubCategory;
+			OutPinType.PinSubCategoryObject = SubObject;
+		};
+
+		if (Lower == TEXT("bool") || Lower == TEXT("boolean"))
+			Set(UEdGraphSchema_K2::PC_Boolean, NAME_None, nullptr);
+		else if (Lower == TEXT("int") || Lower == TEXT("integer") || Lower == TEXT("int32"))
+			Set(UEdGraphSchema_K2::PC_Int, NAME_None, nullptr);
+		else if (Lower == TEXT("int64"))
+			Set(UEdGraphSchema_K2::PC_Int64, NAME_None, nullptr);
+		else if (Lower == TEXT("byte"))
+			Set(UEdGraphSchema_K2::PC_Byte, NAME_None, nullptr);
+		else if (Lower == TEXT("float") || Lower == TEXT("double") || Lower == TEXT("number") || Lower == TEXT("real"))
+			Set(UEdGraphSchema_K2::PC_Real, UEdGraphSchema_K2::PC_Double, nullptr);
+		else if (Lower == TEXT("string"))
+			Set(UEdGraphSchema_K2::PC_String, NAME_None, nullptr);
+		else if (Lower == TEXT("name"))
+			Set(UEdGraphSchema_K2::PC_Name, NAME_None, nullptr);
+		else if (Lower == TEXT("text"))
+			Set(UEdGraphSchema_K2::PC_Text, NAME_None, nullptr);
+		else if (Lower == TEXT("vector"))
+			Set(UEdGraphSchema_K2::PC_Struct, NAME_None, TBaseStructure<FVector>::Get());
+		else if (Lower == TEXT("vector2d"))
+			Set(UEdGraphSchema_K2::PC_Struct, NAME_None, TBaseStructure<FVector2D>::Get());
+		else if (Lower == TEXT("rotator"))
+			Set(UEdGraphSchema_K2::PC_Struct, NAME_None, TBaseStructure<FRotator>::Get());
+		else if (Lower == TEXT("transform"))
+			Set(UEdGraphSchema_K2::PC_Struct, NAME_None, TBaseStructure<FTransform>::Get());
+		else if (Lower == TEXT("color") || Lower == TEXT("linearcolor"))
+			Set(UEdGraphSchema_K2::PC_Struct, NAME_None, TBaseStructure<FLinearColor>::Get());
+		else
+		{
+			// Object / class / struct path: resolve to a UClass (object ref) via
+			// the shared resolver, or a UScriptStruct via a quiet load. A miss on
+			// both turns into a structured invalid_type rather than an assert.
+			if (UClass* Class = FUnrealOpenMcpObjectRef::ResolveClass(Type))
+				Set(UEdGraphSchema_K2::PC_Object, NAME_None, Class);
+			else if (UScriptStruct* Struct = LoadObject<UScriptStruct>(nullptr, *Type, nullptr, LOAD_NoWarn | LOAD_Quiet))
+				Set(UEdGraphSchema_K2::PC_Struct, NAME_None, Struct);
+			else
+			{
+				OutError = FString::Printf(TEXT("unknown variable type '%s' (expected a primitive, a math struct, or a resolvable object/struct path)"), *Type);
+				return false;
+			}
+		}
+
+		OutPinType.ContainerType = bIsArray ? EPinContainerType::Array : EPinContainerType::None;
+		return true;
 	}
 }
 
@@ -843,7 +917,441 @@ void FUnrealOpenMcpBlueprintTools::Register(FUnrealOpenMcpToolRegistry& Registry
 			return FUnrealOpenMcpToolDispatchResult::Ok();
 		}, FUnrealOpenMcpToolMetadata::Mutating());
 
+	// =========================================================================
+	// unreal_open_mcp_blueprint_add_variable — typed member variable.
+	// =========================================================================
+	//
+	// `path` is the Blueprint asset object path (package-path form also accepted
+	// via ResolveBlueprint's FindObject-first chain). `name` is the new member
+	// variable name; `type` is a pin-type token (bool/int/int64/byte/float/double/
+	// string/name/text/vector/vector2d/rotator/transform/color, or a resolvable
+	// object/struct path). Optional `is_array` wraps the type in an array.
+	// Optional `default_value` is stored on the variable descriptor (UE text
+	// format — it only takes effect after a compile lands the property on the
+	// generated class). Uses FBlueprintEditorUtils::AddMemberVariable.
+	//
+	// Guards (each maps to a structured error code):
+	//   - name collision with an existing member variable → name_collision
+	//   - name collision with an SCS component / parent-class property
+	//     → name_collision
+	//     (member-variable names, SCS component names, and inherited parent
+	//     properties all share the generated class's property namespace, so a
+	//     clash only surfaces at blueprint-compile — pre-check so the agent gets
+	//     a structured error instead of a delayed compile failure)
+	//   - unresolvable type token → invalid_type
+	//   - AddMemberVariable refusal → add_failed
+	//
+	// Mutating. The gate's mandatory `paths_hint` is enforced by the dispatcher
+	// BEFORE the handler runs.
+	Registry.Register(
+		TEXT("unreal_open_mcp_blueprint_add_variable"),
+		[](const FString& Body) -> FUnrealOpenMcpToolDispatchResult
+		{
+			TSharedPtr<FJsonObject> Args = ParseBody(Body);
+			if (!Args.IsValid())
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("invalid_parameter"),
+					TEXT("Request body was not a valid JSON object."));
+			}
+
+			const FString Path = Args->HasTypedField<EJson::String>(TEXT("path"))
+				? Args->GetStringField(TEXT("path"))
+				: FString();
+			if (Path.IsEmpty())
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("missing_parameter"),
+					TEXT("'path' is required (Blueprint asset object path)."));
+			}
+
+			UBlueprint* Blueprint = FUnrealOpenMcpBlueprintHelpers::ResolveBlueprint(Path);
+			if (!Blueprint)
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("blueprint_not_found"),
+					FString::Printf(TEXT("Blueprint not found at '%s'."), *Path));
+			}
+
+			const FString VarName = Args->HasTypedField<EJson::String>(TEXT("name"))
+				? Args->GetStringField(TEXT("name"))
+				: FString();
+			if (VarName.IsEmpty())
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("missing_parameter"),
+					TEXT("'name' is required (new variable name)."));
+			}
+			FString NameError;
+			if (!IsNameWellFormed(Blueprint, VarName, NameError))
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(TEXT("invalid_name"), NameError);
+			}
+
+			const FString TypeToken = Args->HasTypedField<EJson::String>(TEXT("type"))
+				? Args->GetStringField(TEXT("type"))
+				: FString();
+			if (TypeToken.IsEmpty())
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("missing_parameter"),
+					TEXT("'type' is required (a primitive, a math struct, or a resolvable object/struct path)."));
+			}
+
+			// Cross-namespace collision checks. Member-variable names, SCS
+			// component names, and inherited parent properties all share the
+			// generated class's property namespace, so a clash only fails later
+			// at blueprint-compile. Pre-check each namespace and surface a
+			// structured name_collision instead of a delayed compile failure.
+			if (FBlueprintEditorUtils::FindNewVariableIndex(Blueprint, FName(*VarName)) != INDEX_NONE)
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("name_collision"),
+					FString::Printf(TEXT("a variable named '%s' already exists."), *VarName));
+			}
+			if (Blueprint->SimpleConstructionScript
+				&& Blueprint->SimpleConstructionScript->FindSCSNode(FName(*VarName)) != nullptr)
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("name_collision"),
+					FString::Printf(TEXT("a component named '%s' already exists, so a variable cannot reuse that name."), *VarName));
+			}
+			if (Blueprint->ParentClass && FindFProperty<FProperty>(Blueprint->ParentClass, FName(*VarName)) != nullptr)
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("name_collision"),
+					FString::Printf(TEXT("'%s' is already a property on parent class '%s', so a variable cannot reuse that name."), *VarName, *Blueprint->ParentClass->GetName()));
+			}
+
+			const bool bIsArray = Args->HasTypedField<EJson::Boolean>(TEXT("is_array"))
+				? Args->GetBoolField(TEXT("is_array"))
+				: false;
+
+			FEdGraphPinType PinType;
+			FString PinError;
+			if (!MakePinType(TypeToken, bIsArray, PinType, PinError))
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(TEXT("invalid_type"), PinError);
+			}
+
+			const FString DefaultValue = Args->HasTypedField<EJson::String>(TEXT("default_value"))
+				? Args->GetStringField(TEXT("default_value"))
+				: FString();
+
+			if (!FBlueprintEditorUtils::AddMemberVariable(Blueprint, FName(*VarName), PinType, DefaultValue))
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("add_failed"),
+					FString::Printf(TEXT("AddMemberVariable failed for '%s' (the type may be unsupported as a member variable)."), *VarName));
+			}
+
+			FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
+
+			UE_LOG(
+				LogUnrealOpenMcp, Log,
+				TEXT("[Unreal Open MCP] blueprint_add_variable: '%s' (%s) on '%s'."),
+				*VarName, *FUnrealOpenMcpBlueprintHelpers::PinTypeToString(PinType), *Blueprint->GetName());
+
+			TSharedRef<FJsonObject> Out = MakeShared<FJsonObject>();
+			Out->SetStringField(TEXT("variable"), VarName);
+			Out->SetStringField(TEXT("type"), FUnrealOpenMcpBlueprintHelpers::PinTypeToString(PinType));
+			return FUnrealOpenMcpToolDispatchResult::Ok(
+				WriteJson(MakeShared<FJsonValueObject>(Out)));
+		}, FUnrealOpenMcpToolMetadata::Mutating());
+
+	// =========================================================================
+	// unreal_open_mcp_blueprint_modify_variable — rename and/or retype.
+	// =========================================================================
+	//
+	// `path` is the Blueprint asset object path; `name` is the existing member
+	// variable. At least one of `new_name` / `new_type` is required. `new_type`
+	// re-parses a pin-type token (with an optional `is_array`); `new_name`
+	// renames. Validate-before-mutate ordering: the rename is validated (well-
+	// formed + no collision) BEFORE the retype commits, so a colliding or
+	// ill-formed new_name never leaves a partial mutation (retype landed, rename
+	// failed). ChangeMemberVariableType commits immediately; RenameMemberVariable
+	// is void and does no collision check of its own, so renaming onto an
+	// existing name would silently produce duplicate member names that break a
+	// later compile — both are pre-checked here.
+	//
+	// Structured errors:
+	//   - variable_not_found   — name names no member variable
+	//   - missing_parameter    — neither new_name nor new_type
+	//   - name_collision       — new_name already used by a variable/component/
+	//                            parent property
+	//   - invalid_type         — new_type did not resolve
+	//   - invalid_name         — new_name failed the Kismet name validator
+	//
+	// Mutating. The gate's mandatory `paths_hint` is enforced by the dispatcher
+	// BEFORE the handler runs.
+	Registry.Register(
+		TEXT("unreal_open_mcp_blueprint_modify_variable"),
+		[](const FString& Body) -> FUnrealOpenMcpToolDispatchResult
+		{
+			TSharedPtr<FJsonObject> Args = ParseBody(Body);
+			if (!Args.IsValid())
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("invalid_parameter"),
+					TEXT("Request body was not a valid JSON object."));
+			}
+
+			const FString Path = Args->HasTypedField<EJson::String>(TEXT("path"))
+				? Args->GetStringField(TEXT("path"))
+				: FString();
+			if (Path.IsEmpty())
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("missing_parameter"),
+					TEXT("'path' is required (Blueprint asset object path)."));
+			}
+
+			UBlueprint* Blueprint = FUnrealOpenMcpBlueprintHelpers::ResolveBlueprint(Path);
+			if (!Blueprint)
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("blueprint_not_found"),
+					FString::Printf(TEXT("Blueprint not found at '%s'."), *Path));
+			}
+
+			const FString VarName = Args->HasTypedField<EJson::String>(TEXT("name"))
+				? Args->GetStringField(TEXT("name"))
+				: FString();
+			if (VarName.IsEmpty())
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("missing_parameter"),
+					TEXT("'name' is required (existing variable name)."));
+			}
+			if (FBlueprintEditorUtils::FindNewVariableIndex(Blueprint, FName(*VarName)) == INDEX_NONE)
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("variable_not_found"),
+					FString::Printf(TEXT("variable '%s' not found on '%s'."), *VarName, *Blueprint->GetName()));
+			}
+
+			const FString NewName = Args->HasTypedField<EJson::String>(TEXT("new_name"))
+				? Args->GetStringField(TEXT("new_name"))
+				: FString();
+			const FString NewType = Args->HasTypedField<EJson::String>(TEXT("new_type"))
+				? Args->GetStringField(TEXT("new_type"))
+				: FString();
+			if (NewName.IsEmpty() && NewType.IsEmpty())
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("missing_parameter"),
+					TEXT("Provide at least one of 'new_name' or 'new_type'."));
+			}
+
+			FName EffectiveName = FName(*VarName);
+
+			// Validate the rename BEFORE any mutation. ChangeMemberVariableType
+			// commits immediately, so if a colliding/ill-formed new_name were
+			// checked afterwards the tool would report failure while the type
+			// change had already landed — the agent's model and the asset would
+			// disagree. RenameMemberVariable is void and does no
+			// validity/collision check of its own — renaming onto an existing
+			// name silently produces duplicate member names that break a later
+			// compile.
+			if (!NewName.IsEmpty())
+			{
+				FString NameError;
+				if (!IsNameWellFormed(Blueprint, NewName, NameError))
+				{
+					return FUnrealOpenMcpToolDispatchResult::Fail(TEXT("invalid_name"), NameError);
+				}
+				if (FBlueprintEditorUtils::FindNewVariableIndex(Blueprint, FName(*NewName)) != INDEX_NONE)
+				{
+					return FUnrealOpenMcpToolDispatchResult::Fail(
+						TEXT("name_collision"),
+						FString::Printf(TEXT("cannot rename to '%s': a variable with that name already exists."), *NewName));
+				}
+				if (Blueprint->SimpleConstructionScript
+					&& Blueprint->SimpleConstructionScript->FindSCSNode(FName(*NewName)) != nullptr)
+				{
+					return FUnrealOpenMcpToolDispatchResult::Fail(
+						TEXT("name_collision"),
+						FString::Printf(TEXT("cannot rename to '%s': a component with that name already exists."), *NewName));
+				}
+				if (Blueprint->ParentClass && FindFProperty<FProperty>(Blueprint->ParentClass, FName(*NewName)) != nullptr)
+				{
+					return FUnrealOpenMcpToolDispatchResult::Fail(
+						TEXT("name_collision"),
+						FString::Printf(TEXT("cannot rename to '%s': it is already a property on parent class '%s'."), *NewName, *Blueprint->ParentClass->GetName()));
+				}
+			}
+
+			if (!NewType.IsEmpty())
+			{
+				const bool bIsArray = Args->HasTypedField<EJson::Boolean>(TEXT("is_array"))
+					? Args->GetBoolField(TEXT("is_array"))
+					: false;
+				FEdGraphPinType PinType;
+				FString PinError;
+				if (!MakePinType(NewType, bIsArray, PinType, PinError))
+				{
+					return FUnrealOpenMcpToolDispatchResult::Fail(TEXT("invalid_type"), PinError);
+				}
+				FBlueprintEditorUtils::ChangeMemberVariableType(Blueprint, EffectiveName, PinType);
+			}
+			if (!NewName.IsEmpty())
+			{
+				FBlueprintEditorUtils::RenameMemberVariable(Blueprint, EffectiveName, FName(*NewName));
+				EffectiveName = FName(*NewName);
+			}
+
+			FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
+
+			UE_LOG(
+				LogUnrealOpenMcp, Log,
+				TEXT("[Unreal Open MCP] blueprint_modify_variable: '%s' on '%s' (now '%s')."),
+				*VarName, *Blueprint->GetName(), *EffectiveName.ToString());
+
+			TSharedRef<FJsonObject> Out = MakeShared<FJsonObject>();
+			Out->SetStringField(TEXT("variable"), EffectiveName.ToString());
+			return FUnrealOpenMcpToolDispatchResult::Ok(
+				WriteJson(MakeShared<FJsonValueObject>(Out)));
+		}, FUnrealOpenMcpToolMetadata::Mutating());
+
+	// =========================================================================
+	// unreal_open_mcp_blueprint_set_default — CDO property write.
+	// =========================================================================
+	//
+	// `path` is the Blueprint asset object path; `property` is a property name on
+	// the generated class; `value` is the value in UE text format (numbers,
+	// '(X=1,Y=2,Z=3)' for structs, asset paths for object refs). Writes the
+	// Class Default Object via the property's own text importer
+	// (ImportText_Direct), bracketed with Pre/PostEditChangeProperty so an open
+	// Details panel / property-change observers refresh. This changes the CLASS
+	// DEFAULT, so it affects newly-spawned instances only — not actors already
+	// placed in a level.
+	//
+	// Compile-first: a member variable added via blueprint_add_variable is NOT
+	// yet a property on the generated class until a compile lands it. set_default
+	// on such a property reports property_not_found with a message that points at
+	// blueprint_compile.
+	//
+	// Structured errors:
+	//   - no_generated_class — Blueprint has no GeneratedClass (compile first)
+	//   - property_not_found — property absent on the generated class
+	//   - import_failed      — ImportText_Direct could not parse the value
+	//
+	// Mutating. The gate's mandatory `paths_hint` is enforced by the dispatcher
+	// BEFORE the handler runs.
+	Registry.Register(
+		TEXT("unreal_open_mcp_blueprint_set_default"),
+		[](const FString& Body) -> FUnrealOpenMcpToolDispatchResult
+		{
+			TSharedPtr<FJsonObject> Args = ParseBody(Body);
+			if (!Args.IsValid())
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("invalid_parameter"),
+					TEXT("Request body was not a valid JSON object."));
+			}
+
+			const FString Path = Args->HasTypedField<EJson::String>(TEXT("path"))
+				? Args->GetStringField(TEXT("path"))
+				: FString();
+			if (Path.IsEmpty())
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("missing_parameter"),
+					TEXT("'path' is required (Blueprint asset object path)."));
+			}
+
+			UBlueprint* Blueprint = FUnrealOpenMcpBlueprintHelpers::ResolveBlueprint(Path);
+			if (!Blueprint)
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("blueprint_not_found"),
+					FString::Printf(TEXT("Blueprint not found at '%s'."), *Path));
+			}
+
+			UClass* GeneratedClass = Blueprint->GeneratedClass;
+			if (!GeneratedClass)
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("no_generated_class"),
+					TEXT("Blueprint has no GeneratedClass; compile it first (blueprint_compile)."));
+			}
+
+			UObject* CDO = GeneratedClass->GetDefaultObject();
+			if (!CDO)
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("no_generated_class"),
+					TEXT("Could not resolve the Class Default Object."));
+			}
+
+			const FString PropName = Args->HasTypedField<EJson::String>(TEXT("property"))
+				? Args->GetStringField(TEXT("property"))
+				: FString();
+			if (PropName.IsEmpty())
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("missing_parameter"),
+					TEXT("'property' is required (CDO property name)."));
+			}
+			FProperty* Prop = FindFProperty<FProperty>(GeneratedClass, FName(*PropName));
+			if (!Prop)
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("property_not_found"),
+					FString::Printf(TEXT("property '%s' not found on '%s' (if you just added it via blueprint_add_variable, run blueprint_compile first so it lands on the generated class)."), *PropName, *GeneratedClass->GetName()));
+			}
+
+			const FString Value = Args->HasTypedField<EJson::String>(TEXT("value"))
+				? Args->GetStringField(TEXT("value"))
+				: FString();
+
+			void* ValuePtr = Prop->ContainerPtrToValuePtr<void>(CDO);
+			// Bracket the CDO write with Pre/PostEditChangeProperty so any open
+			// Details panel or property-change observers refresh — ImportText
+			// alone mutates the memory silently. PostEditChangeProperty runs on
+			// every path because a parse failure can still leave the value
+			// partially written. The error-capture device is a self-contained
+			// FOutputDevice (the engine's FStringOutputDevice header home has
+			// moved across UE versions), mirroring the ConsoleTools capture
+			// pattern.
+			class FImportErrorCapture : public FOutputDevice
+			{
+			public:
+				virtual void Serialize(const TCHAR* V, ELogVerbosity::Type, const FName&) override
+				{
+					if (!Errors.IsEmpty()) Errors += TEXT('\n');
+					Errors += V;
+				}
+				FString Errors;
+			};
+			FImportErrorCapture ErrorCapture;
+			CDO->PreEditChange(Prop);
+			const TCHAR* Result = Prop->ImportText_Direct(*Value, ValuePtr, CDO, PPF_None, &ErrorCapture);
+			FPropertyChangedEvent ChangeEvent(Prop);
+			CDO->PostEditChangeProperty(ChangeEvent);
+			if (Result == nullptr || !ErrorCapture.Errors.IsEmpty())
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("import_failed"),
+					FString::Printf(TEXT("Failed to parse value '%s' for property '%s': %s"), *Value, *PropName, *ErrorCapture.Errors));
+			}
+
+			CDO->MarkPackageDirty();
+			FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
+
+			UE_LOG(
+				LogUnrealOpenMcp, Log,
+				TEXT("[Unreal Open MCP] blueprint_set_default: %s.%s = %s (affects new instances only)."),
+				*Blueprint->GetName(), *PropName, *Value);
+
+			TSharedRef<FJsonObject> Out = MakeShared<FJsonObject>();
+			Out->SetStringField(TEXT("property"), PropName);
+			Out->SetStringField(TEXT("value"), Value);
+			return FUnrealOpenMcpToolDispatchResult::Ok(
+				WriteJson(MakeShared<FJsonValueObject>(Out)));
+		}, FUnrealOpenMcpToolMetadata::Mutating());
+
 	UE_LOG(
 		LogUnrealOpenMcp, Log,
-		TEXT("[Unreal Open MCP] blueprint tools registered: unreal_open_mcp_blueprint_create, unreal_open_mcp_blueprint_get, unreal_open_mcp_blueprint_add_component, unreal_open_mcp_blueprint_remove_component"));
+		TEXT("[Unreal Open MCP] blueprint tools registered: unreal_open_mcp_blueprint_create, unreal_open_mcp_blueprint_get, unreal_open_mcp_blueprint_add_component, unreal_open_mcp_blueprint_remove_component, unreal_open_mcp_blueprint_add_variable, unreal_open_mcp_blueprint_modify_variable, unreal_open_mcp_blueprint_set_default"));
 }

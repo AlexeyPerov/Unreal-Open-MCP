@@ -37,8 +37,38 @@
 //     variable name via RemoveNodeAndPromoteChildren (children re-parented onto
 //     the removed node's parent so a subtree is never orphaned) +
 //     MarkBlueprintAsStructurallyModified.
+//   - `unreal_open_mcp_blueprint_add_variable` — add a typed member variable via
+//     FBlueprintEditorUtils::AddMemberVariable using the §3.2 pin-type forward
+//     map (the forward twin of the PinTypeToString reverse map blueprint_get
+//     already uses). `type` accepts a primitive (bool/int/int64/byte/float/
+//     string/name/text), a math struct (vector/vector2d/rotator/transform/color),
+//     or a resolvable object/struct path; `is_array` wraps it in an array;
+//     `default_value` (UE text format) is stored on the descriptor and only
+//     takes effect after a compile. Guards: name collisions across the
+//     NewVariables list, the SCS, and the parent class's properties
+//     (name_collision — those namespaces share the generated class's property
+//     namespace and would otherwise only fail at compile), and an unresolvable
+//     type token (invalid_type).
+//   - `unreal_open_mcp_blueprint_modify_variable` — rename and/or retype an
+//     existing member variable. Validate-before-mutate ordering: the rename is
+//     validated (well-formed + no collision) BEFORE the retype commits, so a
+//     colliding or ill-formed new_name never leaves a partial mutation
+//     (ChangeMemberVariableType commits immediately; RenameMemberVariable is
+//     void and does no collision check of its own — renaming onto an existing
+//     name would silently produce duplicate member names that break a later
+//     compile).
+//   - `unreal_open_mcp_blueprint_set_default` — write a Class Default Object
+//     property via the property's own text importer (ImportText_Direct),
+//     bracketed with Pre/PostEditChangeProperty so an open Details panel /
+//     property-change observers refresh. Changes the CLASS DEFAULT, so it
+//     affects newly-spawned instances only — not actors already placed in a
+//     level. Compile-first: a member variable added via blueprint_add_variable
+//     is NOT a property on the generated class until a compile lands it, so
+//     set_default on such a property reports property_not_found with a message
+//     pointing at blueprint_compile.
 //
-// create / add_component / remove_component are MUTATING and register with
+// create / add_component / remove_component / add_variable / modify_variable /
+// set_default are MUTATING and register with
 // `FUnrealOpenMcpToolMetadata::Mutating()` so the dispatcher wraps them in
 // `GatePolicy.Execute` (the mandatory `paths_hint` is enforced by the
 // dispatcher BEFORE the handler runs). get is read-only (gate Off).
@@ -46,14 +76,18 @@
 // Fidelity: greenfield. There is no Unity Blueprint / prefab-graph twin — the
 // Unity-first porting protocol still applies to shared infrastructure (gate
 // contract, snake_case naming, MCP envelope), but the create/get + SCS add/remove
-// surface is Unreal-only. Behavior reference (read-only): Unreal-MCP's
-// blueprint-create / blueprint-get / blueprint-add-component /
-// blueprint-remove-component handlers + ResolveBlueprint / BlueprintRefStruct /
-// name helpers (UnrealMcpBlueprintTools.cpp) for the correct Kismet editor API
+// + variable add/modify/set-default surface is Unreal-only. Behavior reference
+// (read-only): Unreal-MCP's blueprint-create / blueprint-get /
+// blueprint-add-component / blueprint-remove-component /
+// blueprint-add-variable / blueprint-modify-variable / blueprint-set-default
+// handlers + ResolveBlueprint / BlueprintRefStruct / MakePinType / PinTypeToString
+// / name helpers (UnrealMcpBlueprintTools.cpp) for the correct Kismet editor API
 // usage (CanCreateBlueprintOfClass / CreateBlueprint / AssetCreated / the
 // any-UObject collision probe / the disabled-ghost-event `enabled` flag / the
 // abstract-class ClassFlags guard / the cross-namespace name-collision checks /
-// the USceneComponent attachment validation / RemoveNodeAndPromoteChildren).
+// the USceneComponent attachment validation / RemoveNodeAndPromoteChildren /
+// AddMemberVariable + the validate-before-mutate modify ordering / the CDO
+// ImportText_Direct + Pre/PostEditChangeProperty write protocol).
 //
 // Every handler registered here runs ON THE GAME THREAD (the HTTP server
 // marshals dispatch through the GameThreadDispatcher).
@@ -74,6 +108,9 @@ struct FEdGraphPinType;
  *   - `unreal_open_mcp_blueprint_get`            (read-only)
  *   - `unreal_open_mcp_blueprint_add_component`    (mutating; gate Enforce; paths_hint required)
  *   - `unreal_open_mcp_blueprint_remove_component` (mutating; gate Enforce; paths_hint required)
+ *   - `unreal_open_mcp_blueprint_add_variable`     (mutating; gate Enforce; paths_hint required)
+ *   - `unreal_open_mcp_blueprint_modify_variable`  (mutating; gate Enforce; paths_hint required)
+ *   - `unreal_open_mcp_blueprint_set_default`      (mutating; gate Enforce; paths_hint required)
  */
 namespace FUnrealOpenMcpBlueprintTools
 {

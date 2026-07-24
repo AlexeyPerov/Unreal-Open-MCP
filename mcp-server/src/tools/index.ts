@@ -122,6 +122,23 @@ import { blueprintGet } from "./blueprint-get.js";
 // rebuilds the CDO.
 import { blueprintAddComponent } from "./blueprint-add-component.js";
 import { blueprintRemoveComponent } from "./blueprint-remove-component.js";
+// P6.3 — Blueprint member variables + CDO defaults (blueprint_add_variable /
+// blueprint_modify_variable / blueprint_set_default). All three mutating
+// (default gate Enforce; paths_hint required). add_variable creates a typed
+// member variable via FBlueprintEditorUtils::AddMemberVariable using the §3.2
+// pin-type forward map (the forward twin of the PinTypeToString reverse map
+// blueprint_get uses); guards reject cross-namespace name collisions (member
+// vars ↔ SCS components ↔ parent properties) and unresolvable type tokens.
+// modify_variable renames and/or retypes with validate-before-mutate ordering
+// (the rename is validated before the retype commits, so a collision never
+// leaves a partial mutation). set_default writes a Class Default Object
+// property via the property's own text importer (ImportText_Direct) bracketed
+// with Pre/PostEditChangeProperty; affects new instances only, and requires a
+// prior compile for newly added variables (property_not_found otherwise
+// points at blueprint_compile).
+import { blueprintAddVariable } from "./blueprint-add-variable.js";
+import { blueprintModifyVariable } from "./blueprint-modify-variable.js";
+import { blueprintSetDefault } from "./blueprint-set-default.js";
 
 // Tool registry. P1.7 registers the first real tool — `unreal_open_mcp_ping` —
 // which the MCP server routes to the bridge's `GET /ping`. Each subsequent tool
@@ -254,4 +271,7 @@ export const ALL_TOOLS: Tool[] = [
   blueprintGet,
   blueprintAddComponent,
   blueprintRemoveComponent,
+  blueprintAddVariable,
+  blueprintModifyVariable,
+  blueprintSetDefault,
 ];

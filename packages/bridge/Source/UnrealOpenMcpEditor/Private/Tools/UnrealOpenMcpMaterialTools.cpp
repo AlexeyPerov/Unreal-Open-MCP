@@ -180,11 +180,14 @@ namespace
 			{
 				return nullptr;
 			}
+			// TryGetField, not GetField: FJsonObject::GetField is a template on
+			// EJson with no default argument, so the untemplated call does not
+			// compile. TryGetField is the type-agnostic accessor.
 			if (i == Segments.Num() - 1)
 			{
-				return Current->GetField(Segment);
+				return Current->TryGetField(Segment);
 			}
-			const TSharedPtr<FJsonValue> Next = Current->GetField(Segment);
+			const TSharedPtr<FJsonValue> Next = Current->TryGetField(Segment);
 			if (!Next.IsValid() || Next->Type != EJson::Object)
 			{
 				return nullptr;

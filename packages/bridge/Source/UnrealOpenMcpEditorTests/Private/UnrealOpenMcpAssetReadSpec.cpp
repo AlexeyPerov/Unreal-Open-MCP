@@ -169,7 +169,7 @@ namespace
 		{
 			if (Server != nullptr)
 			{
-				Server->Stop();
+				Server->StopAndJoin();
 				delete Server;
 				Server = nullptr;
 			}

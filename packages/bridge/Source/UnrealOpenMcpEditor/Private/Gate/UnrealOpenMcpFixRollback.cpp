@@ -6,7 +6,6 @@
 
 void FUnrealOpenMcpFixRollback::Snapshot(const TArray<FString>& Paths)
 {
-	bHasSnapshot = true;
 	for (const FString& Path : Paths)
 	{
 		if (Path.IsEmpty())
@@ -59,6 +58,13 @@ void FUnrealOpenMcpFixRollback::Snapshot(const TArray<FString>& Paths)
 		}
 		Entries.Add(MoveTemp(Entry));
 	}
+
+	// Only claim a snapshot when at least one entry was actually recorded. The
+	// flag used to be set unconditionally at the top, so Snapshot({}) — or a
+	// path list that was entirely empty strings — left HasSnapshot() reporting
+	// true with nothing to restore, which is exactly the lie the apply_fix
+	// rollback guard depends on being false.
+	bHasSnapshot = Entries.Num() > 0;
 }
 
 FUnrealOpenMcpFixRollbackRestore FUnrealOpenMcpFixRollback::Restore()

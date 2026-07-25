@@ -108,6 +108,34 @@ namespace
 	}
 
 	/**
+	 * Root guard for an already-resolved Blueprint. Every Blueprint MUTATOR must
+	 * call this after ResolveBlueprint: only blueprint_create used to check a
+	 * root, so add-component / remove-component / add-variable / modify-variable
+	 * / set-default would happily mutate (and dirty) a Blueprint under /Engine,
+	 * /Script or /Temp. The material family guards its mutation target for the
+	 * same reason — even save:false dirties the package.
+	 *
+	 * Returns true when the Blueprint's own package is writable. On false,
+	 * OutPackageName carries the offending package for the error message.
+	 */
+	bool IsBlueprintInWritableRoot(const UBlueprint* Blueprint, FString& OutPackageName)
+	{
+		if (Blueprint == nullptr)
+		{
+			OutPackageName.Reset();
+			return false;
+		}
+		const UPackage* Package = Blueprint->GetOutermost();
+		if (Package == nullptr)
+		{
+			OutPackageName.Reset();
+			return false;
+		}
+		OutPackageName = Package->GetName();
+		return IsWritableContentRoot(OutPackageName);
+	}
+
+	/**
 	 * Normalize a caller-supplied Blueprint path into a valid package name +
 	 * short asset name. Accepts either a package path ("/Game/Mcp/BP_Thing") or
 	 * the object-path form ("/Game/Mcp/BP_Thing.BP_Thing"); strips the
@@ -680,6 +708,21 @@ void FUnrealOpenMcpBlueprintTools::Register(FUnrealOpenMcpToolRegistry& Registry
 					FString::Printf(TEXT("Blueprint not found at '%s'."), *Path));
 			}
 
+			// Mutators must refuse the engine/script/temp content roots: the
+			// mutation below dirties the Blueprint's package even when the caller
+			// passes save:false. Only blueprint_create used to check a root, so
+			// every other Blueprint mutator could edit /Engine content.
+			FString BlueprintPackageName;
+			if (!IsBlueprintInWritableRoot(Blueprint, BlueprintPackageName))
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("invalid_content_root"),
+					FString::Printf(
+						TEXT("Refusing to modify '%s' under a reserved content root; ")
+						TEXT("use a project root like '/Game'."),
+						*BlueprintPackageName));
+			}
+
 			USimpleConstructionScript* SCS = Blueprint->SimpleConstructionScript;
 			if (!SCS)
 			{
@@ -880,6 +923,21 @@ void FUnrealOpenMcpBlueprintTools::Register(FUnrealOpenMcpToolRegistry& Registry
 					FString::Printf(TEXT("Blueprint not found at '%s'."), *Path));
 			}
 
+			// Mutators must refuse the engine/script/temp content roots: the
+			// mutation below dirties the Blueprint's package even when the caller
+			// passes save:false. Only blueprint_create used to check a root, so
+			// every other Blueprint mutator could edit /Engine content.
+			FString BlueprintPackageName;
+			if (!IsBlueprintInWritableRoot(Blueprint, BlueprintPackageName))
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("invalid_content_root"),
+					FString::Printf(
+						TEXT("Refusing to modify '%s' under a reserved content root; ")
+						TEXT("use a project root like '/Game'."),
+						*BlueprintPackageName));
+			}
+
 			USimpleConstructionScript* SCS = Blueprint->SimpleConstructionScript;
 			if (!SCS)
 			{
@@ -971,6 +1029,21 @@ void FUnrealOpenMcpBlueprintTools::Register(FUnrealOpenMcpToolRegistry& Registry
 				return FUnrealOpenMcpToolDispatchResult::Fail(
 					TEXT("blueprint_not_found"),
 					FString::Printf(TEXT("Blueprint not found at '%s'."), *Path));
+			}
+
+			// Mutators must refuse the engine/script/temp content roots: the
+			// mutation below dirties the Blueprint's package even when the caller
+			// passes save:false. Only blueprint_create used to check a root, so
+			// every other Blueprint mutator could edit /Engine content.
+			FString BlueprintPackageName;
+			if (!IsBlueprintInWritableRoot(Blueprint, BlueprintPackageName))
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("invalid_content_root"),
+					FString::Printf(
+						TEXT("Refusing to modify '%s' under a reserved content root; ")
+						TEXT("use a project root like '/Game'."),
+						*BlueprintPackageName));
 			}
 
 			const FString VarName = Args->HasTypedField<EJson::String>(TEXT("name"))
@@ -1112,6 +1185,21 @@ void FUnrealOpenMcpBlueprintTools::Register(FUnrealOpenMcpToolRegistry& Registry
 				return FUnrealOpenMcpToolDispatchResult::Fail(
 					TEXT("blueprint_not_found"),
 					FString::Printf(TEXT("Blueprint not found at '%s'."), *Path));
+			}
+
+			// Mutators must refuse the engine/script/temp content roots: the
+			// mutation below dirties the Blueprint's package even when the caller
+			// passes save:false. Only blueprint_create used to check a root, so
+			// every other Blueprint mutator could edit /Engine content.
+			FString BlueprintPackageName;
+			if (!IsBlueprintInWritableRoot(Blueprint, BlueprintPackageName))
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("invalid_content_root"),
+					FString::Printf(
+						TEXT("Refusing to modify '%s' under a reserved content root; ")
+						TEXT("use a project root like '/Game'."),
+						*BlueprintPackageName));
 			}
 
 			const FString VarName = Args->HasTypedField<EJson::String>(TEXT("name"))
@@ -1266,6 +1354,21 @@ void FUnrealOpenMcpBlueprintTools::Register(FUnrealOpenMcpToolRegistry& Registry
 				return FUnrealOpenMcpToolDispatchResult::Fail(
 					TEXT("blueprint_not_found"),
 					FString::Printf(TEXT("Blueprint not found at '%s'."), *Path));
+			}
+
+			// Mutators must refuse the engine/script/temp content roots: the
+			// mutation below dirties the Blueprint's package even when the caller
+			// passes save:false. Only blueprint_create used to check a root, so
+			// every other Blueprint mutator could edit /Engine content.
+			FString BlueprintPackageName;
+			if (!IsBlueprintInWritableRoot(Blueprint, BlueprintPackageName))
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("invalid_content_root"),
+					FString::Printf(
+						TEXT("Refusing to modify '%s' under a reserved content root; ")
+						TEXT("use a project root like '/Game'."),
+						*BlueprintPackageName));
 			}
 
 			UClass* GeneratedClass = Blueprint->GeneratedClass;

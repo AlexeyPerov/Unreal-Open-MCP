@@ -33,7 +33,11 @@ bool TryMatchSeverity(const FString& SevStr, EVerifySeverity& OutSeverity)
 
 bool ContainsPipe(const FString& S)
 {
-	return S.Contains(TEXT('|'));
+	// FindChar, not Contains: FString::Contains takes a string / string-view, not
+	// a single TCHAR, so TEXT('|') does not bind to any overload. Every other
+	// character search in this repo uses FindChar.
+	int32 Unused = INDEX_NONE;
+	return S.FindChar(TEXT('|'), Unused);
 }
 
 } // namespace UnrealOpenMcpVerify

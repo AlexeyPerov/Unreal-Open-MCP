@@ -154,7 +154,7 @@ public:
 	 * than silently returning an empty result.
 	 *
 	 * Unreal extension map (Unity's keys on .prefab / .unity / .cs / .mat):
-	 *   - .uasset / .umap → broken_soft_references + missing_blueprint_parent
+	 *   - .uasset / .umap → broken_soft_references + missing_blueprint_parents
 	 *     + compile_errors (every content path may carry any of these).
 	 *   - .cpp / .h       → compile_errors (Live Coding + UBT status).
 	 * The map is intentionally narrow at P3.6 — the rule roster grows as new

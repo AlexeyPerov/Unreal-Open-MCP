@@ -199,7 +199,7 @@ namespace
 		{
 			if (Server)
 			{
-				Server->Stop();
+				Server->StopAndJoin();
 				delete Server;
 			}
 		}
@@ -404,7 +404,7 @@ void FUnrealOpenMcpBridgePingSpec::Define()
 			const uint16 FirstPort = Server.GetPort();
 			TestTrue(TEXT("first port assigned"), FirstPort > 0);
 
-			Server.Stop();
+			Server.StopAndJoin();
 			TestFalse(TEXT("stopped"), Server.IsRunning());
 
 			// Start again — a fresh ephemeral port.
@@ -412,11 +412,11 @@ void FUnrealOpenMcpBridgePingSpec::Define()
 			TestTrue(TEXT("running after second Start"), Server.IsRunning());
 			TestTrue(TEXT("new port assigned"), Server.GetPort() > 0);
 
-			Server.Stop();
+			Server.StopAndJoin();
 			TestFalse(TEXT("stopped after second cycle"), Server.IsRunning());
 
 			// Double-Stop must be safe.
-			Server.Stop();
+			Server.StopAndJoin();
 			TestFalse(TEXT("still stopped after double-Stop"), Server.IsRunning());
 		});
 
@@ -434,7 +434,7 @@ void FUnrealOpenMcpBridgePingSpec::Define()
 			TestTrue(TEXT("second Start succeeds"), Server.Start(0, TEXT("/tmp/idempotent")));
 			TestEqual(TEXT("port unchanged after no-op Start"), Server.GetPort(), FirstPort);
 
-			Server.Stop();
+			Server.StopAndJoin();
 		});
 	});
 

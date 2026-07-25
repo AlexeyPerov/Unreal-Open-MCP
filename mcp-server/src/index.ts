@@ -31,8 +31,9 @@ import { buildCapabilities } from "./capabilities/build-capabilities.js";
 import { RULE_CATALOG, FIX_CATALOG } from "./capabilities/rule-catalog.js";
 import { readPackageVersion } from "./package-version.js";
 import {
-  resolvePort,
-  resolveAuthToken,
+  computePort,
+  isUsablePort,
+  authTokenFromLock,
   PORT_OVERRIDE_ENV_VAR,
   readInstanceLock,
   isPidAlive,
@@ -357,6 +358,21 @@ export function createServer(): Server {
 }
 
 /**
+ * Parse UNREAL_OPEN_MCP_BRIDGE_PORT into a usable port, or undefined.
+ *
+ * Applies the FULL validation resolvePort uses — integer, in 1..65535, and no
+ * trailing garbage (`parseInt("20000abc")` is 20000, which would silently
+ * "accept" a typo'd value).
+ */
+function parseOverridePort(raw: string | undefined): number | undefined {
+  if (!raw) return undefined;
+  const trimmed = raw.trim();
+  if (!/^\d+$/.test(trimmed)) return undefined;
+  const parsed = Number(trimmed);
+  return isUsablePort(parsed) ? parsed : undefined;
+}
+
+/**
  * Resolve env for the MCP server. `UNREAL_PROJECT_PATH` is mandatory — without
  * a project there is nothing to route to. Exit 1 with a clear message if it is
  * missing.
@@ -364,7 +380,8 @@ export function createServer(): Server {
  * Bridge port resolution uses P1.6 instance discovery:
  *   1. UNREAL_OPEN_MCP_BRIDGE_PORT env var (override wins; users who pin a
  *      port keep working as before)
- *   2. ~/.unreal-open-mcp/instances/<hash>.json lock file (when its pid is alive)
+ *   2. ~/.unreal-open-mcp/instances/<hash>.json lock file (when its pid is alive
+ *      and its port is a valid TCP port)
  *   3. deterministic hash of the project path (20000 + sha256 % 10000)
  *
  * The resolved port is logged with its source (override / lock / hash) so
@@ -373,12 +390,16 @@ export function createServer(): Server {
  * on every request. When the lock omits the token (older bridge) or an env
  * port override is in use, the token resolves to undefined and no
  * Authorization header is sent (the bridge must then be in authMode "none").
+ *
+ * The lock is read exactly ONCE here and the port, token, and log label are all
+ * derived from that single snapshot. The bridge rewrites the lock and rotates
+ * the token on every start, so separate reads could pair an old port with a new
+ * token and 401 every request until this process restarts.
  */
 function getEnv(): {
   projectPath: string;
   port: number;
   authToken?: string;
-  envPort?: number;
 } {
   const projectPath = process.env[PROJECT_PATH_ENV_VAR];
   if (!projectPath) {
@@ -388,27 +409,32 @@ function getEnv(): {
     process.exit(1);
   }
 
+  // Parse the env override with the SAME predicate resolvePort applies
+  // (integer AND in 1..65535). Checking only integer-ness meant
+  // UNREAL_OPEN_MCP_BRIDGE_PORT=0 or =70000 was reported as "(env override)" in
+  // the log while resolvePort had correctly fallen back to the lock/hash — the
+  // exact diagnostic an operator reads when debugging a port mismatch. The
+  // trailing-garbage check also rejects "20000abc", which parseInt accepts.
   const rawEnvPort = process.env[PORT_OVERRIDE_ENV_VAR];
-  const parsedEnvPort = rawEnvPort ? parseInt(rawEnvPort, 10) : undefined;
-  const envPort =
-    rawEnvPort && Number.isInteger(parsedEnvPort) ? parsedEnvPort : undefined;
+  const envPort = parseOverridePort(rawEnvPort);
 
-  const port = resolvePort(projectPath, envPort);
+  // Read the instance lock ONCE and derive the port, the token, and the log
+  // label from that single snapshot. The bridge rewrites the lock and rotates
+  // the token on every start, so separate reads could pair an old port with a
+  // new token and 401 every request until the MCP server restarts.
+  const lock = readInstanceLock(projectPath);
 
-  // Surface which precedence branch supplied the port. The lock branch is only
-  // credited when the lock is actually live (pid alive) — resolvePort already
-  // validated that internally; we re-check here purely for the log label so
-  // the two code paths don't diverge on what "lock" means.
+  let port: number;
   let source: string;
-  if (typeof envPort === "number") {
+  if (envPort !== undefined) {
+    port = envPort;
     source = "env override";
+  } else if (lock && isUsablePort(lock.port) && isPidAlive(lock.pid)) {
+    port = lock.port;
+    source = "instance lock";
   } else {
-    const lock = readInstanceLock(projectPath);
-    if (lock && typeof lock.port === "number" && isPidAlive(lock.pid)) {
-      source = "instance lock";
-    } else {
-      source = "hash fallback";
-    }
+    port = computePort(projectPath);
+    source = "hash fallback";
   }
 
   console.error(`[${SERVER_NAME}] Bound to project: ${projectPath}`);
@@ -416,10 +442,10 @@ function getEnv(): {
     `[${SERVER_NAME}] Bridge port resolved to ${port} (${source})`,
   );
 
-  const authToken = resolveAuthToken(
-    projectPath,
-    Number.isInteger(parsedEnvPort) ? parsedEnvPort : undefined,
-  );
+  // An explicit env port means there is no lock to trust for the token either
+  // (the bridge that wrote the lock may be a different instance).
+  const authToken =
+    envPort !== undefined ? undefined : authTokenFromLock(lock);
   if (authToken) {
     console.error(`[${SERVER_NAME}] Bridge auth token discovered from instance lock.`);
   } else {
@@ -432,7 +458,7 @@ function getEnv(): {
   // project's instance lock without re-resolving env at call time.
   setBoundProjectPath(projectPath);
 
-  return { projectPath, port, authToken, envPort };
+  return { projectPath, port, authToken };
 }
 
 async function main(): Promise<void> {
@@ -445,12 +471,23 @@ async function main(): Promise<void> {
   );
   const server = createServer();
   const transport = new StdioServerTransport();
-  // StdioServerTransport closes when stdin EOFs (client disconnect). Once the
-  // transport closes we tear the server down; with no remaining event-loop
-  // handles the Node process exits 0 — the "clean exit on disconnect"
-  // contract. Logging goes to stderr so it never corrupts the stdio JSON-RPC
-  // stream on stdout.
-  transport.onclose = async () => {
+  // Clean exit on client disconnect.
+  //
+  // `transport.onclose` alone was NOT enough: the SDK's StdioServerTransport
+  // only registers "data" and "error" listeners on stdin, and invokes onclose
+  // exclusively from its own close() — nothing calls close() on stdin EOF. So
+  // this handler never ran on a real disconnect, and the process only exited
+  // because the event loop happened to drain. Any lingering handle (e.g. an
+  // in-flight tool fetch's abort timer) left the process alive after the client
+  // was gone.
+  //
+  // Hooking stdin "end" gives us the actual EOF signal; onclose is kept for
+  // programmatic closes. `shutdown` is idempotent so both paths are safe.
+  // Logging goes to stderr so it never corrupts the JSON-RPC stream on stdout.
+  let shuttingDown = false;
+  const shutdown = async () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
     try {
       await server.close();
     } catch (err) {
@@ -458,6 +495,11 @@ async function main(): Promise<void> {
     }
     process.exit(0);
   };
+
+  transport.onclose = shutdown;
+  process.stdin.once("end", () => void shutdown());
+  process.stdin.once("close", () => void shutdown());
+
   await server.connect(transport);
 }
 

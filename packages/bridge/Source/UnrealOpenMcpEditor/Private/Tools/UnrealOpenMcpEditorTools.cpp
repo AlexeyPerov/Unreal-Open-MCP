@@ -18,11 +18,10 @@
 #include "Tools/UnrealOpenMcpObjectRef.h"
 #include "UnrealOpenMcpLog.h"
 
-#include "Editor.h"                     // GEditor + FRequestPlaySessionParams
+#include "Editor.h"                     // GEditor + FRequestPlaySessionParams + SetPIEWorldsPaused
 #include "Engine/Selection.h"           // USelection + FSelectionIterator
-#include "Engine/World.h"               // UWorld::IsPaused / GetMapName
+#include "Engine/World.h"               // bDebugPauseExecution / GetMapName
 #include "GameFramework/Actor.h"
-#include "GameFramework/PlayerController.h"  // APlayerController::SetPause
 #include "ScopedTransaction.h"          // selection_set groups as one undo
 
 #include "Dom/JsonObject.h"
@@ -93,32 +92,41 @@ namespace
 	// ------------------------------------------------------------------------
 	// editor_application_get_state helpers
 	// ------------------------------------------------------------------------
+	//
+	// These use the GEditor accessors (IsPlaySessionInProgress /
+	// IsSimulateInEditorInProgress) rather than poking PlayWorld /
+	// bIsSimulatingInEditor directly: the accessors handle the PIE transition
+	// edge cases (PlayWorld can be briefly non-null mid-teardown) and are the
+	// supported query path. Mirrors Unreal-MCP's editor-application-get-state.
 
-	/** True when a PIE / SIE session world exists (playing OR simulating). */
+	/** True when a play session (PIE or SIE) is in progress. */
 	bool IsPlaySessionActive()
 	{
-		return GEditor != nullptr && GEditor->PlayWorld != nullptr;
+		return GEditor != nullptr && GEditor->IsPlaySessionInProgress();
 	}
 
 	/** True when the active play session is Simulate-In-Editor (SIE). */
 	bool IsSimulating()
 	{
-		return GEditor != nullptr
-			&& GEditor->PlayWorld != nullptr
-			&& GEditor->bIsSimulatingInEditor;
+		return GEditor != nullptr && GEditor->IsSimulateInEditorInProgress();
 	}
 
 	/** True when a real Play-In-Editor session (not SIE) is running. */
 	bool IsPlaying()
 	{
-		return IsPlaySessionActive() && !GEditor->bIsSimulatingInEditor;
+		return IsPlaySessionActive() && !IsSimulating();
 	}
 
-	/** True when the PIE world is currently paused. UWorld::IsPaused reflects
-	 *  the world settings' pauser player state, which SetPause sets. */
+	/** True when the PIE world is currently paused. Reads the editor pause flag
+	 *  (bDebugPauseExecution) that GEditor->SetPIEWorldsPaused toggles — NOT
+	 *  UWorld::IsPaused (which reflects the gameplay pauser player state set by
+	 *  APlayerController::SetPause, a different mechanism that does not reliably
+	 *  round-trip with the editor pause/resume verbs). */
 	bool IsPaused()
 	{
-		return IsPlaySessionActive() && GEditor->PlayWorld->IsPaused();
+		return IsPlaySessionActive()
+			&& GEditor->PlayWorld != nullptr
+			&& GEditor->PlayWorld->bDebugPauseExecution;
 	}
 }
 
@@ -197,12 +205,19 @@ void FUnrealOpenMcpEditorTools::Register(FUnrealOpenMcpToolRegistry& Registry)
 	//   - stop   — request the PIE session end (RequestEndPlayMap). LATENT →
 	//              { pending:true }. Refused with invalid_transition when no
 	//              session is active.
-	//   - pause  — pause the running PIE world (PlayerController::SetPause(true)).
-	//              Applies immediately → { pending:false, isPaused:true }.
-	//              Refused when not playing (invalid_transition) or already
-	//              paused (invalid_transition).
-	//   - resume — unpause (SetPause(false)) → { pending:false, isPaused:false }.
+	//   - pause  — pause the running PIE world(s) via GEditor->SetPIEWorldsPaused
+	//              (true). LATENT: the pause flag (bDebugPauseExecution) is read
+	//              back on the next get-state poll → { pending:true }. Refused
+	//              when not playing (invalid_transition) or already paused
+	//              (invalid_transition).
+	//   - resume — unpause via SetPIEWorldsPaused(false) → { pending:true }.
 	//              Refused when not playing or not currently paused.
+	//
+	// All four transitions are latent: the editor applies them on a later tick,
+	// so every success is { pending:true } and the agent polls get-state to
+	// observe the settled transition (the Unreal-MCP honesty pattern — never
+	// claim an unobserved transition). This also keeps pause/resume uniform with
+	// start/stop, which an agent already knows to poll.
 	//
 	// Mutating (drives the editor process). The gate's mandatory `paths_hint`
 	// (the current map package and/or project scope) is enforced by the
@@ -247,25 +262,13 @@ void FUnrealOpenMcpEditorTools::Register(FUnrealOpenMcpToolRegistry& Registry)
 					TEXT("No editor is available (GEditor is null). This tool requires the Unreal Editor."));
 			}
 
-			// Build the standard deferred-success payload.
+			// Build the standard deferred-success payload. Every transition
+			// returns { pending:true } — see the doc block above.
 			auto PendingResult = [&Action](const TCHAR* Note) -> FUnrealOpenMcpToolDispatchResult
 			{
 				TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
 				Result->SetStringField(TEXT("action"), Action);
 				Result->SetBoolField(TEXT("pending"), true);
-				Result->SetStringField(TEXT("note"), Note);
-				return FUnrealOpenMcpToolDispatchResult::Ok(
-					WriteJson(MakeShared<FJsonValueObject>(Result)));
-			};
-
-			// Build an immediate (non-deferred) success payload with the observed
-			// paused state (pause/resume take effect this frame).
-			auto ImmediateResult = [&Action](const TCHAR* Note, bool bPaused) -> FUnrealOpenMcpToolDispatchResult
-			{
-				TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
-				Result->SetStringField(TEXT("action"), Action);
-				Result->SetBoolField(TEXT("pending"), false);
-				Result->SetBoolField(TEXT("isPaused"), bPaused);
 				Result->SetStringField(TEXT("note"), Note);
 				return FUnrealOpenMcpToolDispatchResult::Ok(
 					WriteJson(MakeShared<FJsonValueObject>(Result)));
@@ -317,16 +320,15 @@ void FUnrealOpenMcpEditorTools::Register(FUnrealOpenMcpToolRegistry& Registry)
 						TEXT("invalid_transition"),
 						TEXT("The play session is already paused."));
 				}
-				APlayerController* PC = GEditor->PlayWorld->GetFirstPlayerController();
-				if (PC == nullptr)
-				{
-					return FUnrealOpenMcpToolDispatchResult::Fail(
-						TEXT("invalid_transition"),
-						TEXT("No player controller in the play session; cannot pause."));
-				}
-				PC->SetPause(true);
-				return ImmediateResult(
-					TEXT("PIE paused."), IsPaused());
+				// SetPIEWorldsPaused toggles the editor pause flag
+				// (bDebugPauseExecution) across every PIE world — the correct
+				// editor API, NOT APlayerController::SetPause (which is a
+				// gameplay pause mechanism that does not reliably round-trip
+				// with the editor pause flag). Latent: poll get-state until
+				// isPaused:true.
+				GEditor->SetPIEWorldsPaused(true);
+				return PendingResult(
+					TEXT("PIE pause requested. Poll editor_application_get_state until isPaused:true."));
 			}
 
 			if (Action == TEXT("resume"))
@@ -343,16 +345,9 @@ void FUnrealOpenMcpEditorTools::Register(FUnrealOpenMcpToolRegistry& Registry)
 						TEXT("invalid_transition"),
 						TEXT("The play session is not paused; nothing to resume."));
 				}
-				APlayerController* PC = GEditor->PlayWorld->GetFirstPlayerController();
-				if (PC == nullptr)
-				{
-					return FUnrealOpenMcpToolDispatchResult::Fail(
-						TEXT("invalid_transition"),
-						TEXT("No player controller in the play session; cannot resume."));
-				}
-				PC->SetPause(false);
-				return ImmediateResult(
-					TEXT("PIE resumed."), IsPaused());
+				GEditor->SetPIEWorldsPaused(false);
+				return PendingResult(
+					TEXT("PIE resume requested. Poll editor_application_get_state until isPaused:false."));
 			}
 
 			return FUnrealOpenMcpToolDispatchResult::Fail(

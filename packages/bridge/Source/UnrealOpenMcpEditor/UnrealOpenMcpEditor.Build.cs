@@ -85,10 +85,19 @@ public class UnrealOpenMcpEditor : ModuleRules
 			// P4.1 — asset read family (asset_find / asset_get_data). The
 			// AssetRegistry module owns IAssetRegistry + FARFilter + FAssetData
 			// (the query surface asset_find reads against); AssetTools owns
-			// UEditorAssetLibrary (DoesAssetExist / FindAssetData) the get-data
-			// path-or-name probe uses. Both are first-party editor modules.
+			// IAssetTools / FAssetToolsModule (the import task surface).
+			// Both are first-party editor modules.
 			"AssetRegistry",
 			"AssetTools",
+			// EditorScriptingUtilities owns UEditorAssetLibrary
+			// (DoesAssetExist / LoadAsset / DuplicateAsset / RenameAsset /
+			// MakeDirectory / FindAssetData / SaveLoadedAsset), which the asset
+			// and material families use heavily. It was previously misattributed
+			// to AssetTools in a comment and never declared, so
+			// #include "EditorAssetLibrary.h" could not resolve. It ships as an
+			// engine PLUGIN, so it is also listed in UnrealOpenMCP.uplugin's
+			// "Plugins" array.
+			"EditorScriptingUtilities",
 			// P4.3 — material tools. MaterialEditor owns UMaterialEditingLibrary
 			// (the editor-only scalar/vector/texture parameter read/write +
 			// UpdateMaterialInstance surface); UMaterialInstanceConstantFactoryNew
@@ -114,6 +123,15 @@ public class UnrealOpenMcpEditor : ModuleRules
 			// dep) owns FAssetRegistryModule::AssetCreated. Editor-only.
 			"Kismet",
 			});
+
+		// The per-session bearer token must come from the OS cryptographic RNG
+		// (FUnrealOpenMcpBridgeAuthToken::Generate). On Windows that is
+		// BCryptGenRandom, which needs bcrypt.lib. Mac/Linux read /dev/urandom
+		// and need no extra library.
+		if (Target.Platform == UnrealBuildTool.UnrealTargetPlatform.Win64)
+		{
+			PublicSystemLibraries.Add("bcrypt.lib");
+		}
 
 		// P3.5 scope: gate policy wired at the dispatch boundary. P4.1 adds
 		// AssetRegistry + AssetTools for the asset read family; P4.3 adds

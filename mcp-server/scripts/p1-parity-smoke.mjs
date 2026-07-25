@@ -273,6 +273,16 @@ async function main() {
     check("stdout is newline-delimited JSON-RPC", false, err.message);
   }
 
+  // Assert we got ANY response before the `if (messages.length > 0)` guard
+  // below. Without this, a server that exits 0 but answers nothing skipped
+  // every substantive assertion and the smoke reported "1 passed, 0 failed"
+  // with exit 0. p2/p4 already make this check.
+  check(
+    "stdout carries at least one JSON-RPC message",
+    messages.length > 0,
+    `got ${messages.length} messages; stdout was ${JSON.stringify(stdout.slice(0, 200))}`,
+  );
+
   // --- initialize ----------------------------------------------------------
   if (messages.length > 0) {
     const init = findById(messages, 1);
@@ -291,15 +301,18 @@ async function main() {
       tools.includes("unreal_open_mcp_ping"),
       `got [${tools.join(", ")}]`,
     );
-    // The registry grows each phase. Pin the full known set so accidental
-    // removal (or drift) is caught here rather than downstream. Kept in sync
-    // with the deepEqual pin in integration.test.ts (the canonical registry
-    // pin); this smoke re-pins it so a drift the integration suite catches is
-    // also caught over the built-artifact path. P2.2 added actor_find; P2.3
-    // actor_create; P2.4 actor_modify + object_modify; P2.5 the actor tree +
-    // component tools; P2.6 the level lifecycle tools; P2.7 the level inspect
-    // + create pair.
-    const PINNED_TOOLS = [
+    // Assert PRESENCE of the tools this smoke depends on — not an exhaustive
+    // equality pin.
+    //
+    // The exhaustive `tools.length === PINNED_TOOLS.length && same order` check
+    // this used to run made the script fail permanently: the registry grows
+    // every phase (57 tools now) while this list stayed at the 20 known when it
+    // was written, so `npm run smoke:p1` always exited 1. The canonical
+    // exhaustive registry pin lives in integration.test.ts, which is maintained
+    // alongside the registry; re-pinning it here only duplicated a maintenance
+    // burden that was not being met. The sibling p2/p4 smokes already assert
+    // presence only.
+    const REQUIRED_TOOLS = [
       "unreal_open_mcp_ping",
       "unreal_open_mcp_actor_find",
       "unreal_open_mcp_actor_create",
@@ -321,11 +334,11 @@ async function main() {
       "unreal_open_mcp_level_get_data",
       "unreal_open_mcp_level_create",
     ];
+    const missingTools = REQUIRED_TOOLS.filter((t) => !tools.includes(t));
     check(
-      "tools/list advertises the full registered set",
-      tools.length === PINNED_TOOLS.length
-        && PINNED_TOOLS.every((t, i) => tools[i] === t),
-      `got [${tools.join(", ")}]`,
+      "tools/list advertises every required tool",
+      missingTools.length === 0,
+      `missing [${missingTools.join(", ")}] from [${tools.join(", ")}]`,
     );
 
     // --- tools/call ping --------------------------------------------------

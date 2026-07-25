@@ -23,8 +23,18 @@ namespace
 // MissingBlueprintPackage (content-side) or MissingNative.
 bool IsBlueprintStylePath(const FString& Path)
 {
-	return Path.StartsWith(TEXT("/Game/"), ESearchCase::CaseSensitive)
-		|| Path.StartsWith(TEXT("/Game"), ESearchCase::CaseSensitive);
+	// Any content mount, not just /Game — the contract above says
+	// "/Game/, /PluginName/, ...", but the implementation only matched /Game, so
+	// a deleted parent under a plugin content mount
+	// ("/MyPlugin/BP/BP_Base.BP_Base_C") was misclassified as MissingNative and
+	// described with the wrong "unknown_native" suffix. The distinction that
+	// actually matters is content mount vs. the native /Script/ mount.
+	// (The old second clause was also subsumed by the first.)
+	if (!Path.StartsWith(TEXT("/"), ESearchCase::CaseSensitive))
+	{
+		return false;
+	}
+	return !Path.StartsWith(TEXT("/Script/"), ESearchCase::CaseSensitive);
 }
 
 } // namespace
@@ -61,13 +71,17 @@ EBlueprintParentResolution FAssetRegistryBlueprintParentResolver::ResolveParent(
 	if (IsBlueprintStylePath(ParentPath))
 	{
 		const FSoftObjectPath Normalized(ParentPath);
-		const FName PackageName = Normalized.GetPackageName();
+		// GetLongPackageFName(), not GetPackageName(): FSoftObjectPath has no
+		// GetPackageName member in UE5.
+		const FName PackageName = Normalized.GetLongPackageFName();
 
 		const FAssetRegistryModule& Module = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
 		IAssetRegistry& Registry = Module.Get();
 
 		TArray<FAssetData> OutAssets;
-		if (!Registry.GetAssetsByPackageName(PackageName, OutAssets, /*bIncludeOnlyOnDiskAssets=*/false) || OutAssets.Num() == 0)
+		if (PackageName.IsNone()
+			|| !Registry.GetAssetsByPackageName(PackageName, OutAssets, /*bIncludeOnlyOnDiskAssets=*/false)
+			|| OutAssets.Num() == 0)
 		{
 			OutReason = FString::Printf(TEXT("Blueprint parent package '%s' is not in the Asset Registry"), *ParentPath);
 			return EBlueprintParentResolution::MissingBlueprintPackage;

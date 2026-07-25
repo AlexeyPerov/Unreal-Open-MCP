@@ -8,9 +8,7 @@
 #include "UObject/Object.h"
 #include "UObject/ObjectMacros.h"
 #include "UObject/Package.h"
-#include "UObject/Property.h"
-#include "UObject/PropertySoftObject.h"
-#include "UObject/PropertyStruct.h"
+#include "UObject/UnrealType.h"  // FProperty, FSoftObjectProperty, FStructProperty, TFieldIterator
 #include "UObject/SoftObjectPtr.h"
 #include "UObject/UObjectGlobals.h"
 #include "UObject/UObjectHash.h"

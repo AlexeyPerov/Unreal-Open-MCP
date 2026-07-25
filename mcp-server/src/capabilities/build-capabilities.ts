@@ -18,7 +18,7 @@
 //
 // P3.8 scope (intentional deltas from Unity):
 //   1. Smaller rule catalog — Unreal v1 codes only (broken_soft_reference /
-//      missing_blueprint_parent / compile_error). No asmdef / Unity-only rules.
+//      missing_blueprint_parent / compile_error issue codes). No asmdef / Unity-only rules.
 //   2. No tool-groups / lifecycle / cost-hints blocks. Those land with the
 //      Phase 8 routing + session-visibility work (manage_tools / tool-session-
 //      state). The capabilities surface reports accurate rule/fix data now;
@@ -92,6 +92,9 @@ const TOOL_CATEGORY: Record<string, string> = {
   unreal_open_mcp_asset_move: "asset",
   unreal_open_mcp_asset_delete: "asset",
   unreal_open_mcp_asset_refresh: "asset",
+  // P4.4 — asset_import (source file → project content). Mutating (route live,
+  // default gate Enforce, paths_hint required).
+  unreal_open_mcp_asset_import: "asset",
   // P4.3 — material family (material_create / material_modify /
   // material_get_data). create + modify are mutating (route live, default gate
   // Enforce, paths_hint required); material_get_data is read-only.
@@ -145,6 +148,11 @@ const TOOL_CATEGORY: Record<string, string> = {
   // Simple Construction Script.
   unreal_open_mcp_blueprint_add_component: "blueprint",
   unreal_open_mcp_blueprint_remove_component: "blueprint",
+  // P6.3 — Blueprint member variables + CDO defaults. All mutating (route live,
+  // default gate Enforce, paths_hint required).
+  unreal_open_mcp_blueprint_add_variable: "blueprint",
+  unreal_open_mcp_blueprint_modify_variable: "blueprint",
+  unreal_open_mcp_blueprint_set_default: "blueprint",
 };
 
 function categoryFor(toolName: string): string {

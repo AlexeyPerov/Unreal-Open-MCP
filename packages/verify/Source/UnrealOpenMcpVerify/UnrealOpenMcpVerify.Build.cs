@@ -36,11 +36,17 @@ public class UnrealOpenMcpVerify : ModuleRules
 		PublicDependencyModuleNames.AddRange(new string[]
 		{
 			"Core",
+			// CoreUObject must be PUBLIC: this module's own PUBLIC headers
+			// (Core/VerifyIssue.h, VerifyResult.h, IssueKey.h,
+			// CheckpointFingerprint.h, VerifyScope.h, Fixes/FixContracts.h) pull
+			// UHT-generated code that includes UObject/ObjectMacros.h and
+			// ScriptMacros.h. As a private dep it only built because every
+			// dependent happened to list CoreUObject itself.
+			"CoreUObject",
 		});
 
 		PrivateDependencyModuleNames.AddRange(new string[]
 		{
-			"CoreUObject",
 			// P3.2: the broken_soft_references rule loads packages and walks
 			// UObjects (LoadPackage, GetObjectsWithOuter, FSoftObjectPath) and
 			// looks up package existence via the Asset Registry. Engine and

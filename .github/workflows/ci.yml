@@ -3,6 +3,8 @@
 # - bootstrap: required repo paths present.
 # - version-sync: generated version targets match version.json.
 # - mcp-server: typecheck + test for the stdio MCP server package.
+# - e2e-smoke: end-to-end stdio smoke over the BUILT artifact against a loopback
+#   bridge stub (no editor required).
 # - editor-boundary: Editor/Runtime module boundary guard (Runtime must never
 #   reference Editor — see scripts/check-editor-boundary.py).
 
@@ -88,6 +90,39 @@ jobs:
 
       - name: Test
         run: npm test
+
+  e2e-smoke:
+    # End-to-end stdio smoke over the built artifact. Each script spawns its own
+    # loopback bridge stub, so no Unreal editor is needed. Nothing ran these in
+    # CI before, which is how the p1 script came to fail permanently against a
+    # stale tool roster without anyone noticing.
+    name: E2E smoke (stdio <-> bridge stub)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mcp-server
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: mcp-server/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Smoke — stdio lifecycle + tools/list + ping round-trip
+        run: npm run smoke:p1
+
+      - name: Smoke — tool dispatch (offline + structured tool error)
+        run: npm run smoke:p2
+
+      - name: Smoke — asset_find MCP <-> bridge round-trip
+        run: npm run smoke:p4
 
   editor-boundary:
     name: Editor/Runtime boundary guard

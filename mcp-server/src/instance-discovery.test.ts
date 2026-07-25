@@ -10,6 +10,7 @@ import {
   normalizePath,
   resolvePort,
   resolveAuthToken,
+  isUsablePort,
   isPidAlive,
   PORT_RANGE_START,
   PORT_RANGE_SIZE,
@@ -479,6 +480,51 @@ test("statusDir points at ~/.unreal-open-mcp", () => {
     process.env.HOME = sandbox.dir;
     process.env.USERPROFILE = sandbox.dir;
     assert.equal(statusDir(), join(sandbox.dir, ".unreal-open-mcp"));
+  } finally {
+    cleanupSandbox(sandbox);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// isUsablePort — the shared port predicate
+// ---------------------------------------------------------------------------
+
+test("isUsablePort accepts only integers in the TCP range", () => {
+  for (const ok of [1, 80, 20000, 65535]) {
+    assert.equal(isUsablePort(ok), true, `${ok} must be usable`);
+  }
+  for (const bad of [0, -1, 1.5, 65536, 70000, NaN, Infinity, "20000", null, undefined]) {
+    assert.equal(isUsablePort(bad), false, `${String(bad)} must be rejected`);
+  }
+});
+
+// Regression: resolvePort validated the ENV port strictly but the lock's port
+// only with `typeof === "number"`. A corrupt lock with port 0 / 1.5 / negative
+// was preferred over the deterministic hash, yielding an unusable URL and a
+// permanent, misleading bridge_offline instead of recovering via the hash.
+test("resolvePort ignores a lock whose port is out of range and falls back to the hash", () => {
+  const sandbox = makeSandbox();
+  try {
+    process.env.HOME = sandbox.dir;
+    process.env.USERPROFILE = sandbox.dir;
+    const projectPath = "/Users/foo/MyGame";
+    const expectedHashPort = computePort(projectPath);
+
+    for (const badPort of [0, -5, 1.5, 70000]) {
+      plantLock(sandbox, projectPath, {
+        port: badPort as number,
+        pid: process.pid, // alive, so only the port check can reject it
+      });
+      assert.equal(
+        resolvePort(projectPath),
+        expectedHashPort,
+        `lock port ${badPort} must be rejected in favour of the hash fallback`,
+      );
+    }
+
+    // Sanity: a VALID lock port is still preferred over the hash.
+    plantLock(sandbox, projectPath, { port: 31337, pid: process.pid });
+    assert.equal(resolvePort(projectPath), 31337);
   } finally {
     cleanupSandbox(sandbox);
   }

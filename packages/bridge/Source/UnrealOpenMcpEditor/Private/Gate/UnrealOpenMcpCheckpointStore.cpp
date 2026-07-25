@@ -30,6 +30,23 @@ namespace UnrealOpenMcpCheckpointStoreInternal
 		static FStore Instance;
 		return Instance;
 	}
+
+	/**
+	 * Rebuild IndexById from Entries. MUST be called after any TArray::RemoveAt
+	 * on Entries — removal shifts every later element down one, invalidating
+	 * every stored index above the removal point. Keeping this in one helper is
+	 * what stops the collision path and the eviction path from drifting apart
+	 * (they did: only the collision path rebuilt, so LRU eviction left the map
+	 * pointing at wrong / out-of-range indices).
+	 */
+	void Reindex(FStore& S)
+	{
+		S.IndexById.Reset();
+		for (int32 i = 0; i < S.Entries.Num(); ++i)
+		{
+			S.IndexById.Add(S.Entries[i].CheckpointId, i);
+		}
+	}
 } // namespace UnrealOpenMcpCheckpointStoreInternal
 
 void FUnrealOpenMcpCheckpointStore::Store(FUnrealOpenMcpCheckpointStoreEntry Entry)
@@ -44,13 +61,8 @@ void FUnrealOpenMcpCheckpointStore::Store(FUnrealOpenMcpCheckpointStoreEntry Ent
 	if (const int32* FoundIdx = S.IndexById.Find(Entry.CheckpointId))
 	{
 		S.Entries.RemoveAt(*FoundIdx);
-		S.IndexById.Remove(Entry.CheckpointId);
 		// Rebuild the index — RemoveAt shifted every later entry.
-		S.IndexById.Reset();
-		for (int32 i = 0; i < S.Entries.Num(); ++i)
-		{
-			S.IndexById.Add(S.Entries[i].CheckpointId, i);
-		}
+		Internal::Reindex(S);
 	}
 
 	if (Entry.LastAccessedUtc.IsEmpty())
@@ -77,8 +89,16 @@ void FUnrealOpenMcpCheckpointStore::Store(FUnrealOpenMcpCheckpointStoreEntry Ent
 				OldestIdx = i;
 			}
 		}
-		S.IndexById.Remove(S.Entries[OldestIdx].CheckpointId);
 		S.Entries.RemoveAt(OldestIdx);
+		// Reindex after EVERY removal. RemoveAt shifts every later element down
+		// by one, so removing the id from the map is not sufficient: without a
+		// rebuild, every id above OldestIdx stayed mapped to its pre-removal
+		// index — off by one — and the newest id mapped one past the end. Get()
+		// then indexed S.Entries out of bounds (a check() failure, or an OOB
+		// read+write when checks are compiled out) or silently returned a
+		// DIFFERENT checkpoint's fingerprint. Triggered by the 21st Store with
+		// DefaultCapacity 20, and every gate run mirrors a checkpoint.
+		Internal::Reindex(S);
 	}
 }
 

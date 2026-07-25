@@ -10,7 +10,7 @@ import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 // fidelity: the schema, the description, and the route policy are all shared
 // contracts (agents that consume one consume the other). The only delta is
 // the rule catalog (Unreal's v1 set is broken_soft_references /
-// missing_blueprint_parent / compile_errors instead of Unity's
+// missing_blueprint_parents / compile_errors instead of Unity's
 // missing_references / dependencies / scene_prefab_health / asmdef_audit /
 // ...).
 //
@@ -23,7 +23,7 @@ export const validateEdit: Tool = {
     "passed + issue counts grouped by severity (no per-issue list); raise to balanced/full for the full issues list, " +
     "and page large result sets with page_size/cursor. Each issue carries ruleId + categoryId (alias), " +
     "severity, code + issueCode (alias), assetPath, description, and fixId + fixSafe when a fix exists. " +
-    "Auto-selects rules by extension: .uasset/.umap → broken_soft_references + missing_blueprint_parent + " +
+    "Auto-selects rules by extension: .uasset/.umap → broken_soft_references + missing_blueprint_parents + " +
     "compile_errors; .cpp/.h → compile_errors. Error codes: missing_parameter (paths absent), " +
     "invalid_parameter (malformed body), unknown_rule (a requested rule id is not registered — carries " +
     "availableRules for self-correction).",

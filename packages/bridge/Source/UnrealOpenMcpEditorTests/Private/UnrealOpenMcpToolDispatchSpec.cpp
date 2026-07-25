@@ -155,7 +155,7 @@ namespace
 		{
 			if (Server)
 			{
-				Server->Stop();
+				Server->StopAndJoin();
 				delete Server;
 				Server = nullptr;
 			}

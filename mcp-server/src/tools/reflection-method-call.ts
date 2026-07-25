@@ -31,9 +31,10 @@ export const reflectionMethodCall: Tool = {
     "refuses an empty hint with paths_hint_required; set gate:\"off\" to " +
     "bypass). Error codes: missing_parameter (method absent, or neither target " +
     "nor class), ambiguous_target (both target and class), target_not_found, " +
-    "class_not_found, method_not_found, method_not_callable, invalid_argument " +
-    "(an arg failed to convert). Use reflection_method_find first to find an " +
-    "invokable function + its params.",
+    "class_not_found, method_not_found, method_not_callable, invalid_parameter " +
+    "(args present but not an object), invalid_argument (an arg failed to " +
+    "convert). Use reflection_method_find first to find an invokable function " +
+    "+ its params.",
   inputSchema: {
     type: "object",
     required: ["method"],

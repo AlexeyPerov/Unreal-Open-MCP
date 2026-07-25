@@ -24,8 +24,10 @@ runs on every endpoint when `authMode` is `"required"` (see [Auth](#auth)).
 
 The bridge mints a per-session bearer token on startup and writes it into the
 instance lock JSON as `authToken` (field #3, between `port` and `projectPath`).
-The token is a 64-char lowercase-hex string (256 bits of entropy), rotated on
-every bridge start so a restart invalidates any previously discovered token.
+The token is a 64-char lowercase-hex string carrying 256 bits of entropy from the
+OS cryptographic RNG (`BCryptGenRandom` on Windows, `/dev/urandom` on
+Mac/Linux), rotated on every bridge start so a restart invalidates any
+previously discovered token.
 Enforcement is opt-in via `authMode` in
 [project settings](#project-settings):
 
@@ -56,6 +58,30 @@ The MCP server auto-discovers the token from the live instance lock
 no lock exists (e.g. an `UNREAL_OPEN_MCP_BRIDGE_PORT` override bypasses the
 lock), no header is sent and the bridge must be in `authMode: "none"`. This is
 fully automatic — operators do not need to configure the token on the MCP side.
+
+### Browser clients are refused
+
+The bridge is a local MCP backend, not a browser API. Two rules enforce that:
+
+- Responses carry **no** `Access-Control-Allow-Origin` header.
+- Any request carrying an `Origin` header is refused with HTTP **403** and the
+  stable `origin_not_allowed` code, before the auth gate and before routing.
+
+```json
+{
+  "error": {
+    "code": "origin_not_allowed",
+    "message": "This bridge does not serve browser clients. Requests carrying an Origin header are refused."
+  }
+}
+```
+
+Both are needed. A CORS *simple* request (a `fetch` with a `text/plain` body)
+requires no preflight, so withholding the CORS header alone would stop a page
+reading the response but not the side effect — and the dispatchable surface
+includes `console_run_command`, `reflection_method_call` and `apply_fix` on a
+port any page can find by scanning the deterministic per-project range. A
+legitimate MCP client never sends `Origin`, so refusing it costs nothing.
 
 ### Project settings
 
@@ -287,7 +313,7 @@ Mutating success (HTTP 200):
       "newIssueKeys": [],
       "resolvedIssueKeys": []
     },
-    "categoriesRun": ["broken_soft_references", "missing_blueprint_parent", "compile_errors"],
+    "categoriesRun": ["broken_soft_references", "missing_blueprint_parents", "compile_errors"],
     "checkpointMs": 12,
     "validateMs": 47,
     "totalMs": 65,
@@ -460,8 +486,8 @@ curl -s -X POST http://127.0.0.1:$UNREAL_OPEN_MCP_BRIDGE_PORT/tools/unreal_open_
       "evidence": { "property": "Mesh.SkeletalMesh" }
     }
   ],
-  "categoriesRun": ["broken_soft_references", "missing_blueprint_parent", "compile_errors"],
-  "rulesApplied": ["broken_soft_references", "missing_blueprint_parent", "compile_errors"],
+  "categoriesRun": ["broken_soft_references", "missing_blueprint_parents", "compile_errors"],
+  "rulesApplied": ["broken_soft_references", "missing_blueprint_parents", "compile_errors"],
   "durationMs": 42
 }
 ```
@@ -475,7 +501,7 @@ validate_edit answers "is this asset currently healthy?".
 
 | Extension | Rules selected |
 |---|---|
-| `.uasset`, `.umap` | `broken_soft_references`, `missing_blueprint_parent`, `compile_errors` |
+| `.uasset`, `.umap` | `broken_soft_references`, `missing_blueprint_parents`, `compile_errors` |
 | `.cpp`, `.h`, `.cs` | `compile_errors` |
 | (unknown / empty) | fallback: every registered rule |
 
@@ -584,7 +610,7 @@ without auto-rollback protection:
 | `invalid_issue_id` | `issue_id` is not a well-formed `{ruleId}\|{severity}\|{assetPath}\|{issueCode}` key. |
 | `unknown_fix` (structured, `ok:true`) | `fix_id` does not resolve to a registered provider. Body carries `availableFixIds` + `applicableFixIdsForIssue` for self-correction. |
 | `fix_not_applicable` | The named fix's `CanFix()` rejected the issue id. |
-| `rollback_unavailable` | A non-dry-run apply was dispatched without the `ApplyFixGateRunner` wrapper (e.g. via `batch_execute`). Re-issue as a top-level call with `gate != off`, or use `dry_run:true`. |
+| `rollback_unavailable` | No rollback snapshot protects the apply, so it was refused. Two causes, distinguished by the message: (a) dispatched without the `ApplyFixGateRunner` wrapper (e.g. via `batch_execute`) — re-issue as a top-level call with `gate != off`; (b) the issue's target is not a writable content package (`/Engine/`, a `Source/` file, the `(project)` sentinel), so no snapshot is possible — not retryable; use `dry_run:true` and remediate manually. |
 | `fix_failed` | The provider's `Apply()` returned `!success` (e.g. ambiguous target, asset layout changed since scan). The gate runner rolls back under `enforce`. |
 | `fix_error` | The provider threw during `Apply()` (only fireable in `WITH_EXCEPTIONS` builds). |
 
@@ -629,7 +655,7 @@ the caller can branch on cause:
 | `/ping` 503 not ready | `bridge_http_error` (carries the `connected:false` fallback body) |
 | `/tools/{name}` 200 `{ok:true}` (read-only) | success (the `result` value verbatim — P2.1 shape) |
 | `/tools/{name}` 200 `{ok:true,...,"gate":{...}}` (mutating) | success; `result` is the primary payload and `gate` rides through as metadata so an agent can branch on `gate.outcome` |
-| `/tools/{name}` 200 `{ok:false}` | error carrying the tool's `error.code` / `error.message`; when a `gate` block is present it rides through as `detail.gate` |
+| `/tools/{name}` 200 `{ok:false}` | error carrying the tool's `error.code` / `error.message`; when a `gate` block is present it rides through as a top-level `gate` field alongside `error` |
 | `/ping` or `/tools/{name}` 401 | error carrying `unauthorized` (only when `authMode: "required"` and the Bearer token is missing/wrong) |
 | `/tools/{name}` 404 / 405 / 500 | error carrying the bridge's `error.code` |
 | no listener / ECONNREFUSED | `bridge_offline` |

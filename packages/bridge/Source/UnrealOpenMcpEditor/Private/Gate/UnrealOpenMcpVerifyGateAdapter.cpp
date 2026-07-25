@@ -17,6 +17,12 @@
 #include "Core/VerifyRunner.h"
 #include "Core/VerifyScope.h"
 
+// Rule id constants — the single source of truth for the registered ids, so the
+// selection roster here cannot drift from what FVerifyRunner has registered.
+#include "Rules/BrokenSoftReferences/BrokenSoftReferencesIssueCodes.h"
+#include "Rules/CompileErrors/CompileErrorsIssueCodes.h"
+#include "Rules/MissingBlueprintParent/MissingBlueprintParentIssueCodes.h"
+
 // P3.6 — SelectRuleIds narrows by file extension via FPaths::GetExtension.
 #include "Misc/Paths.h"
 
@@ -25,16 +31,25 @@ namespace
 	// Build the fallback rule roster. Mirrors Unity's
 	// `private static readonly string[] FallbackRuleIds` initializer, but the
 	// Unreal v1 set is the three registered rule families (broken_soft_
-	// references / missing_blueprint_parent / compile_errors) rather than
+	// references / missing_blueprint_parents / compile_errors) rather than
 	// Unity's missing_references / dependencies. Built lazily on first access
 	// (rather than as a static field initializer) so the order of this TU's
 	// static init vs. the verify module's static init is irrelevant.
+	//
+	// These reference the rules' own RuleId constants rather than repeating the
+	// string literals. Hand-copied literals had already drifted: the Blueprint
+	// entry read "missing_blueprint_parent" (the singular ISSUE code) while the
+	// registered RULE id is "missing_blueprint_parents". FVerifyRunner filters on
+	// exact rule id, so the rule never ran, the bogus id landed in
+	// UnknownRuleIds, and validate_edit answered `unknown_rule` instead of a
+	// health result for every .uasset/.umap path and every unrecognized
+	// extension (which falls back to this roster).
 	const TArray<FString>& BuildFallbackRuleIds()
 	{
 		static const TArray<FString> Fallback = {
-			TEXT("broken_soft_references"),
-			TEXT("missing_blueprint_parent"),
-			TEXT("compile_errors"),
+			UnrealOpenMcpVerify::BrokenSoftReferences::RuleId,
+			UnrealOpenMcpVerify::MissingBlueprintParent::RuleId,
+			UnrealOpenMcpVerify::CompileErrors::RuleId,
 		};
 		return Fallback;
 	}
@@ -195,9 +210,13 @@ TArray<FString> FUnrealOpenMcpVerifyGateAdapter::SelectRuleIds(const TArray<FStr
 			// broken soft object refs, a Blueprint with a missing parent, or
 			// (for Blueprint assets) compile errors. Source-path compile rules
 			// do not apply here.
-			RuleSet.Add(TEXT("broken_soft_references"));
-			RuleSet.Add(TEXT("missing_blueprint_parent"));
-			RuleSet.Add(TEXT("compile_errors"));
+			// Use the rules' own RuleId constants — the literal spelled here was
+			// "missing_blueprint_parent" (the singular ISSUE code), which is not
+			// a registered rule id, so the rule never ran and the gate reported
+			// unknown_rule instead.
+			RuleSet.Add(UnrealOpenMcpVerify::BrokenSoftReferences::RuleId);
+			RuleSet.Add(UnrealOpenMcpVerify::MissingBlueprintParent::RuleId);
+			RuleSet.Add(UnrealOpenMcpVerify::CompileErrors::RuleId);
 			bHasKnownExtension = true;
 		}
 		else if (Ext == TEXT("cpp") || Ext == TEXT("h") || Ext == TEXT("cs"))
@@ -206,7 +225,7 @@ TArray<FString> FUnrealOpenMcpVerifyGateAdapter::SelectRuleIds(const TArray<FStr
 			// for an MCP-server-side source path an agent might pass; Unreal
 			// itself does not compile .cs, but the rule's status provider may
 			// surface editor-build compile output that mentions them.)
-			RuleSet.Add(TEXT("compile_errors"));
+			RuleSet.Add(UnrealOpenMcpVerify::CompileErrors::RuleId);
 			bHasKnownExtension = true;
 		}
 	}

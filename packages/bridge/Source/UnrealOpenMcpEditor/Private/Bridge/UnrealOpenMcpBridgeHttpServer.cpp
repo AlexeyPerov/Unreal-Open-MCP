@@ -49,6 +49,10 @@ static constexpr uint32 MaxToolDispatchTimeoutMs = 600000;
 static constexpr int32 RecvBufferSize = 8 * 1024;
 // Cap on a single request body so a misbehaving peer can't exhaust memory.
 static constexpr int32 MaxBodyBytes = 8 * 1024 * 1024;
+// Deadline for flushing one response body. Generous because the screenshot
+// family can emit multi-megabyte payloads that need several socket drains, but
+// bounded so a peer that stops reading cannot pin a listener thread forever.
+static constexpr double ResponseWriteTimeoutSeconds = 30.0;
 
 // Extract the timeout_ms field from a tool-dispatch request body. Hand-rolled
 // substring parse (no FJsonObject) — mirrors Unity's BridgeRequestBody.
@@ -166,8 +170,12 @@ static TArray<FString> ExtractPathsHint(const FString& Body)
 	{
 		return Out;
 	}
-	const TArray<TSharedPtr<FJsonValue>>* Arr = Object->GetArrayField(TEXT("paths_hint"));
-	if (Arr == nullptr)
+	// TryGetArrayField, not GetArrayField: GetArrayField returns a const
+	// REFERENCE (it cannot be bound to a pointer), and on an absent/wrong-type
+	// field it logs a warning and yields an empty array rather than signalling
+	// the miss. The pointer-out form is the checkable one.
+	const TArray<TSharedPtr<FJsonValue>>* Arr = nullptr;
+	if (!Object->TryGetArrayField(TEXT("paths_hint"), Arr) || Arr == nullptr)
 	{
 		return Out;
 	}
@@ -201,7 +209,7 @@ static bool ExtractBoolField(const FString& Body, const FString& FieldName, bool
 	{
 		return DefaultValue;
 	}
-	if (!Object->HasTypedField<EJson::Bool>(FieldName))
+	if (!Object->HasTypedField<EJson::Boolean>(FieldName))
 	{
 		return DefaultValue;
 	}
@@ -307,9 +315,10 @@ FUnrealOpenMcpBridgeHttpServer::FUnrealOpenMcpBridgeHttpServer(
 
 FUnrealOpenMcpBridgeHttpServer::~FUnrealOpenMcpBridgeHttpServer()
 {
-	// Defensive Stop() — module destruct order can race ShutdownModule. The
-	// FRunnable override forwards to RequestStop, then we join.
-	Stop();
+	// Defensive teardown — module destruct order can race ShutdownModule.
+	// StopAndJoin (not the non-blocking FRunnable::Stop override) so the worker
+	// is provably done touching our sockets before the members are destroyed.
+	StopAndJoin();
 }
 
 bool FUnrealOpenMcpBridgeHttpServer::Start(uint16 Port, const FString& ProjectPath)
@@ -320,7 +329,7 @@ bool FUnrealOpenMcpBridgeHttpServer::Start(uint16 Port, const FString& ProjectPa
 	return Start(Port, ProjectPath, FUnrealOpenMcpBridgeBindAddress::Default(), FUnrealOpenMcpBridgeAuthPolicy::Default());
 }
 
-bool FUnrealOpenMcpBridgeHttpServer::Start(uint16 Port, const FString& ProjectPath, const FString& BindAddress, const FString& AuthMode)
+bool FUnrealOpenMcpBridgeHttpServer::Start(uint16 Port, const FString& ProjectPath, const FString& BindAddress, const FString& InAuthMode)
 {
 	LastStartError.Reset();
 	if (bRunning)
@@ -331,12 +340,33 @@ bool FUnrealOpenMcpBridgeHttpServer::Start(uint16 Port, const FString& ProjectPa
 
 	ProjectPathForPing = ProjectPath;
 
+	// Adopt the requested auth mode NOW, before the listener thread exists.
+	//
+	// This parameter used to be named `AuthMode`, shadowing the member of the
+	// same name, and was only fed to Decide() — never stored. So
+	// Start(port, path, "0.0.0.0", "required") passed the remote-bind gate and
+	// then served on 0.0.0.0 with the member still at its "none" default, i.e.
+	// IsAuthorized allowed every request. The module closed the hole with
+	// SetAuth only AFTER InstanceLock->Acquire, whose stale-lock sweep does
+	// unbounded disk I/O — a wide-open window on a remote-bound port.
+	//
+	// Setting it here means the gate is armed from the first accepted byte. The
+	// expected token is supplied later via SetAuth (it is minted with the bound
+	// port), and a "required" mode with an empty expected token fails closed in
+	// FUnrealOpenMcpBridgeAuthCheck.
+	//
+	// Pass an EMPTY token, not the previous session's. Carrying the old one
+	// forward across a StopAndJoin()/Start() cycle would keep accepting it until
+	// the module re-minted via Acquire, contradicting the documented guarantee
+	// that a bridge restart invalidates any previously discovered token.
+	SetAuth(InAuthMode, FString());
+
 	// P5.6 — resolve the bind address through the policy BEFORE touching the
 	// socket. Remote (0.0.0.0) is refused unless authMode is "required"; an
 	// invalid bindAddress coerces to loopback. Failing fast here means a
 	// misconfigured project never opens an unauthenticated network port.
 	const FUnrealOpenMcpBridgeBindAddress::FBindDecision Decision =
-		FUnrealOpenMcpBridgeBindAddress::Decide(BindAddress, AuthMode);
+		FUnrealOpenMcpBridgeBindAddress::Decide(BindAddress, InAuthMode);
 	if (!Decision.bAllowed)
 	{
 		LastStartError = Decision.RefusalReason;
@@ -408,14 +438,28 @@ bool FUnrealOpenMcpBridgeHttpServer::Start(uint16 Port, const FString& ProjectPa
 
 void FUnrealOpenMcpBridgeHttpServer::SetAuth(const FString& InAuthMode, const FString& InExpectedToken)
 {
-	// The worker thread reads AuthMode / ExpectedAuthToken on every request.
-	// The module calls this from the game thread in StartupModule right after
-	// the instance lock is acquired (and before the first MCP request can
-	// arrive), so no concurrent read/write race exists in practice. The fields
-	// are plain FStrings; if a future settings tab mutates these at runtime a
-	// FCriticalSection should wrap them.
+	// The listener thread reads AuthMode / ExpectedAuthToken on every request and
+	// Start() now adopts the mode before the thread exists, but SetAuth is also
+	// called again later (once the instance lock mints the token) while the
+	// listener IS running. FString assignment reallocates and frees the old
+	// buffer, so both fields must be written under the lock — otherwise a
+	// concurrent reader can observe a torn length/pointer pair or read freed
+	// memory on the request path.
+	FScopeLock Lock(&AuthLock);
 	AuthMode = InAuthMode;
 	ExpectedAuthToken = InExpectedToken;
+}
+
+FString FUnrealOpenMcpBridgeHttpServer::GetAuthMode() const
+{
+	FScopeLock Lock(&AuthLock);
+	return AuthMode;
+}
+
+FString FUnrealOpenMcpBridgeHttpServer::GetExpectedAuthToken() const
+{
+	FScopeLock Lock(&AuthLock);
+	return ExpectedAuthToken;
 }
 
 void FUnrealOpenMcpBridgeHttpServer::RequestStop()
@@ -433,7 +477,7 @@ void FUnrealOpenMcpBridgeHttpServer::CloseListener()
 	}
 }
 
-void FUnrealOpenMcpBridgeHttpServer::Stop()
+void FUnrealOpenMcpBridgeHttpServer::StopAndJoin()
 {
 	if (!bRunning && ListenSocket == nullptr && Thread == nullptr)
 	{
@@ -449,7 +493,9 @@ void FUnrealOpenMcpBridgeHttpServer::Stop()
 	// inside Wait/Accept would be a cross-thread socket-destruction race.
 	if (Thread != nullptr)
 	{
-		Thread->Wait(true);
+		// WaitForCompletion(), not Wait(true) — FRunnableThread has no Wait
+		// member (its API is WaitForCompletion() / Kill(bool bShouldWait)).
+		Thread->WaitForCompletion();
 		delete Thread;
 		Thread = nullptr;
 	}
@@ -518,8 +564,9 @@ void FUnrealOpenMcpBridgeHttpServer::HandleConnection(FSocket* Client)
 	FString Path;
 	FString AgentId;
 	FString Authorization;
+	FString Origin;
 	TArray<uint8> Body;
-	const bool bParsed = ReadRequest(*Client, Method, Path, AgentId, Authorization, Body);
+	const bool bParsed = ReadRequest(*Client, Method, Path, AgentId, Authorization, Origin, Body);
 
 	if (!bParsed)
 	{
@@ -532,6 +579,18 @@ void FUnrealOpenMcpBridgeHttpServer::HandleConnection(FSocket* Client)
 	// P5.6 — auth gate runs BEFORE routing so every endpoint (/ping,
 	// /tools/*, ...) is gated equally. No endpoint is exempt. On failure the
 	// 401 has already been written; close and return.
+	// Refuse browser-originated requests BEFORE anything else. A legitimate MCP
+	// client never sends Origin; a web page always does. This is what actually
+	// closes the drive-by CORS-simple-request surface (see CheckOrigin) —
+	// omitting Access-Control-Allow-Origin only stops the page READING the
+	// reply, not the fire-and-forget side effect.
+	if (!CheckOrigin(Origin, *Client))
+	{
+		Client->Close();
+		ISocketSubsystem::Get(PLATFORM_SOCKETSUBSYSTEM)->DestroySocket(Client);
+		return;
+	}
+
 	if (!CheckAuth(Authorization, *Client))
 	{
 		Client->Close();
@@ -547,7 +606,7 @@ void FUnrealOpenMcpBridgeHttpServer::HandleConnection(FSocket* Client)
 }
 
 bool FUnrealOpenMcpBridgeHttpServer::ReadRequest(
-	FSocket& Client, FString& OutMethod, FString& OutPath, FString& OutAgentId, FString& OutAuthorization, TArray<uint8>& OutBody)
+	FSocket& Client, FString& OutMethod, FString& OutPath, FString& OutAgentId, FString& OutAuthorization, FString& OutOrigin, TArray<uint8>& OutBody)
 {
 	// P2.1 full request reader. Accumulates bytes until the header terminator
 	// (\r\n\r\n), parses the request line + the three headers the bridge needs
@@ -628,6 +687,7 @@ bool FUnrealOpenMcpBridgeHttpServer::ReadRequest(
 	int32 ContentLength = 0;
 	OutAgentId.Reset();
 	OutAuthorization.Reset();
+	OutOrigin.Reset();
 	for (int32 i = 1; i < Lines.Num(); ++i)
 	{
 		const FString& Line = Lines[i];
@@ -654,6 +714,11 @@ bool FUnrealOpenMcpBridgeHttpServer::ReadRequest(
 		else if (Name.Equals(TEXT("Authorization"), ESearchCase::IgnoreCase))
 		{
 			OutAuthorization = Value;
+		}
+		else if (Name.Equals(TEXT("Origin"), ESearchCase::IgnoreCase))
+		{
+			// Captured so CheckOrigin can refuse browser-originated requests.
+			OutOrigin = Value;
 		}
 	}
 
@@ -708,6 +773,29 @@ bool FUnrealOpenMcpBridgeHttpServer::ReadRequest(
 	return true;
 }
 
+bool FUnrealOpenMcpBridgeHttpServer::CheckOrigin(const FString& Origin, FSocket& Client)
+{
+	if (Origin.IsEmpty())
+	{
+		return true;
+	}
+
+	// A browser sent this. Refuse with 403 and do NOT echo the Origin back.
+	// Logged at Warning because it means a web page found the port — worth
+	// surfacing to the developer.
+	UE_LOG(
+		LogUnrealOpenMcp,
+		Warning,
+		TEXT("[Unreal Open MCP] refused a request carrying an Origin header (browser-originated); ")
+		TEXT("the bridge is not a browser API"));
+
+	const FString Body = FUnrealOpenMcpBridgeJson::BuildErrorJson(
+		TEXT("origin_not_allowed"),
+		TEXT("This bridge does not serve browser clients. Requests carrying an Origin header are refused."));
+	SendJson(Client, 403, Body);
+	return false;
+}
+
 bool FUnrealOpenMcpBridgeHttpServer::CheckAuth(const FString& AuthorizationHeader, FSocket& Client)
 {
 	// P5.6 — the auth gate. Runs BEFORE routing on every request; no endpoint
@@ -715,7 +803,11 @@ bool FUnrealOpenMcpBridgeHttpServer::CheckAuth(const FString& AuthorizationHeade
 	// FUnrealOpenMcpBridgeAuthCheck so the matrix is unit-testable without a
 	// socket. On failure we write the 401 with the stable `unauthorized` code
 	// and return false so the caller closes without routing.
-	if (FUnrealOpenMcpBridgeAuthCheck::IsAuthorized(AuthMode, AuthorizationHeader, ExpectedAuthToken))
+	// Snapshot both fields under AuthLock (via the getters) before comparing:
+	// this runs on the listener thread while SetAuth may be assigning them from
+	// the game thread, and an unsynchronized FString read is a use-after-free.
+	if (FUnrealOpenMcpBridgeAuthCheck::IsAuthorized(
+			GetAuthMode(), AuthorizationHeader, GetExpectedAuthToken()))
 	{
 		return true;
 	}
@@ -787,8 +879,25 @@ void FUnrealOpenMcpBridgeHttpServer::RouteRequest(
 			return;
 		}
 
-		// Decode the body to UTF-8 FString for the handler + JSON arg extraction.
-		const FString BodyText = FString(UE_PTRDIFF_TO_INT32(Body.Num()), reinterpret_cast<const ANSICHAR*>(Body.GetData()));
+		// Decode the body as UTF-8 for the handler + JSON arg extraction. The
+		// documented Content-Type is application/json; charset=utf-8, and
+		// SendJson encodes responses with FTCHARToUTF8 — so the request side must
+		// DECODE utf-8, not widen bytes. FString(int32, const ANSICHAR*) widens
+		// each byte to one TCHAR, which mangles every multi-byte sequence (any
+		// non-ASCII actor label / asset path / console command). FUTF8ToTCHAR is
+		// the matching inverse.
+		FString BodyText;
+		if (Body.Num() > 0)
+		{
+			// Explicit .Get()/.Length() rather than passing the conversion object
+			// straight to FString: FUTF8ToTCHAR's source type is UTF8CHAR (distinct
+			// from ANSICHAR in UE5), so the cast target and the char-range overload
+			// resolution are both unambiguous this way. Same form SendJson uses on
+			// the way out.
+			const auto Converted = StringCast<TCHAR>(
+				reinterpret_cast<const UTF8CHAR*>(Body.GetData()), Body.Num());
+			BodyText = FString(Converted.Length(), Converted.Get());
+		}
 		HandleToolDispatch(Client, ToolName, BodyText, AgentId);
 		return;
 	}
@@ -1166,21 +1275,53 @@ void FUnrealOpenMcpBridgeHttpServer::HandleToolDispatch(
 
 bool FUnrealOpenMcpBridgeHttpServer::WriteAll(FSocket& Client, const uint8* Data, int32 Size)
 {
+	// The client socket is non-blocking, so a full kernel send buffer surfaces as
+	// Send() returning FALSE with errno EWOULDBLOCK — NOT as a 0-byte send. The
+	// previous `return false` on any Send failure therefore truncated every
+	// response larger than the socket send buffer (~64-256 KB): guaranteed for
+	// the screenshot family (documented cap 40 MiB) and reachable by large
+	// asset_find pages. The client then saw a Content-Length mismatch and
+	// unparsable JSON.
+	//
+	// So: treat a failed/zero send as "not writable yet", wait for writability,
+	// and retry until a deadline. Only a hard connection error or the deadline
+	// aborts the write.
+	const double Deadline = FPlatformTime::Seconds() + ResponseWriteTimeoutSeconds;
+	const FTimespan WriteWait = FTimespan::FromSeconds(RecvPollIntervalSeconds);
+
 	int32 Sent = 0;
 	while (Sent < Size)
 	{
 		int32 JustSent = 0;
-		if (!Client.Send(Data + Sent, Size - Sent, JustSent))
+		const bool bSendOk = Client.Send(Data + Sent, Size - Sent, JustSent);
+
+		if (bSendOk && JustSent > 0)
+		{
+			Sent += JustSent;
+			continue;
+		}
+
+		// A real connection error is fatal — the peer is gone, retrying cannot
+		// help.
+		if (Client.GetConnectionState() == SCS_ConnectionError)
 		{
 			return false;
 		}
-		if (JustSent <= 0)
+
+		if (FPlatformTime::Seconds() >= Deadline)
 		{
-			// Non-blocking socket would spin here; pace it.
-			FPlatformProcess::Sleep(0.005f);
-			continue;
+			UE_LOG(
+				LogUnrealOpenMcp,
+				Warning,
+				TEXT("[Unreal Open MCP] response write timed out after %d/%d bytes"),
+				Sent,
+				Size);
+			return false;
 		}
-		Sent += JustSent;
+
+		// Backpressure: block until the socket drains (or the poll interval
+		// elapses, so the deadline is still honoured).
+		Client.Wait(ESocketWaitConditions::WaitForWrite, WriteWait);
 	}
 	return true;
 }
@@ -1199,6 +1340,7 @@ void FUnrealOpenMcpBridgeHttpServer::SendJson(FSocket& Client, uint16 StatusCode
 		case 200: Reason = TEXT("OK"); break;
 		case 400: Reason = TEXT("Bad Request"); break;
 		case 401: Reason = TEXT("Unauthorized"); break;
+		case 403: Reason = TEXT("Forbidden"); break;
 		case 404: Reason = TEXT("Not Found"); break;
 		case 405: Reason = TEXT("Method Not Allowed"); break;
 		case 500: Reason = TEXT("Internal Server Error"); break;
@@ -1206,12 +1348,19 @@ void FUnrealOpenMcpBridgeHttpServer::SendJson(FSocket& Client, uint16 StatusCode
 		default:  Reason = TEXT("OK"); break;
 	}
 
+	// NO Access-Control-Allow-Origin. The bridge is a local stdio-MCP backend,
+	// never a browser API. `ACAO: *` let any web page a developer happened to
+	// visit READ tool results back off the deterministic per-project port.
+	//
+	// Omitting the header is only half the fix — it stops the read-back, not the
+	// fire-and-forget side effect, because a CORS *simple* request needs no
+	// preflight. CheckOrigin (called before auth and routing) is what actually
+	// closes that surface by refusing any request carrying an Origin header.
 	const FString Header = FString::Printf(
 		TEXT("HTTP/1.1 %u %s\r\n")
 		TEXT("Content-Type: application/json; charset=utf-8\r\n")
 		TEXT("Content-Length: %d\r\n")
 		TEXT("Connection: close\r\n")
-		TEXT("Access-Control-Allow-Origin: *\r\n")
 		TEXT("\r\n"),
 		static_cast<uint32>(StatusCode),
 		*Reason,

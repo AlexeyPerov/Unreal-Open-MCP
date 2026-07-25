@@ -56,6 +56,14 @@ private:
 	 * @param IssueId     canonical issue key.
 	 * @param OutAssetPath      the referencing asset ("/Game/Foo/Bar.Bar").
 	 * @param OutPropertyPath   the property the soft pointer lives on.
+	 * @param OutTargetPackage  the BROKEN target package the rule pinned. Apply
+	 *        verifies the property still points here before clearing, so a
+	 *        reference the agent already re-pointed at a VALID asset between
+	 *        scan and fix is left alone instead of being nulled.
 	 */
-	static bool TryExtractTarget(const FString& IssueId, FString& OutAssetPath, FString& OutPropertyPath);
+	static bool TryExtractTarget(
+		const FString& IssueId,
+		FString& OutAssetPath,
+		FString& OutPropertyPath,
+		FString& OutTargetPackage);
 };

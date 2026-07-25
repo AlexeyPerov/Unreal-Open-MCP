@@ -5,15 +5,18 @@
 //   - `unreal_open_mcp_editor_application_get_state` — read-only snapshot of the
 //     editor play state (isPlaying / isPaused / isSimulating) + the current
 //     editor map (persistent-level package path + short name). Read from
-//     GEditor->PlayWorld / bIsSimulatingInEditor / the editor world context.
+//     GEditor->IsPlaySessionInProgress / IsSimulateInEditorInProgress /
+//     bDebugPauseExecution / the editor world context.
 //   - `unreal_open_mcp_editor_application_set_state` — drive PIE transitions by
-//     an `action` enum (start / stop / pause / resume). start/stop go through
-//     GEditor->RequestPlaySession / RequestEndPlayMap, which are LATENT (the
-//     transition happens on a later editor tick), so the tool returns a
-//     structured `{ action, pending:true }` and the agent polls get-state to
+//     an `action` enum (start / stop / pause / resume). ALL FOUR transitions are
+//     LATENT (the editor applies them on a later tick), so every success returns
+//     a structured `{ action, pending:true }` and the agent polls get-state to
 //     observe the settled transition (the Unreal-MCP honesty pattern — never
-//     claim an unobserved transition). pause/resume drive the PIE player
-//     controller's pause immediately (pending:false). Invalid transitions
+//     claim an unobserved transition). start/stop go through
+//     GEditor->RequestPlaySession / RequestEndPlayMap; pause/resume go through
+//     GEditor->SetPIEWorldsPaused (the editor pause flag bDebugPauseExecution,
+//     NOT APlayerController::SetPause which is a gameplay mechanism that does
+//     not reliably round-trip with the editor pause flag). Invalid transitions
 //     (start while already playing, stop/pause/resume while not playing, pause
 //     while already paused, resume while not paused) return a structured
 //     `invalid_transition` — no silent restart, selection/state unchanged.
@@ -59,7 +62,8 @@
 // Behavior reference (read-only): Unreal-MCP's editor handlers
 // (UnrealMcpEditorTools.cpp — editor-application-get-state / -set-state,
 // editor-selection-get / -set) for the correct PIE request APIs
-// (RequestPlaySession / RequestEndPlayMap), the pending/poll contract, and the
+// (RequestPlaySession / RequestEndPlayMap / SetPIEWorldsPaused + the
+// bDebugPauseExecution pause flag), the pending/poll contract, and the
 // USelection resolve/clear rules.
 //
 // Every handler registered here runs ON THE GAME THREAD (the HTTP server

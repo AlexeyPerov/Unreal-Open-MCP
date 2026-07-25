@@ -180,6 +180,21 @@ public:
 	bool IsShutdown() const { return bShutdown; }
 
 private:
+	/** Pooled manual-reset event shared (ref-counted) between the game-thread
+	 *  body and the timeout watcher. Whichever finishes LAST returns it to the
+	 *  pool, so a slow body that triggers the event after the watcher already
+	 *  gave up can never poke a recycled event. Pattern from the
+	 *  Unreal-MCP reference (FSharedPooledEvent).
+	 *
+	 *  Declared before FDispatchStateBase because that type holds a weak ref to
+	 *  one (so Shutdown can wake a parked watcher). */
+	struct FSharedPooledEvent
+	{
+		FEvent* Event = nullptr;
+		FSharedPooledEvent();
+		~FSharedPooledEvent();
+	};
+
 	/** Drain-stamp bookkeeping shared between the game-thread body and the
 	 * timeout watcher. The watcher reads bStartedDrain to split
 	 * GameThreadBlocked (false → never picked up) from Timeout (true → ran
@@ -189,6 +204,26 @@ private:
 		/** Set to true the instant the game thread begins running the body.
 		 *  Written on the game thread, read by the timeout watcher thread. */
 		FThreadSafeBool bStartedDrain;
+
+		virtual ~FDispatchStateBase() = default;
+
+		/**
+		 * Type-erased "resolve me with DispatcherShutdown". Lets Shutdown()
+		 * complete every in-flight waiter without knowing its T. Absorbed by the
+		 * single-completion guard when the body already won the race.
+		 */
+		virtual void CompleteWithDispatcherShutdown() = 0;
+
+		/**
+		 * The pooled event this dispatch's timeout watcher is parked on.
+		 *
+		 * Shutdown() must trigger it as well as completing the promise: the
+		 * watcher blocks in Event->Wait(TimeoutMs) and resolving the promise does
+		 * not wake it. Leaving it parked just moves the teardown stall from the
+		 * HTTP worker to GThreadPool, which FQueuedThreadPool::Destroy() waits on
+		 * at engine exit.
+		 */
+		TWeakPtr<FSharedPooledEvent, ESPMode::ThreadSafe> WatcherEvent;
 	};
 
 	/**
@@ -211,18 +246,14 @@ private:
 				Promise.SetValue(MoveTemp(InResult));
 			}
 		}
-	};
 
-	/** Pooled manual-reset event shared (ref-counted) between the game-thread
-	 *  body and the timeout watcher. Whichever finishes LAST returns it to the
-	 *  pool, so a slow body that triggers the event after the watcher already
-	 *  gave up can never poke a recycled event. Pattern from the
-	 *  Unreal-MCP reference (FSharedPooledEvent). */
-	struct FSharedPooledEvent
-	{
-		FEvent* Event = nullptr;
-		FSharedPooledEvent();
-		~FSharedPooledEvent();
+		virtual void CompleteWithDispatcherShutdown() override
+		{
+			Complete(TUnrealOpenMcpDispatchResult<T>::MakeError(
+				EUnrealOpenMcpDispatchResult::DispatcherShutdown,
+				TEXT("dispatcher_shutdown"),
+				TEXT("Game-thread dispatcher is shutting down.")));
+		}
 	};
 
 	/**
@@ -237,9 +268,34 @@ private:
 		const TSharedRef<FSharedPooledEvent, ESPMode::ThreadSafe>& Done,
 		TFunction<T()>&& Body);
 
+	/**
+	 * Register an in-flight dispatch so Shutdown() can complete it. Prunes
+	 * already-expired entries on the way in so the list stays bounded by the
+	 * number of concurrently pending dispatches, not the process lifetime.
+	 * Weak, so a completed dispatch's state is freed normally.
+	 *
+	 * Returns FALSE when the dispatcher has already shut down, in which case the
+	 * state was NOT registered and the caller must fail the dispatch fast. The
+	 * shutdown test lives in here, under InFlightLock, precisely so it cannot
+	 * race the sweep: a caller that checked `bShutdown` itself and then
+	 * registered could slip in after Shutdown() had already drained the list,
+	 * leaving a listener thread blocked on Future.Get() for the full timeout —
+	 * the very teardown deadlock this registry exists to prevent.
+	 */
+	bool TrackInFlight(const TWeakPtr<FDispatchStateBase, ESPMode::ThreadSafe>& State);
+
 	/** True once Shutdown() has run. Reads are benign and happen off the game
 	 *  thread (HTTP worker); writes are game-thread only in Shutdown(). */
 	FThreadSafeBool bShutdown;
+
+	/** In-flight dispatch states, so Shutdown() can resolve pending waiters
+	 *  instead of leaving a listener thread blocked on Future.Get() until its
+	 *  per-call timeout elapses (which deadlocks editor teardown when the game
+	 *  thread is the one shutting down). Guarded by InFlightLock — registration
+	 *  runs on the caller's thread (typically the HTTP worker), the sweep runs
+	 *  on the game thread. */
+	TArray<TWeakPtr<FDispatchStateBase, ESPMode::ThreadSafe>> InFlight;
+	mutable FCriticalSection InFlightLock;
 };
 
 // ---------------------------------------------------------------------------
@@ -258,12 +314,26 @@ void FUnrealOpenMcpGameThreadDispatcher::RunBody(
 	// split "never started" (GameThreadBlocked) from "ran long" (Timeout).
 	State->bStartedDrain = true;
 
+	// void vs non-void split: void bodies cannot return a value to Ok(), so
+	// invoke the body as a statement and call the zero-arg Ok(). The
+	// if-constexpr form keeps a single template for both cases.
+	//
+	// The try/catch MUST be guarded: ModuleRules.bEnableExceptions defaults to
+	// false, so this header compiles with -fno-exceptions in every translation
+	// unit that instantiates EnqueueAsync<T>, and an unguarded catch is a hard
+	// compile error there.
+	//
+	// Guarded on !PLATFORM_EXCEPTIONS_DISABLED — the macro UBT actually defines —
+	// rather than WITH_EXCEPTIONS, which nothing in this project or the engine
+	// defines and which therefore always evaluates to 0. (The pre-existing
+	// WITH_EXCEPTIONS uses in VerifyRunner / GatePolicy / FixProviderRegistry /
+	// ApplyFixTool have the same latent problem: their catch blocks are dead in
+	// every configuration.) With the correct macro the Faulted / body_faulted
+	// translation actually works if a project opts into exceptions.
 	TUnrealOpenMcpDispatchResult<T> Resolved;
+#if !PLATFORM_EXCEPTIONS_DISABLED
 	try
 	{
-		// void vs non-void split: void bodies cannot return a value to Ok(),
-		// so invoke the body as a statement and call the zero-arg Ok(). The
-		// if-constexpr form keeps a single template for both cases.
 		if constexpr (std::is_void_v<T>)
 		{
 			Body();
@@ -284,6 +354,19 @@ void FUnrealOpenMcpGameThreadDispatcher::RunBody(
 			TEXT("body_faulted"),
 			TEXT("Dispatched body threw an exception."));
 	}
+#else
+	// Exceptions disabled: invoke directly. A throwing body is fatal either way
+	// under -fno-exceptions, so there is nothing to translate into Faulted.
+	if constexpr (std::is_void_v<T>)
+	{
+		Body();
+		Resolved = TUnrealOpenMcpDispatchResult<T>::Ok();
+	}
+	else
+	{
+		Resolved = TUnrealOpenMcpDispatchResult<T>::Ok(Body());
+	}
+#endif
 
 	State->Complete(MoveTemp(Resolved));
 	Done->Event->Trigger(); // release the timeout watcher if it is still waiting
@@ -301,8 +384,22 @@ TFuture<TUnrealOpenMcpDispatchResult<T>> FUnrealOpenMcpGameThreadDispatcher::Enq
 	const FEventRef Done = MakeShared<FSharedPooledEvent, ESPMode::ThreadSafe>();
 	TFuture<TUnrealOpenMcpDispatchResult<T>> Future = State->Promise.GetFuture();
 
-	// Post-teardown fail-fast: resolve immediately, do not burn the timeout.
-	if (bShutdown)
+	// Publish the watcher event on the state so Shutdown() can WAKE a parked
+	// timeout watcher, not merely resolve the promise. Weak: whichever of the two
+	// finishes last returns the event to the pool.
+	State->WatcherEvent = Done;
+
+	// Register the pending state so Shutdown() can resolve it, and fail fast if
+	// the dispatcher is already down.
+	//
+	// The shutdown test lives INSIDE TrackInFlight, under InFlightLock, together
+	// with the insertion. A separate `if (bShutdown)` check here followed by an
+	// unlocked register was itself racy: a dispatch could pass the check
+	// microseconds before Shutdown() flipped the flag, then register after the
+	// sweep had already drained the list — never completed, leaving a listener
+	// blocked on Future.Get() for up to the full (600 s) timeout.
+	if (!TrackInFlight(TWeakPtr<FDispatchStateBase, ESPMode::ThreadSafe>(
+			StaticCastSharedRef<FDispatchStateBase>(State))))
 	{
 		State->Complete(TUnrealOpenMcpDispatchResult<T>::MakeError(
 			EUnrealOpenMcpDispatchResult::DispatcherShutdown,

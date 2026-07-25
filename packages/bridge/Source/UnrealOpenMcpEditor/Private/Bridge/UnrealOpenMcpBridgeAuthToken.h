@@ -35,16 +35,22 @@ struct UNREALOPENMCPEDITOR_API FUnrealOpenMcpBridgeAuthToken
 	static constexpr const TCHAR* BearerPrefix = TEXT("Bearer ");
 
 	/**
-	 * Mint a fresh token. Never returns empty — on the (impossible) RNG failure
-	 * path it returns a zero-filled hex so the auth check still fails closed
-	 * (the next Acquire mints a real one). Uses FRandomStream with a
-	 * cryptographically-strong seed (FDateTime::UtcNow ticks + process id + a
-	 * large random) — see the .cpp for the rationale.
+	 * Mint a fresh 32-byte token from the OS cryptographic RNG, hex-encoded to 64
+	 * lowercase chars. Never returns empty.
 	 *
-	 * For the Unreal port we use FMath::Rand helper backed by a per-call
-	 * FRandomStream seeded from FDateTime::UtcNow().GetTicks() + a high-res
-	 * counter; the implementation avoids third-party crypto deps while still
-	 * producing 256 bits of fresh entropy per mint. (See .cpp for details.)
+	 * Entropy source (see the .cpp for detail):
+	 *   - Windows  → BCryptGenRandom (BCRYPT_USE_SYSTEM_PREFERRED_RNG)
+	 *   - Mac/Linux → /dev/urandom
+	 *   - Fallback (OS source unavailable) → SHA-256 hash extraction over a
+	 *     multi-source entropy mix, with a Warning logged so the degradation is
+	 *     visible rather than silent.
+	 *
+	 * NOT FRandomStream. An earlier implementation seeded an FRandomStream from a
+	 * time/cycle/PID/stack mix and drew all 32 bytes from it — but FRandomStream
+	 * is a 32-bit-state LCG, so the "256-bit" token was a deterministic function
+	 * of at most 2^32 states, dominated by the wall clock. This token is the sole
+	 * credential guarding a remote-bindable tool surface that can run console
+	 * commands and invoke arbitrary UFunctions, so it must come from a CSPRNG.
 	 */
 	static FString Generate();
 

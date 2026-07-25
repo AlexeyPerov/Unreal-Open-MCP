@@ -263,8 +263,14 @@ namespace
 		{
 			return 0;
 		}
-		const int32 Requested = static_cast<int32>(Args->GetNumberField(TEXT("offset")));
-		return Requested < 0 ? 0 : Requested;
+		// int64 read then clamp on BOTH ends. Clamping only from below let
+		// `offset: 2147483647` reach the window arithmetic, where Offset + Limit
+		// overflows int32 (UB; wraps negative in practice). The ceiling is the
+		// max representable page start, so a wildly large offset simply yields an
+		// empty page instead of undefined behavior.
+		const int64 Requested = static_cast<int64>(Args->GetNumberField(TEXT("offset")));
+		return static_cast<int32>(
+			FMath::Clamp<int64>(Requested, 0, MAX_int32 - AssetFindMaxLimit));
 	}
 
 	/** Resolve the `limit` argument into [1, MaxLimit], falling back to the
@@ -351,12 +357,16 @@ namespace
 			{
 				return nullptr;
 			}
+			// TryGetField, not GetField: FJsonObject::GetField is a template on
+			// EJson with no default argument (GetField<EJson::Object>(...)), so
+			// the untemplated call does not compile. TryGetField is the
+			// type-agnostic accessor and returns nullptr on a miss.
 			if (i == Segments.Num() - 1)
 			{
-				return Current->GetField(Segment);
+				return Current->TryGetField(Segment);
 			}
 			// Intermediate segment must be an object to keep walking.
-			const TSharedPtr<FJsonValue> Next = Current->GetField(Segment);
+			const TSharedPtr<FJsonValue> Next = Current->TryGetField(Segment);
 			if (!Next.IsValid() || Next->Type != EJson::Object)
 			{
 				return nullptr;
@@ -910,6 +920,21 @@ void FUnrealOpenMcpAssetTools::Register(FUnrealOpenMcpToolRegistry& Registry)
 				return FUnrealOpenMcpToolDispatchResult::Fail(
 					TEXT("asset_not_found"),
 					FString::Printf(TEXT("No source asset at '%s'."), *Source));
+			}
+
+			// Guard the SOURCE root too, not just the destination. RenameAsset
+			// REMOVES the asset from its original location, so a move is
+			// destructive to the source root: {"source":"/Engine/BasicShapes/Cube",
+			// "destination":"/Game/Cube"} passed every check and mutated engine
+			// content. asset_delete already guards its target for the same reason.
+			if (!IsWritableContentRoot(Source))
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("invalid_content_root"),
+					FString::Printf(
+						TEXT("Refusing to move '%s' out of an engine content root (a move removes the source); ")
+						TEXT("copy it into a project root like '/Game' instead."),
+						*Source));
 			}
 
 			FString DestPackagePath;

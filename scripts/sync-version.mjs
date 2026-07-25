@@ -34,12 +34,39 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 const TRIO_SOURCE = "version.json";
 
+/**
+ * Apply a version regex, reporting whether it matched at all.
+ *
+ * Every replacer returns { body, matched } so syncTargets can distinguish
+ * "already in sync" from "the pattern no longer matches this file". Previously
+ * both looked identical (`updated === original`), so renaming or reformatting a
+ * version declaration made the --check gate silently report OK forever.
+ *
+ * @param {string} body @param {RegExp} re @param {string} v
+ * @returns {{ body: string, matched: boolean }}
+ */
+function applyVersionRegex(body, re, v) {
+  let matched = false;
+  const out = body.replace(re, (_, pre, post) => {
+    matched = true;
+    return `${pre}${v}${post}`;
+  });
+  return { body: out, matched };
+}
+
 /** @param {string} body @param {string} v */
 function setJsonVersion(body, v) {
-  return body.replace(
-    /("version"\s*:\s*")[^"]*(")/,
-    (_, pre, post) => `${pre}${v}${post}`,
-  );
+  return applyVersionRegex(body, /("version"\s*:\s*")[^"]*(")/, v);
+}
+
+/**
+ * Replace the `VersionName` field in a .uplugin descriptor. Distinct from
+ * setJsonVersion because a .uplugin's `"Version"` is an integer build counter
+ * and its human-readable string lives in `"VersionName"`.
+ * @param {string} body @param {string} v
+ */
+function setUpluginVersionName(body, v) {
+  return applyVersionRegex(body, /("VersionName"\s*:\s*")[^"]*(")/, v);
 }
 
 /**
@@ -48,10 +75,7 @@ function setJsonVersion(body, v) {
  * @param {string} body @param {string} v
  */
 function setCppBridgeVersion(body, v) {
-  return body.replace(
-    /(BRIDGE_VERSION\s*=\s*TEXT\(")[^"]*("\))/,
-    (_, pre, post) => `${pre}${v}${post}`,
-  );
+  return applyVersionRegex(body, /(BRIDGE_VERSION\s*=\s*TEXT\(")[^"]*("\))/, v);
 }
 
 const TRIO_TARGETS = [
@@ -79,6 +103,21 @@ const TRIO_TARGETS = [
     description: "C++ BRIDGE_VERSION constant (UnrealOpenMcpBridgeSession.h)",
     replace: (b, v) => setCppBridgeVersion(b, v),
   },
+  // The .uplugin descriptors carry a user-visible VersionName that the header
+  // claims is generated from version.json but which was never in this list — it
+  // would silently drift on the next bump.
+  {
+    file: "packages/bridge/UnrealOpenMCP.uplugin",
+    kind: "uplugin",
+    description: "bridge plugin descriptor VersionName",
+    replace: (b, v) => setUpluginVersionName(b, v),
+  },
+  {
+    file: "packages/verify/UnrealOpenMCPVerify.uplugin",
+    kind: "uplugin",
+    description: "verify plugin descriptor VersionName",
+    replace: (b, v) => setUpluginVersionName(b, v),
+  },
 ];
 
 /** @param {string} rel @returns {string} */
@@ -105,7 +144,7 @@ function readSourceVersion(sourceFile) {
  * @param {string} sourceFile
  * @param {Array} targets
  * @param {"write"|"check"} mode
- * @returns {{ changed: Array, drifted: Array, missing: Array }}
+ * @returns {{ changed: Array, drifted: Array, missing: Array, unmatched: Array }}
  */
 function syncTargets(sourceFile, targets, mode) {
   const want = readSourceVersion(sourceFile);
@@ -115,6 +154,8 @@ function syncTargets(sourceFile, targets, mode) {
   const drifted = [];
   /** @type {Array<{file:string, description:string}>} */
   const missing = [];
+  /** @type {Array<{file:string, description:string}>} */
+  const unmatched = [];
 
   for (const t of targets) {
     const p = abs(t.file);
@@ -123,7 +164,14 @@ function syncTargets(sourceFile, targets, mode) {
       continue;
     }
     const original = readFileSync(p, "utf8");
-    const updated = t.replace(original, want);
+    const { body: updated, matched } = t.replace(original, want);
+    if (!matched) {
+      // The version declaration this target owns is no longer where the regex
+      // expects it. That is a broken gate, not a passing one — record it so both
+      // modes fail instead of reporting "already in sync".
+      unmatched.push({ file: t.file, description: t.description });
+      continue;
+    }
     if (updated === original) continue;
     const from = extractVersion(original, t.kind);
     if (mode === "write") {
@@ -133,13 +181,17 @@ function syncTargets(sourceFile, targets, mode) {
       drifted.push({ file: t.file, description: t.description, from, want });
     }
   }
-  return { changed, drifted, missing };
+  return { changed, drifted, missing, unmatched };
 }
 
 /** @param {string} body @param {string} kind @returns {string | undefined} */
 function extractVersion(body, kind) {
   if (kind === "cpp") {
     const m = body.match(/BRIDGE_VERSION\s*=\s*TEXT\("([^"]+)"\)/);
+    return m ? m[1] : undefined;
+  }
+  if (kind === "uplugin") {
+    const m = body.match(/"VersionName"\s*:\s*"([^"]+)"/);
     return m ? m[1] : undefined;
   }
   const m = body.match(/"version"\s*:\s*"([^"]+)"/);
@@ -237,8 +289,17 @@ if (isBump || isSet) {
 const mode = CHECK ? "check" : "write";
 const result = syncTargets(TRIO_SOURCE, TRIO_TARGETS, mode);
 
+// A missing file or an unmatched pattern is a BROKEN GATE, not a pass. Both
+// modes must surface them and exit non-zero: previously check mode only warned,
+// so moving/renaming a target (or reformatting its version declaration) made
+// both ci.yml and version-sync.yml silently green forever.
+const brokenTargets = [
+  ...result.missing.map((m) => ({ ...m, why: "file not found" })),
+  ...result.unmatched.map((m) => ({ ...m, why: "version pattern did not match" })),
+];
+
 if (mode === "write") {
-  if (result.changed.length === 0 && result.missing.length === 0) {
+  if (result.changed.length === 0) {
     console.log(`shared trio: already in sync at ${readSourceVersion(TRIO_SOURCE)}.`);
   } else {
     console.log(`shared trio: synced to ${readSourceVersion(TRIO_SOURCE)}.`);
@@ -246,17 +307,26 @@ if (mode === "write") {
       console.log(`  ${c.file}${c.from ? ` (${c.from} → ${c.to})` : ""}`);
     }
   }
-  for (const m of result.missing) {
-    console.warn(`  ⚠  missing target: ${m.file} (${m.description})`);
+}
+
+if (brokenTargets.length > 0) {
+  console.error("✖ shared trio target(s) could not be synced:");
+  for (const b of brokenTargets) {
+    console.error(`  ${b.file}: ${b.why} (${b.description})`);
   }
+  console.error(
+    "\nFix: restore the target, or update its entry in TRIO_TARGETS " +
+      "(scripts/sync-version.mjs).",
+  );
+  process.exit(1);
+}
+
+if (mode === "write") {
   process.exit(0);
 }
 
 if (result.drifted.length === 0) {
   console.log(`shared trio: OK (all targets match ${readSourceVersion(TRIO_SOURCE)}).`);
-  for (const m of result.missing) {
-    console.warn(`  ⚠  missing target: ${m.file} (${m.description})`);
-  }
   process.exit(0);
 }
 

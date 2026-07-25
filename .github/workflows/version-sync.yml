@@ -15,6 +15,8 @@ on:
       - packages/bridge/package.json
       - packages/verify/package.json
       - packages/bridge/Source/UnrealOpenMcpEditor/Private/Bridge/UnrealOpenMcpBridgeSession.h
+      - packages/bridge/UnrealOpenMCP.uplugin
+      - packages/verify/UnrealOpenMCPVerify.uplugin
       - scripts/sync-version.mjs
       - .github/workflows/version-sync.yml
   push:
@@ -25,6 +27,8 @@ on:
       - packages/bridge/package.json
       - packages/verify/package.json
       - packages/bridge/Source/UnrealOpenMcpEditor/Private/Bridge/UnrealOpenMcpBridgeSession.h
+      - packages/bridge/UnrealOpenMCP.uplugin
+      - packages/verify/UnrealOpenMCPVerify.uplugin
       - scripts/sync-version.mjs
 
 jobs:

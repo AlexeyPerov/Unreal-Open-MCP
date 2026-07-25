@@ -95,6 +95,16 @@ void FUnrealOpenMcpBridgeInstanceLock::Release()
 	AuthToken.Reset();
 }
 
+void FUnrealOpenMcpBridgeInstanceLock::Abandon()
+{
+	// Drop ownership WITHOUT deleting the file. Clearing bAcquired first also
+	// disarms the destructor's defensive Release(), which is what made the
+	// hot-reload retention path a no-op: skipping the explicit Release() call
+	// still deleted the lock when the unique-ptr dropped the instance.
+	bAcquired = false;
+	AuthToken.Reset();
+}
+
 FString FUnrealOpenMcpBridgeInstanceLock::ReadCurrentJson() const
 {
 	if (!bAcquired)

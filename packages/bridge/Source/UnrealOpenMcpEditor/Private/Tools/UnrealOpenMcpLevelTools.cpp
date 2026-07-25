@@ -305,12 +305,17 @@ namespace
 		{
 			return 0;
 		}
-		const int32 Requested = static_cast<int32>(Args->GetNumberField(TEXT("page_size")));
+		// Read as int64 first: a JSON number is a double, so a huge value
+		// static_cast straight to int32 is undefined. Then clamp to the same cap
+		// the actor roster uses — an uncapped page_size both defeats the
+		// documented token budget and overflows the window arithmetic below.
+		// (ResolveMaxActors / ResolveLimit already clamp; this one did not.)
+		const int64 Requested = static_cast<int64>(Args->GetNumberField(TEXT("page_size")));
 		if (Requested < 1)
 		{
 			return 0;
 		}
-		return Requested;
+		return static_cast<int32>(FMath::Min<int64>(Requested, LevelGetDataMaxActorsCap));
 	}
 
 	/** Decode an opaque pagination cursor. The cursor is the zero-based actor
@@ -1102,20 +1107,43 @@ void FUnrealOpenMcpLevelTools::Register(FUnrealOpenMcpToolRegistry& Registry)
 			const int32 EffectiveTotal = FMath::Min(Total, MaxActors);
 			const bool bTruncatedByCap = Total > MaxActors;
 
-			int32 WindowStart = FMath::Clamp(Cursor, 0, EffectiveTotal);
 			// A cursor past the end of the (capped) stream is invalid — refuse
 			// rather than silently returning an empty page, so a stale cursor
 			// from a previous (larger) roster surfaces clearly.
-			if (Cursor > EffectiveTotal && EffectiveTotal > 0)
+			//
+			// Valid indices are 0 .. EffectiveTotal-1, so the boundary is `>=`,
+			// not `>`: Cursor == EffectiveTotal is already past the end and used
+			// to be accepted, returning exactly the empty page this guard exists
+			// to prevent. Dropping the old `EffectiveTotal > 0` conjunct also
+			// covers the empty-roster case, where any non-zero cursor is equally
+			// stale. `Cursor > 0` keeps cursor:0 valid on an empty roster (a
+			// first page of nothing is a legitimate answer, not a stale cursor).
+			//
+			// Safe for existing clients: next_cursor is only emitted while
+			// WindowEnd < EffectiveTotal, so a client that follows the cursor
+			// never lands on the new boundary.
+			if (Cursor > 0 && Cursor >= EffectiveTotal)
 			{
 				return FUnrealOpenMcpToolDispatchResult::Fail(
 					TEXT("invalid_cursor"),
-					FString::Printf(
-						TEXT("Cursor %d is past the end of the actor stream (length %d). Omit cursor or pass a value <= %d."),
-						Cursor, EffectiveTotal, EffectiveTotal));
+					EffectiveTotal > 0
+						? FString::Printf(
+							TEXT("Cursor %d is past the end of the actor stream (length %d). ")
+							TEXT("Omit cursor or pass a value < %d."),
+							Cursor, EffectiveTotal, EffectiveTotal)
+						: FString::Printf(
+							TEXT("Cursor %d is stale — the actor stream is now empty. Omit cursor to restart."),
+							Cursor));
 			}
-			int32 WindowEnd = PageSize > 0
-				? FMath::Min(WindowStart + PageSize, EffectiveTotal)
+
+			const int32 WindowStart = FMath::Clamp(Cursor, 0, EffectiveTotal);
+			// Sum in int64 before clamping: WindowStart + PageSize can overflow
+			// int32 for a large caller-supplied page_size, which is UB and in
+			// practice wraps negative (yielding an empty page).
+			const int32 WindowEnd = PageSize > 0
+				? static_cast<int32>(FMath::Min<int64>(
+					static_cast<int64>(WindowStart) + static_cast<int64>(PageSize),
+					static_cast<int64>(EffectiveTotal)))
 				: EffectiveTotal;
 
 			TArray<TSharedPtr<FJsonValue>> Roster;

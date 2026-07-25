@@ -176,16 +176,31 @@ export function isPidAlive(pid: number): boolean {
  * @param envPort     parsed UNREAL_OPEN_MCP_BRIDGE_PORT, or undefined
  */
 export function resolvePort(projectPath: string, envPort?: number): number {
-  if (typeof envPort === "number" && Number.isInteger(envPort) && envPort >= 1 && envPort <= 65535) {
+  if (isUsablePort(envPort)) {
     return envPort;
   }
 
   const lock = readInstanceLock(projectPath);
-  if (lock && typeof lock.port === "number" && isPidAlive(lock.pid)) {
+  // Validate the lock's port with the SAME predicate as the env override. It
+  // previously only checked `typeof === "number"`, so a corrupt or truncated
+  // lock with port 0, 1.5, or a negative value was preferred over the
+  // deterministic hash — producing an unusable URL like http://127.0.0.1:0 and a
+  // permanent, misleading bridge_offline instead of recovering via the hash.
+  if (lock && isUsablePort(lock.port) && isPidAlive(lock.pid)) {
     return lock.port;
   }
 
   return computePort(projectPath);
+}
+
+/** A port is usable when it is an integer in the valid TCP range. */
+export function isUsablePort(port: unknown): port is number {
+  return (
+    typeof port === "number" &&
+    Number.isInteger(port) &&
+    port >= 1 &&
+    port <= 65535
+  );
 }
 
 /**
@@ -204,10 +219,22 @@ export function resolvePort(projectPath: string, envPort?: number): number {
  *                    skips the lock read (no token to discover).
  */
 export function resolveAuthToken(projectPath: string, envPort?: number): string | undefined {
-  if (typeof envPort === "number" && Number.isInteger(envPort) && envPort >= 1 && envPort <= 65535) {
+  if (isUsablePort(envPort)) {
     return undefined;
   }
-  const lock = readInstanceLock(projectPath);
+  return authTokenFromLock(readInstanceLock(projectPath));
+}
+
+/**
+ * Extract a usable auth token from an ALREADY-READ instance lock.
+ *
+ * Exists so a caller can resolve the port and the token from a single lock
+ * snapshot. The bridge rewrites the lock and rotates the token on every start,
+ * so reading the file twice can pair an old port with a new token (or vice
+ * versa) if the bridge restarts in between — every subsequent request then 401s
+ * with `unauthorized` until the MCP server is restarted.
+ */
+export function authTokenFromLock(lock: InstanceLock | null): string | undefined {
   if (!lock || !isPidAlive(lock.pid)) return undefined;
   const token = lock.authToken;
   return typeof token === "string" && token.length > 0 ? token : undefined;

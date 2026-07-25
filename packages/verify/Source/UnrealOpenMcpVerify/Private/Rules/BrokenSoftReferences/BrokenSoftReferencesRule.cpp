@@ -18,7 +18,7 @@ FBrokenSoftReferencesRule::FBrokenSoftReferencesRule()
 
 FString FBrokenSoftReferencesRule::GetId() const
 {
-	return FString(BrokenSoftReferences::RuleId);
+	return FString(UnrealOpenMcpVerify::BrokenSoftReferences::RuleId);
 }
 
 void FBrokenSoftReferencesRule::Scan(const FVerifyScope& Scope, const EVerifyRunMode Mode, TArray<FVerifyIssue>& Sink) const
@@ -41,6 +41,6 @@ void FBrokenSoftReferencesRule::Scan(const FVerifyScope& Scope, const EVerifyRun
 	// intentionally leave the packages resident here. A future task may add
 	// explicit eviction if a measured working-set regression justifies it.
 	TArray<FName> LoadedPkgs;
-	BrokenSoftReferences::ScanScope(Scope, bFullScan, *Resolver, Sink, LoadedPkgs);
+	UnrealOpenMcpVerify::BrokenSoftReferences::ScanScope(Scope, bFullScan, *Resolver, Sink, LoadedPkgs);
 	(void)LoadedPkgs;
 }

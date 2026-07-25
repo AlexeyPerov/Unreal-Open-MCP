@@ -151,12 +151,19 @@ public:
 
 	/**
 	 * Stop the worker thread, close the listener, and join. Idempotent and
-	 * safe to call from the game thread during ShutdownModule. After Stop
-	 * returns, the server can be Start()ed again (hot reload path).
+	 * safe to call from the game thread during ShutdownModule. After
+	 * StopAndJoin returns, the server can be Start()ed again (hot reload path).
+	 *
+	 * Named StopAndJoin rather than Stop because FRunnable::Stop is a virtual
+	 * the runnable thread calls to REQUEST shutdown (non-blocking); declaring a
+	 * second non-virtual `void Stop()` in the same class is not an overload
+	 * (identical signature) and does not compile. Callers that want the
+	 * blocking teardown must say StopAndJoin.
 	 */
-	void Stop();
+	void StopAndJoin();
 
-	// FRunnable interface — driven by FRunnableThread.
+	// FRunnable interface — driven by FRunnableThread. Non-blocking: only marks
+	// the worker for shutdown. Never joins (it can be called from the worker).
 	virtual uint32 Run() override;
 	virtual void Stop() override { RequestStop(); }
 
@@ -217,8 +224,8 @@ private:
 
 	/** Read the full HTTP request (request line + headers + optional body) from
 	 *  Client. Parses the method, path, and the small set of headers the bridge
-	 *  needs (Content-Length, X-Agent-Id, Authorization) and returns the raw
-	 *  body bytes. Returns false if no complete request arrived within the
+	 *  needs (Content-Length, X-Agent-Id, Authorization, Origin) and returns the
+	 *  raw body bytes. Returns false if no complete request arrived within the
 	 *  receive window. Serves both /ping (no body) and /tools/{name} (with body). */
 	bool ReadRequest(
 		FSocket& Client,
@@ -226,7 +233,28 @@ private:
 		FString& OutPath,
 		FString& OutAgentId,
 		FString& OutAuthorization,
+		FString& OutOrigin,
 		TArray<uint8>& OutBody);
+
+	/**
+	 * Refuse any request that carries an `Origin` header.
+	 *
+	 * The bridge is a local stdio-MCP backend, never a browser API — a legitimate
+	 * MCP client never sends Origin, and browsers always do for cross-origin
+	 * requests. Without this, a CORS *simple* request (fetch with a text/plain
+	 * body needs no preflight, and this server does not inspect Content-Type)
+	 * from ANY web page a developer visits would be dispatched as a real tool
+	 * call. Dropping the wildcard Access-Control-Allow-Origin stops the page
+	 * READING the reply, but not the fire-and-forget side effect — and the
+	 * dispatchable surface includes console_run_command, reflection_method_call
+	 * and apply_fix, reachable by scanning the deterministic per-project port
+	 * range. In the documented default config (authMode "none", loopback) that is
+	 * drive-by remote code execution.
+	 *
+	 * Returns true when the request may proceed; when false, the 403 response has
+	 * already been written.
+	 */
+	bool CheckOrigin(const FString& Origin, FSocket& Client);
 
 	/** Dispatcher reference (not owned — owned by FUnrealOpenMcpEditorModule).
 	 *  Every UObject touch in the /ping + tool paths goes through this. */
@@ -260,12 +288,24 @@ private:
 	/** Last Start failure message (bind refusal, subsystem missing). */
 	FString LastStartError;
 
-	/** P5.6 auth gate state. Set via SetAuth (after the instance lock mints the
-	 *  token). The worker thread reads these on every request — FString writes
-	 *  are not atomic, so the module calls SetAuth from the game thread BEFORE
-	 *  the first request can arrive (the lock is acquired in StartupModule
-	 *  immediately after Start succeeds). Until SetAuth runs, the defaults
-	 *  ("none" / empty) preserve the open localhost behavior. */
+	/**
+	 * P5.6 auth gate state. Written by SetAuth on the game thread (Start adopts
+	 * the mode; the module supplies the token once the instance lock mints it),
+	 * read by the listener thread on EVERY request.
+	 *
+	 * MUST be accessed under AuthLock. FString assignment reallocates and frees
+	 * the previous buffer, so an unsynchronized concurrent reader can observe a
+	 * torn length/pointer pair or read freed memory — a use-after-free directly
+	 * on the request path. Use GetAuthMode() / GetExpectedAuthToken() rather than
+	 * touching these directly.
+	 */
 	FString AuthMode = TEXT("none");
 	FString ExpectedAuthToken;
+	mutable FCriticalSection AuthLock;
+
+	/** Snapshot the auth mode under AuthLock. */
+	FString GetAuthMode() const;
+
+	/** Snapshot the expected bearer token under AuthLock. Never logged. */
+	FString GetExpectedAuthToken() const;
 };

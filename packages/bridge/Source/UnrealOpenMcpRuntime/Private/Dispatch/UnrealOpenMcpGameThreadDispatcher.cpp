@@ -53,32 +53,103 @@ void FUnrealOpenMcpGameThreadDispatcher::Enqueue(TFunction<void()> Action)
 	}
 }
 
+bool FUnrealOpenMcpGameThreadDispatcher::TrackInFlight(
+	const TWeakPtr<FDispatchStateBase, ESPMode::ThreadSafe>& State)
+{
+	FScopeLock Lock(&InFlightLock);
+
+	// Shutdown test and insertion under the SAME lock — see the header for why
+	// splitting them reintroduces the teardown deadlock.
+	if (bShutdown)
+	{
+		return false;
+	}
+
+	// Prune completed dispatches so the list is bounded by concurrency, not by
+	// the number of calls the process has ever served.
+	InFlight.RemoveAllSwap(
+		[](const TWeakPtr<FDispatchStateBase, ESPMode::ThreadSafe>& Entry)
+		{
+			return !Entry.IsValid();
+		});
+
+	InFlight.Add(State);
+	return true;
+}
+
 void FUnrealOpenMcpGameThreadDispatcher::Shutdown()
 {
 	// Idempotent — module reload / editor teardown may call this more than once.
-	if (bShutdown)
+	//
+	// The flag is flipped under InFlightLock so it is atomic with respect to
+	// TrackInFlight: a dispatch either registers before the sweep (and gets
+	// completed by it) or is refused registration and fails fast. There is no
+	// window where one slips in unregistered.
 	{
-		return;
+		FScopeLock Lock(&InFlightLock);
+		if (bShutdown)
+		{
+			return;
+		}
+		bShutdown = true;
 	}
-	bShutdown = true;
 
 	// After the flag flips, new EnqueueAsync calls resolve immediately with
-	// DispatcherShutdown (fail-fast), and new Enqueue calls are silent
-	// no-ops. In-flight waiters whose bodies are still queued on the game
-	// thread will not get to run during editor teardown — their timeout
-	// watchers would eventually fire, but we do not want to burn the full
-	// per-call timeout during shutdown. There is no global registry of pending
-	// states to complete them eagerly here because the state objects are
-	// owned per-call by the shared refs captured into the body + watcher
-	// lambdas; tearing those down eagerly would require a registry, which is
-	// deferred until a real deadlock is observed. The single-completion guard
-	// means whichever path resolves them first (late body via game-thread
-	// teardown, or the timeout watcher) wins, and the other is a no-op.
+	// DispatcherShutdown (fail-fast) and new Enqueue calls are silent no-ops.
 	//
+	// In-flight waiters must be completed EAGERLY here, not left to their
+	// timeout watchers. A listener thread parked in Future.Get() is waiting on a
+	// body queued onto the game thread; during teardown the game thread is the
+	// one running ShutdownModule, so that body may never run. Leaving the waiter
+	// pending means the Editor module's subsequent StopAndJoin() blocks the game
+	// thread on a worker that is blocked on the game thread — a circular wait
+	// held for up to the caller-supplied timeout (clamped at 600 s). Resolving
+	// them now breaks the cycle and makes the join prompt.
+	//
+	// The single-completion guard absorbs the race: if a body or timeout watcher
+	// already resolved a state, CompleteWithDispatcherShutdown is a no-op.
+	// Snapshot under the lock, then complete OUTSIDE it — a completion can run
+	// arbitrary continuation code and must not re-enter TrackInFlight holding
+	// the same lock.
+	TArray<TSharedPtr<FDispatchStateBase, ESPMode::ThreadSafe>> Pending;
+	{
+		FScopeLock Lock(&InFlightLock);
+		Pending.Reserve(InFlight.Num());
+		for (const TWeakPtr<FDispatchStateBase, ESPMode::ThreadSafe>& Entry : InFlight)
+		{
+			if (TSharedPtr<FDispatchStateBase, ESPMode::ThreadSafe> Pinned = Entry.Pin())
+			{
+				Pending.Add(MoveTemp(Pinned));
+			}
+		}
+		InFlight.Reset();
+	}
+
+	for (const TSharedPtr<FDispatchStateBase, ESPMode::ThreadSafe>& State : Pending)
+	{
+		State->CompleteWithDispatcherShutdown();
+
+		// Also WAKE the timeout watcher. Completing the promise unblocks the
+		// listener thread, but the watcher is parked in Event->Wait(TimeoutMs) and
+		// resolving the promise does not signal that event. Leaving it parked just
+		// relocates the teardown stall to GThreadPool, which
+		// FQueuedThreadPool::Destroy() waits on at engine exit. The event is
+		// manual-reset and ref-counted, so triggering it here is safe even if the
+		// body already did.
+		if (TSharedPtr<FSharedPooledEvent, ESPMode::ThreadSafe> Event = State->WatcherEvent.Pin())
+		{
+			if (Event->Event != nullptr)
+			{
+				Event->Event->Trigger();
+			}
+		}
+	}
+
 	// The load-bearing property is: Shutdown never blocks on the game thread
 	// for game-thread work (that would deadlock), and never crashes.
 	UE_LOG(
 		LogUnrealOpenMcp,
 		Log,
-		TEXT("[Unreal Open MCP] game-thread dispatcher shut down (pending dispatches fail-fast)"));
+		TEXT("[Unreal Open MCP] game-thread dispatcher shut down (%d pending dispatch(es) failed fast)"),
+		Pending.Num());
 }

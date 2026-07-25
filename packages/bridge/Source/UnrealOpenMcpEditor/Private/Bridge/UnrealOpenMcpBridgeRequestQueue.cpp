@@ -132,7 +132,18 @@ void FUnrealOpenMcpBridgeRequestQueue::CompactAgents()
 		{
 			AgentQueues.Remove(AgentId);
 			AgentOrder.RemoveAt(i, 1, false);
-			// Clamp the cursor so it stays in range after removal.
+
+			// Removing an entry BELOW the cursor shifts every later agent down
+			// one, so the cursor must be decremented to keep pointing at the same
+			// agent. Modulo-clamping alone (the previous behavior) silently
+			// retargeted the cursor and broke the round-robin fairness guarantee:
+			// with arrivals A,A,B,C,C the service order came out
+			// A1 B1 A2 C1 C2 — A took a second turn before C took its first,
+			// which is exactly the starvation the queue exists to prevent.
+			if (i < RRCursor)
+			{
+				--RRCursor;
+			}
 			if (AgentOrder.Num() > 0)
 			{
 				RRCursor %= AgentOrder.Num();

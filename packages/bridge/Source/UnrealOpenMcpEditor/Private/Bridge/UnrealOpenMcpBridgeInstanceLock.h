@@ -111,6 +111,20 @@ public:
 	void Release();
 
 	/**
+	 * Stop owning the lock WITHOUT deleting the file.
+	 *
+	 * Used on the hot-reload / Live Coding path: ShutdownModule runs there too,
+	 * and the retention rule (packages/bridge/AGENTS.md §Lock retention on hot
+	 * reload) requires the file to survive so the MCP server sees a stale
+	 * heartbeat with a live PID ("bridge reloading") rather than no lock at all
+	 * ("bridge offline"). The next Acquire's PID sweep reclaims it.
+	 *
+	 * Also suppresses the destructor's defensive Release — without this, simply
+	 * skipping the explicit Release() call still deleted the file via ~dtor.
+	 */
+	void Abandon();
+
+	/**
 	 * Snapshot of the current lock file content as a JSON string. Used by a
 	 * future /instance HTTP endpoint so the MCP server can verify the live
 	 * bridge against the on-disk lock. Returns empty when no lock is held or

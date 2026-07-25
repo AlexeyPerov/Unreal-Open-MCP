@@ -52,10 +52,10 @@ void FUnrealOpenMcpClearBrokenSoftReferenceFixSpec::Define()
 		{
 			FClearBrokenSoftReferenceFix Fix;
 			const FString IssueId = FIssueKey::Build(
-				BrokenSoftReferences::RuleId,
+				UnrealOpenMcpVerify::BrokenSoftReferences::RuleId,
 				EVerifySeverity::Error,
 				TEXT("/Game/Fixtures/Owner.Owner"),
-				FString::Printf(TEXT("%s:/Game/Missing/Target.Target:Weapon"), BrokenSoftReferences::IssueCode));
+				FString::Printf(TEXT("%s:/Game/Missing/Target.Target:Weapon"), UnrealOpenMcpVerify::BrokenSoftReferences::IssueCode));
 			TestTrue(TEXT("can fix"), Fix.CanFix(IssueId));
 		});
 
@@ -65,10 +65,10 @@ void FUnrealOpenMcpClearBrokenSoftReferenceFixSpec::Define()
 			// synthetic-key strategy passes a placeholder asset path).
 			FClearBrokenSoftReferenceFix Fix;
 			const FString IssueId = FIssueKey::Build(
-				BrokenSoftReferences::RuleId,
+				UnrealOpenMcpVerify::BrokenSoftReferences::RuleId,
 				EVerifySeverity::Error,
 				TEXT("/Game/Fixtures/Owner.Owner"),
-				BrokenSoftReferences::IssueCode);
+				UnrealOpenMcpVerify::BrokenSoftReferences::IssueCode);
 			TestTrue(TEXT("can fix bare code"), Fix.CanFix(IssueId));
 		});
 
@@ -79,7 +79,7 @@ void FUnrealOpenMcpClearBrokenSoftReferenceFixSpec::Define()
 				TEXT("other_rule"),
 				EVerifySeverity::Error,
 				TEXT("/Game/Fixtures/Owner.Owner"),
-				BrokenSoftReferences::IssueCode);
+				UnrealOpenMcpVerify::BrokenSoftReferences::IssueCode);
 			TestFalse(TEXT("cannot fix other rule"), Fix.CanFix(IssueId));
 		});
 
@@ -97,10 +97,10 @@ void FUnrealOpenMcpClearBrokenSoftReferenceFixSpec::Define()
 		{
 			FClearBrokenSoftReferenceFix Fix;
 			const FString IssueId = FIssueKey::Build(
-				BrokenSoftReferences::RuleId,
+				UnrealOpenMcpVerify::BrokenSoftReferences::RuleId,
 				EVerifySeverity::Error,
 				TEXT("/Game/Fixtures/Owner.Owner"),
-				FString::Printf(TEXT("%s:/Game/Missing/Target.Target:Weapon"), BrokenSoftReferences::IssueCode));
+				FString::Printf(TEXT("%s:/Game/Missing/Target.Target:Weapon"), UnrealOpenMcpVerify::BrokenSoftReferences::IssueCode));
 			const FFixDescription Desc = Fix.Describe(IssueId);
 			TestTrue(TEXT("safe"), Desc.bSafe);
 			TestEqual(TEXT("fixId"), Desc.FixId, FString(TEXT("clear_broken_soft_reference")));
@@ -113,10 +113,10 @@ void FUnrealOpenMcpClearBrokenSoftReferenceFixSpec::Define()
 			// cannot pin a property. The fix must refuse so it never guesses.
 			FClearBrokenSoftReferenceFix Fix;
 			const FString IssueId = FIssueKey::Build(
-				BrokenSoftReferences::RuleId,
+				UnrealOpenMcpVerify::BrokenSoftReferences::RuleId,
 				EVerifySeverity::Error,
 				TEXT("/Game/Fixtures/Owner.Owner"),
-				FString::Printf(TEXT("%s:/Game/Missing/Target.Target"), BrokenSoftReferences::IssueCode));
+				FString::Printf(TEXT("%s:/Game/Missing/Target.Target"), UnrealOpenMcpVerify::BrokenSoftReferences::IssueCode));
 			const FFixDescription Desc = Fix.Describe(IssueId);
 			TestFalse(TEXT("unsafe when no property path"), Desc.bSafe);
 		});
@@ -128,10 +128,10 @@ void FUnrealOpenMcpClearBrokenSoftReferenceFixSpec::Define()
 			// struct walk found the soft pointer.
 			FClearBrokenSoftReferenceFix Fix;
 			const FString IssueId = FIssueKey::Build(
-				BrokenSoftReferences::RuleId,
+				UnrealOpenMcpVerify::BrokenSoftReferences::RuleId,
 				EVerifySeverity::Error,
 				TEXT("/Game/Fixtures/Owner.Owner"),
-				FString::Printf(TEXT("%s:/Game/Missing/Target.Target:Inventory.Items"), BrokenSoftReferences::IssueCode));
+				FString::Printf(TEXT("%s:/Game/Missing/Target.Target:Inventory.Items"), UnrealOpenMcpVerify::BrokenSoftReferences::IssueCode));
 			const FFixDescription Desc = Fix.Describe(IssueId);
 			TestFalse(TEXT("unsafe when struct-nested"), Desc.bSafe);
 		});
@@ -140,10 +140,10 @@ void FUnrealOpenMcpClearBrokenSoftReferenceFixSpec::Define()
 		{
 			FClearBrokenSoftReferenceFix Fix;
 			const FString IssueId = FIssueKey::Build(
-				BrokenSoftReferences::RuleId,
+				UnrealOpenMcpVerify::BrokenSoftReferences::RuleId,
 				EVerifySeverity::Error,
 				TEXT("/Game/Fixtures/Owner.Owner"),
-				BrokenSoftReferences::IssueCode);
+				UnrealOpenMcpVerify::BrokenSoftReferences::IssueCode);
 			const FFixDescription Desc = Fix.Describe(IssueId);
 			TestFalse(TEXT("unsafe when bare code"), Desc.bSafe);
 		});
@@ -155,10 +155,10 @@ void FUnrealOpenMcpClearBrokenSoftReferenceFixSpec::Define()
 		{
 			FClearBrokenSoftReferenceFix Fix;
 			const FString IssueId = FIssueKey::Build(
-				BrokenSoftReferences::RuleId,
+				UnrealOpenMcpVerify::BrokenSoftReferences::RuleId,
 				EVerifySeverity::Error,
 				TEXT("/Game/Fixtures/Owner.Owner"),
-				BrokenSoftReferences::IssueCode);
+				UnrealOpenMcpVerify::BrokenSoftReferences::IssueCode);
 			const FFixResult Result = Fix.Apply(IssueId);
 			TestFalse(TEXT("not success"), Result.bSuccess);
 			TestEqual(TEXT("touched paths empty"), Result.TouchedPaths.Num(), 0);
@@ -168,10 +168,10 @@ void FUnrealOpenMcpClearBrokenSoftReferenceFixSpec::Define()
 		{
 			FClearBrokenSoftReferenceFix Fix;
 			const FString IssueId = FIssueKey::Build(
-				BrokenSoftReferences::RuleId,
+				UnrealOpenMcpVerify::BrokenSoftReferences::RuleId,
 				EVerifySeverity::Error,
 				TEXT("/Game/Fixtures/Owner.Owner"),
-				FString::Printf(TEXT("%s:/Game/Missing/Target.Target:Inventory.Items"), BrokenSoftReferences::IssueCode));
+				FString::Printf(TEXT("%s:/Game/Missing/Target.Target:Inventory.Items"), UnrealOpenMcpVerify::BrokenSoftReferences::IssueCode));
 			const FFixResult Result = Fix.Apply(IssueId);
 			TestFalse(TEXT("not success"), Result.bSuccess);
 		});
@@ -189,7 +189,7 @@ void FUnrealOpenMcpClearBrokenSoftReferenceFixSpec::Define()
 			FString FixId;
 			bool bSafe = true;
 			const bool bOk = FFixProviderRegistry::TryGetFixInfo(
-				BrokenSoftReferences::RuleId, BrokenSoftReferences::IssueCode, FixId, bSafe);
+				UnrealOpenMcpVerify::BrokenSoftReferences::RuleId, UnrealOpenMcpVerify::BrokenSoftReferences::IssueCode, FixId, bSafe);
 
 			TestTrue(TEXT("ok"), bOk);
 			TestEqual(TEXT("fixId"), FixId, FString(TEXT("clear_broken_soft_reference")));

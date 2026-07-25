@@ -18,7 +18,7 @@ FMissingBlueprintParentRule::FMissingBlueprintParentRule()
 
 FString FMissingBlueprintParentRule::GetId() const
 {
-	return FString(MissingBlueprintParent::RuleId);
+	return FString(UnrealOpenMcpVerify::MissingBlueprintParent::RuleId);
 }
 
 void FMissingBlueprintParentRule::Scan(const FVerifyScope& Scope, const EVerifyRunMode Mode, TArray<FVerifyIssue>& Sink) const
@@ -38,6 +38,6 @@ void FMissingBlueprintParentRule::Scan(const FVerifyScope& Scope, const EVerifyR
 	// every mode including Checkpoint. Unlike broken_soft_references there is
 	// no struct-recursion to defer.
 	TArray<FName> LoadedPkgs;
-	MissingBlueprintParent::ScanScope(Scope, *Resolver, Sink, LoadedPkgs);
+	UnrealOpenMcpVerify::MissingBlueprintParent::ScanScope(Scope, *Resolver, Sink, LoadedPkgs);
 	(void)LoadedPkgs;
 }

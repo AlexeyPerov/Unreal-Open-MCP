@@ -222,6 +222,24 @@ void FUnrealOpenMcpReflectionSpec::Define()
 			TestEqual(TEXT("code"), Result.Code, FString(TEXT("method_not_found")));
 		});
 
+		It("rejects a present-but-non-object args with invalid_parameter", [this]()
+		{
+			// A malformed `args` (array / bare string) must NOT silently drop to
+			// an empty bag (which would zero every parameter). Reach the args
+			// validation: supply a valid method + class so the call clears the
+			// XOR/safety gates and reaches the args check.
+			if (!FindHasMethod(TEXT("/Script/Engine.Actor"), TEXT("K2_GetActorLocation")))
+			{
+				return;
+			}
+			FUnrealOpenMcpToolHandler Handler;
+			GetReflectionHandler(TEXT("unreal_open_mcp_reflection_method_call"), Handler);
+			const FUnrealOpenMcpToolDispatchResult Result = Handler(
+				TEXT("{\"method\":\"K2_GetActorLocation\",\"class\":\"/Script/Engine.Actor\",\"args\":[1,2,3]}"));
+			TestFalse(TEXT("ok false"), Result.bOk);
+			TestEqual(TEXT("code"), Result.Code, FString(TEXT("invalid_parameter")));
+		});
+
 		It("rejects an instance method invoked on the CDO with method_not_callable", [this]()
 		{
 			// K2_DestroyActor is BlueprintCallable but not static/CallInEditor —
@@ -238,10 +256,16 @@ void FUnrealOpenMcpReflectionSpec::Define()
 			TestEqual(TEXT("code"), Result.Code, FString(TEXT("method_not_callable")));
 		});
 
-		It("invokes a BlueprintCallable getter on an instance and returns a value", [this]()
+		It("invokes a BlueprintCallable getter on an instance and returns a real value", [this]()
 		{
-			// K2_GetActorLocation is BlueprintCallable + pure with no inputs and
-			// an FVector return. Guarded against name drift.
+			// K2_GetActorLocation is a BlueprintCallable pure INSTANCE method
+			// with an FVector return. The actor is moved to a distinctive
+			// location first so the assertion on the returned vector proves the
+			// method ACTUALLY RAN — without FEditorScriptExecutionGuard,
+			// AActor::ProcessEvent silently skips a non-CallInEditor instance
+			// method on an editor-world actor and the call would report success
+			// with a zeroed {0,0,0} return (this is the regression the guard
+			// exists to prevent). Guarded against name drift.
 			if (!FindHasMethod(TEXT("/Script/Engine.Actor"), TEXT("K2_GetActorLocation")))
 			{
 				return;
@@ -256,6 +280,9 @@ void FUnrealOpenMcpReflectionSpec::Define()
 			{
 				return;
 			}
+			// A non-origin location so a zeroed return is detectable.
+			const FVector ProbeLocation(123.0, 456.0, 789.0);
+			A->SetActorLocation(ProbeLocation);
 
 			FUnrealOpenMcpToolHandler Handler;
 			GetReflectionHandler(TEXT("unreal_open_mcp_reflection_method_call"), Handler);
@@ -272,7 +299,16 @@ void FUnrealOpenMcpReflectionSpec::Define()
 			TestEqual(TEXT("method echoed"),
 				Json->GetStringField(TEXT("method")), FString(TEXT("K2_GetActorLocation")));
 			TestTrue(TEXT("has target"), Json->HasField(TEXT("target")));
-			TestTrue(TEXT("returnValue present"), Json->HasField(TEXT("returnValue")));
+			// returnValue must carry the actor's real location, not {0,0,0}.
+			// A zeroed vector means the script-execution guard is missing.
+			const TSharedPtr<FJsonObject>* RetObj = nullptr;
+			TestTrue(TEXT("returnValue present"),
+				Json->TryGetObjectField(TEXT("returnValue"), RetObj) && RetObj != nullptr);
+			if (RetObj != nullptr && (*RetObj)->HasTypedField<EJson::Number>(TEXT("x")))
+			{
+				TestEqual(TEXT("returnValue.x is the real location"),
+					static_cast<float>((*RetObj)->GetNumberField(TEXT("x"))), 123.0f);
+			}
 		});
 	});
 }

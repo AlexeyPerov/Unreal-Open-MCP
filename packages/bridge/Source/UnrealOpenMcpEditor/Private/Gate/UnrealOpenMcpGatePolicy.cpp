@@ -14,6 +14,10 @@
 #include "Gate/UnrealOpenMcpVerifyGateAdapter.h"
 #include "UnrealOpenMcpLog.h"
 
+// Rule id constants — TryFixIdForIssue matches the issue key's rule-id field
+// against these rather than against hand-copied literals.
+#include "Rules/BrokenSoftReferences/BrokenSoftReferencesIssueCodes.h"
+
 #include "HAL/PlatformTime.h"
 #include "Misc/DateTime.h"
 
@@ -127,7 +131,11 @@ namespace UnrealOpenMcpGatePolicyInternal
 			Code = Code.Left(ColonIdx);
 		}
 
-		if (CategoryId == TEXT("broken_soft_references"))
+		// CategoryId is Parts[0] of the issue key — the RULE id, not the issue
+		// code. Compare against the rules' RuleId constants; the previous literal
+		// TEXT("missing_blueprint_parent") was the singular issue code and could
+		// never match the plural registered rule id, making that branch dead.
+		if (CategoryId == UnrealOpenMcpVerify::BrokenSoftReferences::RuleId)
 		{
 			// P3.7 — clear_broken_soft_reference is the Safe provider for this
 			// rule. relink_broken_soft_reference remains a future unsafe
@@ -137,16 +145,13 @@ namespace UnrealOpenMcpGatePolicyInternal
 			OutFixId = TEXT("clear_broken_soft_reference");
 			return true;
 		}
-		if (CategoryId == TEXT("missing_blueprint_parent"))
-		{
-			// No Safe provider for this code in v1 (clearing a missing parent
-			// is rarely Safe). The hint still resolves so an agent reading the
-			// gate guidance knows the rule has a fix family — apply_fix will
-			// surface availableFixIds when called without a fix_id.
-			OutFixId = TEXT("reparent_blueprint");
-			return true;
-		}
 
+		// Deliberately NO branch for missing_blueprint_parents. There is no
+		// registered fix provider for it in v1 (FFixProviderRegistry only ever
+		// offers clear_broken_soft_reference), so handing back a fix id here —
+		// as the dead branch did with TEXT("reparent_blueprint") — would point
+		// the agent at a fix that apply_fix answers `unknown_fix` for. Returning
+		// false means the guidance simply omits a fix hint, which is honest.
 		OutFixId.Reset();
 		return false;
 	}

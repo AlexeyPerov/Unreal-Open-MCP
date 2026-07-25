@@ -24,13 +24,14 @@ export const editorApplicationGetState: Tool = {
     "Read the editor's Play-In-Editor (PIE) state. Read-only (gate-free). " +
     "Returns { isPlaying, isPaused, isSimulating, editorMap, editorMapName }: " +
     "isPlaying is true when a real PIE session is running; isSimulating is true " +
-    "under Simulate-In-Editor; isPaused is true when the PIE world is paused; " +
-    "editorMap is the editor world's persistent-level package path " +
-    "('/Game/Maps/Arena', '/Temp/Untitled' for an unsaved map) and editorMapName " +
-    "is its short name (always the editing world, never the transient PIE " +
-    "world). Poll this after editor_application_set_state start/stop to observe " +
-    "the settled (latent) transition — set-state returns pending:true and the " +
-    "PIE world flips on a later editor tick. Error code: editor_unavailable " +
+    "under Simulate-In-Editor; isPaused is true when the PIE world's editor " +
+    "pause flag (bDebugPauseExecution) is set; editorMap is the editor world's " +
+    "persistent-level package path ('/Game/Maps/Arena', '/Temp/Untitled' for an " +
+    "unsaved map) and editorMapName is its short name (always the editing " +
+    "world, never the transient PIE world). Poll this after " +
+    "editor_application_set_state start/stop/pause/resume to observe the " +
+    "settled (latent) transition — set-state returns pending:true and the PIE " +
+    "world flips on a later editor tick. Error code: editor_unavailable " +
     "(no editor / no editor world, e.g. a commandlet).",
   inputSchema: {
     type: "object",

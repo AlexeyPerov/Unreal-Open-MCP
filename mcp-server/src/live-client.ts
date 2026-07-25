@@ -33,7 +33,7 @@
 // postTool maps {ok:false} + HTTP error bodies to a structured MCP error
 // result carrying the bridge's own error code/message. When a gate block is
 // present on a failure (e.g. ValidateScanFailed), the gate summary rides
-// through as `detail.gate` so an agent can inspect the gate decision that
+// through as a top-level `gate` field so an agent can inspect the gate decision that
 // produced the failure.
 //
 // Failure classification (the load-bearing contract):
@@ -104,6 +104,20 @@ interface ToolDispatchOk {
    *  an MCP image content block (the base64 PNG) + a text block (the `result`
    *  metadata) so the base64 never surfaces as a text dump. */
   image?: ImageEnvelope;
+  /**
+   * P3.7 — rollback outcome for apply_fix. The bridge emits this as a top-level
+   * block whose SHAPE is
+   *   { rolledBack, reason?, restoredPaths?, rollbackDisabled? }
+   * (`rollbackDisabled` is nested INSIDE this block, not a sibling of it — see
+   * FUnrealOpenMcpBridgeEnvelope::BuildSuccessWithGateAndRollback). The block is
+   * present only when a fix was auto-reverted or when a `gate:"off"` apply
+   * committed with no rollback protection.
+   *
+   * It MUST ride through to the agent: apply_fix's own tool description promises
+   * it, and it is the only signal that distinguishes "the fix stuck" from "the
+   * fix was reverted" or "the fix ran unprotected".
+   */
+  rollback?: unknown;
 }
 
 /**
@@ -137,7 +151,7 @@ type ToolDispatchEnvelope = ToolDispatchOk | ToolDispatchErr;
 
 /**
  * Gate summary block emitted by mutating dispatches (P3.5). Surfaced verbatim
- * into the MCP CallToolResult (success) or as `detail.gate` (failure) so an
+ * into the MCP CallToolResult (success) or as a top-level `gate` (failure) so an
  * agent can branch on `gate.outcome` without parsing prose in agentNextSteps.
  *
  * Mirrors the bridge's FUnrealOpenMcpBridgeEnvelope::AppendGateSummary field
@@ -225,6 +239,16 @@ export const TOOL_TIMEOUT_MS = 30_000;
  *  MinToolDispatchTimeoutMs. */
 export const MIN_TOOL_TIMEOUT_MS = 1_000;
 
+/** Ceiling for a per-request tool timeout. Mirrors the bridge's
+ *  MaxToolDispatchTimeoutMs (10 min) so this side never waits past the deadline
+ *  the bridge itself enforces. */
+export const MAX_TOOL_TIMEOUT_MS = 600_000;
+
+/** Slack added to the fetch deadline on top of the resolved tool timeout, so the
+ *  bridge's own structured `timeout` error wins the race instead of the client
+ *  aborting at the same instant and reporting an opaque bridge_timeout. */
+export const TOOL_TIMEOUT_GRACE_MS = 2_000;
+
 /** Loopback host the Unreal bridge binds. Mirrors the C++ Loopback constant. */
 export const LOOPBACK_HOST = "127.0.0.1";
 
@@ -252,16 +276,22 @@ function buildOfflineHint(projectPath: string | undefined): string {
 }
 
 /**
- * Is the thrown error an AbortError (fetch timeout via AbortController)?
- * Node's fetch throws a DOMException with name "AbortError" when the abort
- * signal fires. We keep this as a narrow predicate so the bridge_offline vs
- * bridge_timeout split is testable in isolation.
+ * Is the thrown error a fetch abort/timeout?
+ *
+ * Two names must be recognized. A manually aborted AbortController surfaces as
+ * a DOMException named "AbortError"; `AbortSignal.timeout(ms)` — which
+ * fetchWithTimeout uses so the deadline covers the response BODY read, not just
+ * the headers — surfaces as "TimeoutError". Matching only "AbortError" would
+ * have mis-classified every real timeout as bridge_offline.
+ *
+ * Kept as a narrow predicate so the bridge_offline vs bridge_timeout split is
+ * testable in isolation.
  */
 export function isAbortError(err: unknown): boolean {
   if (err == null) return false;
-  if (err instanceof DOMException) return err.name === "AbortError";
-  const name = (err as { name?: string }).name;
-  return name === "AbortError";
+  const name =
+    err instanceof DOMException ? err.name : (err as { name?: string }).name;
+  return name === "AbortError" || name === "TimeoutError";
 }
 
 /**
@@ -437,9 +467,21 @@ export class LiveClient implements Router {
     // block prominently), followed by the metadata text block.
     if (envelope.ok === true) {
       const image = unwrapImage(envelope.image);
-      const payload = envelope.gate
-        ? { result: envelope.result, gate: envelope.gate }
-        : envelope.result;
+      // Merge every metadata block the bridge sent, not just `gate`.
+      //
+      // This used to hard-code { result, gate }, which silently DROPPED the
+      // top-level `rollback` / `rollbackDisabled` blocks that apply_fix emits —
+      // so an agent could never see that a fix had been auto-reverted, nor that
+      // a gate:"off" apply had committed with no rollback protection. When no
+      // metadata is present the surfaced payload stays the bare `result`, which
+      // preserves the read-only tool shape.
+      const meta: Record<string, unknown> = {};
+      if (envelope.gate !== undefined) meta.gate = envelope.gate;
+      if (envelope.rollback !== undefined) meta.rollback = envelope.rollback;
+      const payload =
+        Object.keys(meta).length > 0
+          ? { result: envelope.result, ...meta }
+          : envelope.result;
       const content: CallToolResult["content"] = [];
       if (image) {
         content.push({
@@ -455,9 +497,10 @@ export class LiveClient implements Router {
     // ok:false → structured tool failure. The bridge ran the tool and it
     // returned its own error code/message; surface both so an agent can branch
     // on the tool-specific cause (e.g. invalid_request, execution_error,
-    // paths_hint_required). When a gate block is present (mutating failure),
-    // carry it through as `detail` so the agent can inspect the gate decision
-    // that produced the failure alongside the tool error.
+    // paths_hint_required). When a gate block is present (mutating failure), it
+    // rides through as a TOP-LEVEL `gate` field alongside `error` so the agent
+    // can inspect the gate decision that produced the failure. (Not
+    // `detail.gate` — makeErrorResult merges these into the envelope.)
     const err = envelope.error ?? { code: "unknown", message: "No error detail." };
     return makeErrorResult({
       code: err.code,
@@ -469,14 +512,24 @@ export class LiveClient implements Router {
   }
 
   /**
-   * Per-tool fetch timeout. Honors the request's optional timeout_ms (floored
-   * at a minimum so a sub-second value never aborts before the bridge can
-   * respond), falling back to the default tool timeout. Protected so tests can
-   * drive a fast abort.
+   * Per-tool fetch deadline. Honors the request's optional timeout_ms, clamped
+   * to [MIN_TOOL_TIMEOUT_MS, MAX_TOOL_TIMEOUT_MS] to mirror the bridge's own
+   * clamp, then adds TOOL_TIMEOUT_GRACE_MS so a bridge-side timeout surfaces as
+   * its structured error rather than racing this side's abort. Falls back to the
+   * default tool timeout when timeout_ms is absent. Protected so tests can drive
+   * a fast abort.
    */
   protected getToolTimeoutMs(args: Record<string, unknown>): number {
     const requested = typeof args.timeout_ms === "number" ? args.timeout_ms : TOOL_TIMEOUT_MS;
-    return Math.max(requested, MIN_TOOL_TIMEOUT_MS);
+    // Clamp BOTH ends. The bridge clamps timeout_ms to [1000, 600000]
+    // (docs/api/bridge-http.md); the TS side only floored, so a larger value
+    // made this side wait indefinitely past the bridge's own ceiling.
+    //
+    // The fetch deadline gets a small grace over that ceiling so that when the
+    // bridge hits ITS limit we receive the structured `timeout` error instead of
+    // racing it and reporting an opaque bridge_timeout.
+    const clamped = Math.min(Math.max(requested, MIN_TOOL_TIMEOUT_MS), MAX_TOOL_TIMEOUT_MS);
+    return clamped + TOOL_TIMEOUT_GRACE_MS;
   }
 
   /**
@@ -574,18 +627,27 @@ export class LiveClient implements Router {
     init: RequestInit,
     timeoutMs: number = PING_TIMEOUT_MS,
   ): Promise<Response> {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-
     const headers = new Headers(init.headers);
     if (this.authToken && !headers.has("Authorization")) {
       headers.set("Authorization", `Bearer ${this.authToken}`);
     }
 
+    // AbortSignal.timeout, not a manual AbortController + clearTimeout.
+    //
+    // The previous form cleared the abort timer in `.finally()` on the fetch
+    // promise — but fetch resolves as soon as the RESPONSE HEADERS arrive, so
+    // the timer was cancelled before any `await res.json()` ran. A bridge that
+    // sent headers and then stalled mid-body (exactly the "torn down
+    // mid-response / editor reload" case) hung the tool call and bridge_status
+    // forever, with no bridge_timeout classification.
+    //
+    // AbortSignal.timeout covers the whole exchange including the body read, and
+    // needs no manual cleanup (no timer leak on the error paths either). It
+    // raises the same TimeoutError/AbortError the callers already classify.
     return fetch(`${this.baseUrl}${path}`, {
       ...init,
       headers,
-      signal: controller.signal,
-    }).finally(() => clearTimeout(timer));
+      signal: AbortSignal.timeout(timeoutMs),
+    });
   }
 }

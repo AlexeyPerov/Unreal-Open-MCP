@@ -206,21 +206,55 @@ public:
 		// advertises the listening port to the MCP server, so we want it gone
 		// before the port stops listening. (On a crash/hard-exit the lock is
 		// left behind as stale and the next Acquire sweeps it via PID liveness.)
+		//
+		// BUT only on a real editor exit. ShutdownModule also runs on Live Coding
+		// / hot reload, and deleting the lock there contradicts the retention rule
+		// (packages/bridge/AGENTS.md §Lock retention on hot reload): during the
+		// reload window the MCP server would see NO lock at all and report
+		// bridge_offline, instead of the intended stale-heartbeat + live-PID
+		// signal that means "bridge is reloading". Leave the file in place and let
+		// the next Acquire's PID sweep reclaim it.
 		if (InstanceLock.IsValid())
 		{
-			InstanceLock->Release();
+			if (IsEngineExitRequested())
+			{
+				InstanceLock->Release();
+			}
+			else
+			{
+				// Hot reload: Abandon (not just "skip Release"), because the
+				// destructor below performs a defensive Release() of its own.
+				// Abandon drops ownership and disarms that.
+				InstanceLock->Abandon();
+			}
 			InstanceLock.Reset();
 		}
 		ProjectSettings.Reset();
 
-		// Tear down the HTTP server BEFORE the registry/queue/dispatcher: the
-		// server holds references to all three, and in-flight dispatches must
-		// resolve with DispatcherShutdown (fail-fast) rather than touching freed
-		// state. The HTTP server joins its listener thread inside Stop(), so
-		// when Stop() returns no dispatch is reading the registry/queue.
+		// Close the dispatcher FIRST, then join the HTTP server.
+		//
+		// Ordering is load-bearing and deadlock-critical. A listener thread that
+		// is mid-dispatch is blocked in Future.Get() waiting for a body queued
+		// onto the GAME thread — which is the thread running ShutdownModule. If
+		// we joined the listener first (StopAndJoin → Thread->WaitForCompletion) the
+		// game thread would block waiting for a worker that is itself waiting
+		// for the game thread to pump the queued task: a circular wait, held for
+		// up to the caller-supplied timeout_ms (clamped at 600 s, so a hostile
+		// or unlucky client could freeze editor quit for ten minutes).
+		//
+		// Shutdown() flips the closed flag AND completes every registered
+		// in-flight waiter with DispatcherShutdown, so the blocked listener
+		// returns promptly and the subsequent join is quick and safe.
+		if (Dispatcher.IsValid())
+		{
+			Dispatcher->Shutdown();
+		}
+
+		// Now join the listener thread. When StopAndJoin returns, no dispatch is
+		// reading the registry/queue, so they are safe to drop below.
 		if (HttpServer.IsValid())
 		{
-			HttpServer->Stop();
+			HttpServer->StopAndJoin();
 			HttpServer.Reset();
 		}
 
@@ -230,15 +264,10 @@ public:
 		ToolRegistry.Reset();
 		RequestQueue.Reset();
 
-		// Tear down the dispatcher. After this, any racing EnqueueAsync
-		// resolves immediately with DispatcherShutdown instead of burning its
-		// timeout; Enqueue is a silent no-op. The unique ptr then drops the
-		// instance. Safe to call on the game thread during ShutdownModule.
-		if (Dispatcher.IsValid())
-		{
-			Dispatcher->Shutdown();
-			Dispatcher.Reset();
-		}
+		// Finally drop the dispatcher instance itself. Already closed above; any
+		// racing EnqueueAsync resolves immediately with DispatcherShutdown
+		// instead of burning its timeout, and Enqueue is a silent no-op.
+		Dispatcher.Reset();
 	}
 
 	/**

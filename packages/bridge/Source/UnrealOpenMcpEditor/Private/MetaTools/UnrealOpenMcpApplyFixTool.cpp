@@ -47,6 +47,14 @@ namespace
 	// only (bridge dispatch is serialized), so a plain static bool is safe.
 	bool bRollbackSnapshotActive = false;
 
+	// Set by the runner for the whole of its Execute, independently of whether a
+	// snapshot could actually be taken. Lets the inner handler tell the two
+	// refusal causes apart: "you bypassed the runner" (retryable — re-issue as a
+	// top-level call) vs. "the runner ran but this issue's path cannot be
+	// snapshotted" (NOT retryable — a different message is required, otherwise
+	// the agent loops on advice that can never work).
+	bool bInsideGateRunner = false;
+
 	// Parse the raw POST body into a JSON object. Empty body → empty object so
 	// handlers can resolve optional fields with their defaults. Null when the
 	// body is not a JSON object (caller surfaces a structured invalid_parameter
@@ -168,7 +176,7 @@ FUnrealOpenMcpToolDispatchResult FUnrealOpenMcpApplyFixTool::Execute(const FStri
 	const FString IssueId = Args->HasTypedField<EJson::String>(TEXT("issue_id"))
 		? Args->GetStringField(TEXT("issue_id"))
 		: FString();
-	const bool bDryRun = Args->HasTypedField<EJson::Bool>(TEXT("dry_run"))
+	const bool bDryRun = Args->HasTypedField<EJson::Boolean>(TEXT("dry_run"))
 		? Args->GetBoolField(TEXT("dry_run"))
 		: true;
 
@@ -232,6 +240,20 @@ FUnrealOpenMcpToolDispatchResult FUnrealOpenMcpApplyFixTool::Execute(const FStri
 	// rollback protection and a corrupting fix would be permanent.
 	if (!bRollbackSnapshotActive)
 	{
+		if (bInsideGateRunner)
+		{
+			// The runner DID wrap this call — it just could not snapshot the
+			// issue's path (not a writable content package: an /Engine asset, a
+			// Source/ file behind a compile_errors issue, or the "(project)"
+			// sentinel). Re-issuing changes nothing, so say so plainly instead of
+			// repeating the "use a top-level call" advice, which would send the
+			// agent into a loop.
+			return FUnrealOpenMcpToolDispatchResult::Fail(
+				TEXT("rollback_unavailable"),
+				TEXT("This issue's target is not a writable content package, so no rollback "
+					 "snapshot can be taken and the fix will not be applied unprotected. "
+					 "Use dry_run: true to preview it, and remediate this one manually."));
+		}
 		return FUnrealOpenMcpToolDispatchResult::Fail(
 			TEXT("rollback_unavailable"),
 			TEXT("A non-dry-run apply_fix must run through the gate runner so a "
@@ -284,8 +306,14 @@ namespace
 	 * companion .uexp / .ubulk blobs UE writes alongside (a soft-pointer
 	 * clear can shrink the bulk payload, so all three are snapshotted).
 	 *
-	 * Returns an empty array when the issue id cannot be parsed or the asset
-	 * path is not under /Game/ (source-file issues are not Safe in v1).
+	 * Returns an empty array when the issue id cannot be parsed, or when the
+	 * target is not a WRITABLE content package — a read-only mount (/Engine/,
+	 * /Script/, /Temp/), a non-package path such as a Source/ file behind a
+	 * compile_errors issue, or the "(project)" sentinel. Any other content mount
+	 * (including plugin content, e.g. "/MyPlugin/Foo") IS snapshotted: the caller
+	 * now derives its rollback-active flag from HasSnapshot(), so a narrower rule
+	 * here would make those issues permanently unappliable rather than merely
+	 * unprotected.
 	 */
 	TArray<FString> PredictTouchedPaths(const FString& IssueId)
 	{
@@ -312,10 +340,26 @@ namespace
 		{
 			LongPackageName = LongPackageName.Left(Dot);
 		}
-		if (LongPackageName.IsEmpty() || !LongPackageName.StartsWith(TEXT("/Game/")))
+		// Snapshot any WRITABLE content mount, not just /Game.
+		//
+		// Restricting this to "/Game/" meant a broken soft reference in PLUGIN
+		// content ("/MyPlugin/Foo.Foo") produced no snapshot. Now that the
+		// rollback-snapshot flag is derived from HasSnapshot() (so an
+		// unsnapshottable issue is refused rather than silently mutated), that
+		// narrowness would have made every plugin-content fix permanently
+		// unappliable. The mounts genuinely out of scope are the read-only ones
+		// (/Engine, /Script, /Temp) plus non-package paths — a Source/ file for a
+		// compile_errors issue, or the "(project)" sentinel — none of which a fix
+		// provider writes to anyway.
+		const bool bReservedRoot =
+			LongPackageName.StartsWith(TEXT("/Engine/"))
+			|| LongPackageName.StartsWith(TEXT("/Script/"))
+			|| LongPackageName.StartsWith(TEXT("/Temp/"));
+		if (LongPackageName.IsEmpty()
+			|| !LongPackageName.StartsWith(TEXT("/"))
+			|| bReservedRoot
+			|| !FPackageName::IsValidLongPackageName(LongPackageName))
 		{
-			// Not a content-package path — source files, /Engine/ paths, and
-			// the (project) sentinel are out of scope for v1 Safe rollback.
 			return Out;
 		}
 
@@ -396,9 +440,26 @@ FUnrealOpenMcpApplyFixGateRunnerResult FUnrealOpenMcpApplyFixGateRunner::Execute
 
 	// Run the apply inside the gate path. The ambient flag tells the inner
 	// handler it is safe to invoke Apply (no rollback_unavailable refusal).
+	//
+	// Derive the flag from whether a snapshot ACTUALLY exists, rather than
+	// asserting it unconditionally. PredictTouchedPaths returns empty for any
+	// issue whose target is not a writable content package — an /Engine/ asset, a
+	// Source/ compile_errors issue, or the "(project)" sentinel. Setting the flag
+	// regardless meant the inner handler's `if (!bRollbackSnapshotActive)` guard
+	// passed, Provider->Apply committed irreversibly, the post-validate rollback
+	// branch was skipped (Rollback.HasSnapshot() false), and nothing told the
+	// agent it had no rollback protection. Tying the two together restores the
+	// documented invariant: no snapshot ⇒ `rollback_unavailable`, never a silent
+	// unprotected mutation.
+	//
+	// bInsideGateRunner is set separately so the inner handler can distinguish
+	// "runner bypassed" (retryable) from "runner ran, path unsnapshottable" (not
+	// retryable) and emit the right guidance for each.
 	FUnrealOpenMcpApplyFixGateRunnerResult Out;
 	const bool bPreviousFlag = bRollbackSnapshotActive;
-	bRollbackSnapshotActive = true;
+	const bool bPreviousInRunner = bInsideGateRunner;
+	bRollbackSnapshotActive = Rollback.HasSnapshot();
+	bInsideGateRunner = true;
 
 	FUnrealOpenMcpGateDispatchResult GateResult;
 #if WITH_EXCEPTIONS
@@ -422,6 +483,7 @@ FUnrealOpenMcpApplyFixGateRunnerResult FUnrealOpenMcpApplyFixGateRunner::Execute
 		}
 		Rollback.Discard();
 		bRollbackSnapshotActive = bPreviousFlag;
+		bInsideGateRunner = bPreviousInRunner;
 		throw;
 	}
 #else
@@ -432,6 +494,7 @@ FUnrealOpenMcpApplyFixGateRunnerResult FUnrealOpenMcpApplyFixGateRunner::Execute
 		});
 #endif
 	bRollbackSnapshotActive = bPreviousFlag;
+	bInsideGateRunner = bPreviousInRunner;
 
 	Out.Gate = MoveTemp(GateResult);
 

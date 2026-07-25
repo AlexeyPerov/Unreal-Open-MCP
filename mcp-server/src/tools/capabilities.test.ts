@@ -2,6 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { capabilities } from "./capabilities.js";
 import { ALL_TOOLS } from "./index.js";
+import { buildCapabilities } from "../capabilities/build-capabilities.js";
+import { RULE_CATALOG, FIX_CATALOG } from "../capabilities/rule-catalog.js";
 
 // The capabilities tool definition is the catalog surface advertised via
 // tools/list. P3.8 acceptance: the tool is registered under the
@@ -44,4 +46,25 @@ test("capabilities description documents the local route + v1 implemented surfac
   assert.match(desc, /clear_broken_soft_reference/);
   // Safe signal — only Safe providers are auto-suggested by the gate.
   assert.match(desc, /safe/i);
+});
+
+// Regression guard for TOOL_CATEGORY drift. buildCapabilities falls back to the
+// "other" bucket for any tool missing from the map, so a newly added tool family
+// silently reports an unhelpful category instead of failing. This drifted four
+// times (asset_import, blueprint_add_variable, blueprint_modify_variable,
+// blueprint_set_default) because the unit test for build-capabilities uses a
+// small fixture roster rather than the real one.
+test("every registered tool has an explicit capability category (no 'other')", () => {
+  const caps = buildCapabilities(
+    { tools: ALL_TOOLS, rules: RULE_CATALOG, fixes: FIX_CATALOG },
+    { kind: "tools" },
+  );
+  const uncategorized = (caps.tools ?? [])
+    .filter((t) => t.category === "other")
+    .map((t) => t.name);
+  assert.deepEqual(
+    uncategorized,
+    [],
+    `add these to TOOL_CATEGORY in build-capabilities.ts: ${uncategorized.join(", ")}`,
+  );
 });

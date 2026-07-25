@@ -147,13 +147,22 @@ def _rel(path: Path, root: Path) -> str:
 
 
 def _strip_comments(text: str) -> str:
-    """Remove // line comments and /* */ block comments from C# Build.cs text.
+    """Blank out // line comments and /* */ block comments in C# Build.cs text.
 
     Module names are simple identifiers, never contain // or /*, so stripping
     inside strings is not a concern here. Lets us extract quoted module names
     without tripping on explanatory comments that mention editor modules.
+
+    LINE NUMBERING IS PRESERVED: a multi-line /* */ block is replaced by the same
+    number of newlines rather than deleted outright. Collapsing it shifted every
+    subsequent line, so reported `file:line` for a Build.cs violation was wrong
+    whenever a block comment appeared earlier in the file.
     """
-    text = re.sub(r"/\*.*?\*/", "", text, flags=re.DOTALL)
+
+    def _blank_block(match: "re.Match[str]") -> str:
+        return "\n" * match.group(0).count("\n")
+
+    text = re.sub(r"/\*.*?\*/", _blank_block, text, flags=re.DOTALL)
     text = re.sub(r"//[^\n]*", "", text)
     return text
 
@@ -239,13 +248,21 @@ def find_dependency_violations(file_path: Path) -> List[Tuple[int, str, str]]:
     raw = file_path.read_text(encoding="utf-8")
     stripped = _strip_comments(raw)
     lines = stripped.splitlines()
+    # Suppression markers only ever live INSIDE a comment, which `stripped` has
+    # removed — so looking them up there always found nothing, making the
+    # documented Build.cs suppression form inert: a justified dependency still
+    # failed CI with no way to override it. Match module names on the stripped
+    # text (so a module named in prose doesn't count) but look the marker up in
+    # the RAW lines. _strip_comments preserves line numbering, so the two views
+    # stay index-aligned.
+    raw_lines = raw.splitlines()
 
     for i, line in enumerate(lines):
         for m in _STRING_LITERAL_RE.finditer(line):
             module = m.group(1)
             if module not in EDITOR_DEPENDENCY_MODULES:
                 continue
-            status, _reason = _suppression_for(lines, i)
+            status, _reason = _suppression_for(raw_lines, i)
             if status == "valid":
                 continue
             if status == "invalid":
@@ -396,6 +413,67 @@ def self_test() -> int:
             failures.append(f"Build.cs detector missed editor dep (got {sorted(mods)})")
         if "Core" in mods or "Networking" in mods:
             failures.append(f"Build.cs detector false-positived on runtime deps (got {sorted(mods)})")
+
+    # Build.cs SUPPRESSION must work. The marker only ever appears inside a
+    # comment, so a checker that looks it up in comment-stripped text can never
+    # honor it — the documented override was inert until this was covered.
+    build_cs_supp = (
+        'using UnrealBuildTool;\n'
+        'public class UnrealOpenMcpRuntime : ModuleRules\n'
+        '{\n'
+        '  public UnrealOpenMcpRuntime(ReadOnlyTargetRules Target) : base(Target)\n'
+        '  {\n'
+        '    PrivateDependencyModuleNames.AddRange(new string[]\n'
+        '    {\n'
+        f'      "Slate",   // {SUPPRESSION_MARKER}: editor UI deliberately pulled in\n'
+        '    });\n'
+        '  }\n'
+        '}\n'
+    )
+    build_cs_supp_bare = build_cs_supp.replace(
+        f"// {SUPPRESSION_MARKER}: editor UI deliberately pulled in",
+        f"// {SUPPRESSION_MARKER}",
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        d = Path(tmp)
+        f = d / BUILD_CS_NAME
+        f.write_text(build_cs_supp, encoding="utf-8")
+        if find_dependency_violations(f):
+            failures.append("justified Build.cs suppression was not honored")
+        f.write_text(build_cs_supp_bare, encoding="utf-8")
+        if not find_dependency_violations(f):
+            failures.append("bare Build.cs suppression marker (no reason) was not flagged")
+
+    # A multi-line /* */ block must not shift the reported line number. Only the
+    # Build.cs scanner strips comments, so this case has to be a Build.cs file
+    # (find_include_violations reads raw lines and is unaffected).
+    build_cs_block = (
+        "/* Module rules banner.\n"
+        "   Spans several lines\n"
+        "   on purpose. */\n"
+        'using UnrealBuildTool;\n'
+        'public class UnrealOpenMcpRuntime : ModuleRules\n'
+        '{\n'
+        '  public UnrealOpenMcpRuntime(ReadOnlyTargetRules Target) : base(Target)\n'
+        '  {\n'
+        '    PrivateDependencyModuleNames.AddRange(new string[]\n'
+        '    {\n'
+        '      "Slate",\n'
+        '    });\n'
+        '  }\n'
+        '}\n'
+    )
+    # "Slate" sits on physical line 11 (1-based) of the text above.
+    with tempfile.TemporaryDirectory() as tmp:
+        d = Path(tmp)
+        f = d / BUILD_CS_NAME
+        f.write_text(build_cs_block, encoding="utf-8")
+        flagged = {(ln, tok) for ln, tok, _m in find_dependency_violations(f)}
+        if flagged != {(11, "Slate")}:
+            failures.append(
+                "block comment shifted reported Build.cs line numbers "
+                f"(expected {{(11, 'Slate')}}, got {sorted(flagged)})"
+            )
 
     if failures:
         print("self-test FAILED:", file=sys.stderr)

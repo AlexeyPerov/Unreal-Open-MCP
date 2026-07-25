@@ -24,7 +24,16 @@ bool FAssetRegistrySoftPathResolver::Resolve(const FString& SoftPath) const
 	// rather than thrown -- the runner swallows exceptions but a clean false
 	// keeps the scan quiet in no-exception builds.
 	const FSoftObjectPath Normalized(*SoftPath);
-	const FName PackageName = Normalized.GetPackageName();
+	// GetLongPackageFName(), not GetPackageName(): FSoftObjectPath has no
+	// GetPackageName member in UE5 (the package half lives behind
+	// GetLongPackageFName / GetAssetPath().GetPackageName()).
+	const FName PackageName = Normalized.GetLongPackageFName();
+	if (PackageName.IsNone())
+	{
+		// Unparseable / empty package half — treat as unresolved rather than
+		// querying the registry with a None name.
+		return false;
+	}
 
 	const FAssetRegistryModule& Module = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
 	IAssetRegistry& Registry = Module.Get();

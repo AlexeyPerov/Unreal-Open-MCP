@@ -9,6 +9,16 @@
 #include "UObject/UnrealType.h"     // FProperty, TFieldIterator, CPF_* flags
 #include "UObject/UObjectGlobals.h"
 
+// FEditorScriptExecutionGuard: AActor::ProcessEvent SILENTLY SKIPS a plain
+// BlueprintCallable (non-CallInEditor) function called on an editor-world actor
+// unless GAllowActorScriptExecutionInEditor is set — the call would return
+// success with zeroed return/out-params. This guard toggles that flag for the
+// duration of the invoke (and resets the runaway-loop counter), the same scope
+// the editor's own details-panel / CallInEditor invocations use. The flag-based
+// safety gate above remains the authorization layer; this only lets an
+// already-authorized call actually run. UnrealEd module dependency (build.cs).
+#include "ScriptExecutionGuard.h"
+
 #include "Dom/JsonObject.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
@@ -245,7 +255,7 @@ void FUnrealOpenMcpReflectionTools::Register(FUnrealOpenMcpToolRegistry& Registr
 	// Result: { method, target?|class?, returnValue?, outs? }. Mutating: the
 	// gate's mandatory `paths_hint` is enforced by the dispatcher BEFORE the
 	// handler runs. Structured errors:
-	//   - invalid_parameter  — malformed body
+	//   - invalid_parameter  — malformed body / `args` present but not an object
 	//   - missing_parameter  — `method` absent / neither target nor class
 	//   - ambiguous_target   — both target AND class supplied
 	//   - target_not_found   — `target` ref did not resolve
@@ -320,6 +330,19 @@ void FUnrealOpenMcpReflectionTools::Register(FUnrealOpenMcpToolRegistry& Registr
 						FString::Printf(TEXT("class '%s' did not resolve to a class."), *ClassRef));
 				}
 				Object = Class->GetDefaultObject();
+				// GetDefaultObject can return null (CDO creation deferred or not
+				// possible — reachable because ResolveClass will hand back a
+				// Blueprint's GeneratedClass). The `target` branch above
+				// null-checks its resolve; without the same check here the
+				// FindFunction below is a null dereference, not an error result.
+				if (Object == nullptr)
+				{
+					return FUnrealOpenMcpToolDispatchResult::Fail(
+						TEXT("class_not_found"),
+						FString::Printf(
+							TEXT("class '%s' resolved but has no class-default object to invoke against."),
+							*ClassRef));
+				}
 				bIsCDO = true;
 			}
 
@@ -353,6 +376,23 @@ void FUnrealOpenMcpReflectionTools::Register(FUnrealOpenMcpToolRegistry& Registr
 						*Method));
 			}
 
+			// `args` is optional; absent → every param keeps its initialized
+			// default. But a PRESENT-but-non-object `args` (e.g. an array or a
+			// bare string) is a malformed call — error rather than silently
+			// dropping it to an empty bag, which would zero every parameter
+			// without telling the caller (mirrors Unreal-MCP's args validation).
+			TSharedPtr<FJsonObject> ArgsMap;
+			if (Args->HasField(TEXT("args")))
+			{
+				if (!Args->HasTypedField<EJson::Object>(TEXT("args")))
+				{
+					return FUnrealOpenMcpToolDispatchResult::Fail(
+						TEXT("invalid_parameter"),
+						TEXT("'args' must be a JSON object mapping parameter names to values."));
+				}
+				ArgsMap = Args->GetObjectField(TEXT("args"));
+			}
+
 			// Build the parameter frame. Allocate a properly-aligned buffer and
 			// initialize every param property so ProcessEvent sees valid values.
 			const int32 ParmsSize = FMath::Max<int32>(Func->ParmsSize, 1);
@@ -365,8 +405,6 @@ void FUnrealOpenMcpReflectionTools::Register(FUnrealOpenMcpToolRegistry& Registr
 
 			// Set input params from the args map. A conversion failure aborts the
 			// call (after cleaning up the frame) with invalid_argument.
-			const TSharedPtr<FJsonObject>* ArgMap = nullptr;
-			Args->TryGetObjectField(TEXT("args"), ArgMap);
 			FString ConvertError;
 			for (TFieldIterator<FProperty> It(Func); It && It->HasAnyPropertyFlags(CPF_Parm); ++It)
 			{
@@ -375,11 +413,11 @@ void FUnrealOpenMcpReflectionTools::Register(FUnrealOpenMcpToolRegistry& Registr
 				{
 					continue;
 				}
-				if (ArgMap == nullptr || !(*ArgMap).IsValid())
+				if (!ArgsMap.IsValid())
 				{
 					continue;
 				}
-				const TSharedPtr<FJsonValue> Value = (*ArgMap)->TryGetField(Prop->GetName());
+				const TSharedPtr<FJsonValue> Value = ArgsMap->TryGetField(Prop->GetName());
 				if (!Value.IsValid())
 				{
 					continue;   // param not supplied — keep the initialized default
@@ -404,7 +442,13 @@ void FUnrealOpenMcpReflectionTools::Register(FUnrealOpenMcpToolRegistry& Registr
 					FString::Printf(TEXT("argument '%s' could not be converted to its parameter type."), *ConvertError));
 			}
 
-			// Invoke.
+			// Invoke. Scoped in FEditorScriptExecutionGuard so a plain
+			// BlueprintCallable function on an editor-world actor actually runs
+			// (AActor::ProcessEvent gates script execution in the editor: a
+			// non-CallInEditor function is silently skipped unless the guard's
+			// flag is set). The flag-based safety gate above already authorized
+			// this call; the guard only lets the authorized call execute.
+			FEditorScriptExecutionGuard ScriptGuard;
 			Object->ProcessEvent(Func, Parms);
 
 			// Read the return value + out-params back out.

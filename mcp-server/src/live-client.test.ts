@@ -505,7 +505,7 @@ test("postTool: gate block on a warned outcome surfaces gateFailed=false", async
   }
 });
 
-test("postTool: failure envelope with a gate block carries gate as detail.gate", async () => {
+test("postTool: failure envelope with a gate block carries gate as a top-level field", async () => {
   // A mutating failure (e.g. ValidateScanFailed) carries the gate summary so
   // an agent can inspect the gate decision that produced the failure.
   const gateBlock = {

@@ -1,5 +1,7 @@
-// Blueprint-tool family — see header for the create/get contracts.
-// This file owns the two handlers (blueprint_create, blueprint_get) plus the
+// Blueprint-tool family — see header for the create/get/component/variable/
+// function/event contracts. This file owns the handlers (blueprint_create,
+// blueprint_get, blueprint_add/remove_component, blueprint_add/modify_variable,
+// blueprint_set_default, blueprint_add_function, blueprint_add_event) plus the
 // shared helpers the later P6 sub-plans reuse (ResolveBlueprint, path
 // normalization, name well-formedness, BlueprintRef JSON, pin-type reverse
 // mapping).
@@ -10,13 +12,17 @@
 // dispatch spine stays raw-body — only the handler layer parses.
 //
 // Behavior reference (read-only): Unreal-MCP's blueprint-create / blueprint-get
-// (UnrealMcpBlueprintTools.cpp). The any-UObject collision probe (so a
-// non-Blueprint asset at the target path does not trip the engine's fatal
-// "same fully-qualified name, different class" allocation check), the
-// MarkAsGarbage cleanup on a failed create, the AssetRegistry.AssetCreated +
-// MarkPackageDirty registration, and the disabled-ghost-event `enabled` flag
-// were studied for correct Kismet editor API usage and adapted to this port's
-// Ok/Fail result shape.
+// / blueprint-add-component / blueprint-remove-component /
+// blueprint-add-variable / blueprint-modify-variable / blueprint-set-default /
+// blueprint-add-function / blueprint-add-event (UnrealMcpBlueprintTools.cpp).
+// The any-UObject collision probe (so a non-Blueprint asset at the target path
+// does not trip the engine's fatal "same fully-qualified name, different class"
+// allocation check), the MarkAsGarbage cleanup on a failed create, the
+// AssetRegistry.AssetCreated + MarkPackageDirty registration, the disabled-
+// ghost-event `enabled` flag, the CreateNewGraph outer-name hijack probe, the
+// FunctionCanBePlacedAsEvent gate, the disabled-ghost enable resolution, and
+// AddDefaultEventNode were studied for correct Kismet editor API usage and
+// adapted to this port's Ok/Fail result shape.
 //
 // Every handler registered here runs ON THE GAME THREAD (the HTTP server
 // marshals dispatch through the GameThreadDispatcher).
@@ -1454,7 +1460,323 @@ void FUnrealOpenMcpBlueprintTools::Register(FUnrealOpenMcpToolRegistry& Registry
 				WriteJson(MakeShared<FJsonValueObject>(Out)));
 		}, FUnrealOpenMcpToolMetadata::Mutating());
 
+	// =========================================================================
+	// unreal_open_mcp_blueprint_add_function — user function-graph stub.
+	// =========================================================================
+	//
+	// `path` is the Blueprint asset object path (package-path form also accepted
+	// via ResolveBlueprint's FindObject-first chain). `name` is the new function
+	// graph name. Creates an empty user function graph via
+	// FBlueprintEditorUtils::CreateNewGraph + AddFunctionGraph — the K2 schema
+	// auto-wires the entry/result nodes, so the agent gets a callable stub ready
+	// for a compile. Body authoring (add_node / connect_pins / free-form wiring)
+	// is OUT OF SCOPE — this is a stub-only surface.
+	//
+	// Guards (each maps to a structured error code):
+	//   - name not well-formed (Kismet validator) → invalid_name
+	//   - name collides with an existing function graph → name_collision
+	//   - name collides with any UObject outered to the Blueprint
+	//     → name_collision
+	//     (CreateNewGraph resolves an outer-name clash by RENAMING the existing
+	//     object aside — a name colliding with the EventGraph or any other graph
+	//     outered to the Blueprint would silently hijack it and report success;
+	//     the pre-check turns that into a structured error)
+	//   - CreateNewGraph returns null → create_graph_failed
+	//
+	// MVP: no custom signature objects. AddFunctionGraph is called with a null
+	// SignatureFromObject, so the stub function is parameter-less.
+	//
+	// Mutating. The gate's mandatory `paths_hint` is enforced by the dispatcher
+	// BEFORE the handler runs.
+	Registry.Register(
+		TEXT("unreal_open_mcp_blueprint_add_function"),
+		[](const FString& Body) -> FUnrealOpenMcpToolDispatchResult
+		{
+			TSharedPtr<FJsonObject> Args = ParseBody(Body);
+			if (!Args.IsValid())
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("invalid_parameter"),
+					TEXT("Request body was not a valid JSON object."));
+			}
+
+			const FString Path = Args->HasTypedField<EJson::String>(TEXT("path"))
+				? Args->GetStringField(TEXT("path"))
+				: FString();
+			if (Path.IsEmpty())
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("missing_parameter"),
+					TEXT("'path' is required (Blueprint asset object path)."));
+			}
+
+			UBlueprint* Blueprint = FUnrealOpenMcpBlueprintHelpers::ResolveBlueprint(Path);
+			if (!Blueprint)
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("blueprint_not_found"),
+					FString::Printf(TEXT("Blueprint not found at '%s'."), *Path));
+			}
+
+			// Mutators must refuse the engine/script/temp content roots: the
+			// mutation below dirties the Blueprint's package even when the caller
+			// passes save:false. Only blueprint_create used to check a root, so
+			// every other Blueprint mutator could edit /Engine content.
+			FString BlueprintPackageName;
+			if (!IsBlueprintInWritableRoot(Blueprint, BlueprintPackageName))
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("invalid_content_root"),
+					FString::Printf(
+						TEXT("Refusing to modify '%s' under a reserved content root; ")
+						TEXT("use a project root like '/Game'."),
+						*BlueprintPackageName));
+			}
+
+			const FString FuncName = Args->HasTypedField<EJson::String>(TEXT("name"))
+				? Args->GetStringField(TEXT("name"))
+				: FString();
+			if (FuncName.IsEmpty())
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("missing_parameter"),
+					TEXT("'name' is required (new function graph name)."));
+			}
+			FString NameError;
+			if (!IsNameWellFormed(Blueprint, FuncName, NameError))
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(TEXT("invalid_name"), NameError);
+			}
+
+			// Function-graph name collision — FunctionGraphs holds the user
+			// function graphs blueprint_get reports. A duplicate name is a
+			// structured refusal, never a silent overwrite.
+			for (const UEdGraph* Graph : Blueprint->FunctionGraphs)
+			{
+				if (Graph && Graph->GetFName() == FName(*FuncName))
+				{
+					return FUnrealOpenMcpToolDispatchResult::Fail(
+						TEXT("name_collision"),
+						FString::Printf(TEXT("a function named '%s' already exists."), *FuncName));
+				}
+			}
+
+			// Outer-name hijack guard. CreateNewGraph resolves a name clash by
+			// RENAMING the existing object aside, so a name colliding with the
+			// EventGraph or any other UObject outered to the Blueprint would
+			// silently hijack it and report success. Probe ANY UObject on the
+			// Blueprint's outer scope up front so the structured name_collision
+			// fires instead of a silent rename-aside.
+			if (FindObject<UObject>(Blueprint, *FuncName) != nullptr)
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("name_collision"),
+					FString::Printf(TEXT("a graph or object named '%s' already exists on this Blueprint."), *FuncName));
+			}
+
+			UEdGraph* NewGraph = FBlueprintEditorUtils::CreateNewGraph(
+				Blueprint, FName(*FuncName), UEdGraph::StaticClass(), UEdGraphSchema_K2::StaticClass());
+			if (!NewGraph)
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("create_graph_failed"),
+					TEXT("FBlueprintEditorUtils::CreateNewGraph returned null."));
+			}
+
+			// SignatureFromObject = null → parameter-less stub. bIsUserCreated =
+			// true so the function shows up under the user function list and is
+			// callable from other graphs / C++ via the generated class.
+			FBlueprintEditorUtils::AddFunctionGraph<UClass>(
+				Blueprint, NewGraph, /*bIsUserCreated*/ true, /*SignatureFromObject*/ static_cast<UClass*>(nullptr));
+
+			FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+
+			UE_LOG(
+				LogUnrealOpenMcp, Log,
+				TEXT("[Unreal Open MCP] blueprint_add_function: '%s' on '%s' (stub — body authoring is out of scope)."),
+				*FuncName, *Blueprint->GetName());
+
+			TSharedRef<FJsonObject> Out = MakeShared<FJsonObject>();
+			Out->SetStringField(TEXT("function"), FuncName);
+			return FUnrealOpenMcpToolDispatchResult::Ok(
+				WriteJson(MakeShared<FJsonValueObject>(Out)));
+		}, FUnrealOpenMcpToolMetadata::Mutating());
+
+	// =========================================================================
+	// unreal_open_mcp_blueprint_add_event — overridable parent event node.
+	// =========================================================================
+	//
+	// `path` is the Blueprint asset object path; `name` is the parent UFunction
+	// name of an overridable event (e.g. ReceiveBeginPlay / ReceiveTick). Adds an
+	// event node to the event graph so the override can be authored + compiled.
+	//
+	// The two-pronged resolution mirrors the K2 editor's own behavior:
+	//   1. A fresh Actor event graph is pre-seeded with DISABLED ghost nodes for
+	//      the common events (ReceiveBeginPlay/ReceiveTick). AddDefaultEventNode
+	//      would return that ghost rather than minting a second node — and the
+	//      ghost is INERT (the event does NOT fire) until enabled. So an existing
+	//      disabled ghost is exactly the node we want to ENABLE: enabling the
+	//      ghost IS the "add event" operation.
+	//   2. An ENABLED existing node is a real duplicate → reject.
+	//   3. No existing node → AddDefaultEventNode mints a fresh one + the tool
+	//      enables it.
+	//
+	// Guards (each maps to a structured error code):
+	//   - Blueprint has no event graph      → no_event_graph
+	//   - name names no parent UFunction    → not_a_function
+	//   - name names a function that is NOT
+	//     an overridable Blueprint event    → not_an_event
+	//     (FindFunctionByName matches ANY parent UFunction, e.g. K2_DestroyActor
+	//     is BlueprintCallable but not a BlueprintEvent; the schema's canonical
+	//     check requires FUNC_BlueprintEvent and excludes static/const/deprecated/
+	//     thread-safe functions — otherwise we'd seed a nonsense node + report
+	//     success)
+	//   - an enabled node for the event
+	//     already exists                     → event_already_exists
+	//   - AddDefaultEventNode returns null   → create_node_failed
+	//
+	// Body authoring is OUT OF SCOPE — this enables or creates an overridable
+	// event node only. MarkBlueprintAsStructurallyModified follows so a later
+	// compile wires the override.
+	//
+	// Mutating. The gate's mandatory `paths_hint` is enforced by the dispatcher
+	// BEFORE the handler runs.
+	Registry.Register(
+		TEXT("unreal_open_mcp_blueprint_add_event"),
+		[](const FString& Body) -> FUnrealOpenMcpToolDispatchResult
+		{
+			TSharedPtr<FJsonObject> Args = ParseBody(Body);
+			if (!Args.IsValid())
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("invalid_parameter"),
+					TEXT("Request body was not a valid JSON object."));
+			}
+
+			const FString Path = Args->HasTypedField<EJson::String>(TEXT("path"))
+				? Args->GetStringField(TEXT("path"))
+				: FString();
+			if (Path.IsEmpty())
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("missing_parameter"),
+					TEXT("'path' is required (Blueprint asset object path)."));
+			}
+
+			UBlueprint* Blueprint = FUnrealOpenMcpBlueprintHelpers::ResolveBlueprint(Path);
+			if (!Blueprint)
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("blueprint_not_found"),
+					FString::Printf(TEXT("Blueprint not found at '%s'."), *Path));
+			}
+
+			// Mutators must refuse the engine/script/temp content roots: the
+			// mutation below dirties the Blueprint's package even when the caller
+			// passes save:false. Only blueprint_create used to check a root, so
+			// every other Blueprint mutator could edit /Engine content.
+			FString BlueprintPackageName;
+			if (!IsBlueprintInWritableRoot(Blueprint, BlueprintPackageName))
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("invalid_content_root"),
+					FString::Printf(
+						TEXT("Refusing to modify '%s' under a reserved content root; ")
+						TEXT("use a project root like '/Game'."),
+						*BlueprintPackageName));
+			}
+
+			if (!Blueprint->ParentClass)
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("not_an_event"),
+					FString::Printf(TEXT("'%s' has no parent class, so no parent events can be overridden."), *Blueprint->GetName()));
+			}
+
+			UEdGraph* EventGraph = FBlueprintEditorUtils::FindEventGraph(Blueprint);
+			if (!EventGraph)
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("no_event_graph"),
+					FString::Printf(TEXT("'%s' has no event graph."), *Blueprint->GetName()));
+			}
+
+			const FString EventName = Args->HasTypedField<EJson::String>(TEXT("name"))
+				? Args->GetStringField(TEXT("name"))
+				: FString();
+			if (EventName.IsEmpty())
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("missing_parameter"),
+					TEXT("'name' is required (parent event function name, e.g. 'ReceiveBeginPlay')."));
+			}
+
+			UFunction* EventFunc = Blueprint->ParentClass->FindFunctionByName(FName(*EventName));
+			if (!EventFunc)
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("not_an_event"),
+					FString::Printf(TEXT("'%s' is not a function on parent class '%s' (overridable events are named e.g. ReceiveBeginPlay/ReceiveTick)."), *EventName, *Blueprint->ParentClass->GetName()));
+			}
+
+			// FunctionCanBePlacedAsEvent is the K2 schema's own canonical check:
+			// it requires FUNC_BlueprintEvent and excludes static/const/deprecated/
+			// thread-safe functions. FindFunctionByName alone would let a
+			// BlueprintCallable-but-not-BlueprintEvent function (K2_DestroyActor)
+			// through, seeding a nonsense node + reporting success.
+			if (!UEdGraphSchema_K2::FunctionCanBePlacedAsEvent(EventFunc))
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("not_an_event"),
+					FString::Printf(TEXT("'%s' is not an overridable Blueprint event on '%s' (the K2 schema rejected it — parent events are named e.g. ReceiveBeginPlay/ReceiveTick)."), *EventName, *Blueprint->ParentClass->GetName()));
+			}
+
+			// Two-pronged resolution. A fresh Actor event graph is pre-seeded
+			// with DISABLED ghost nodes for the common events; FindOverrideFor-
+			// Function returns that ghost. An ENABLED node is a real duplicate
+			// (reject); a disabled ghost is exactly the node we want to ENABLE —
+			// enabling the ghost IS the "add event" operation. No existing node
+			// → AddDefaultEventNode mints a fresh one.
+			UK2Node_Event* EventNode = FBlueprintEditorUtils::FindOverrideForFunction(
+				Blueprint, EventFunc->GetOwnerClass(), FName(*EventName));
+			if (EventNode && EventNode->IsNodeEnabled())
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("event_already_exists"),
+					FString::Printf(TEXT("event '%s' already exists on '%s'."), *EventName, *Blueprint->GetName()));
+			}
+			if (!EventNode)
+			{
+				int32 NodePosY = 0;
+				EventNode = FKismetEditorUtilities::AddDefaultEventNode(
+					Blueprint, EventGraph, FName(*EventName), EventFunc->GetOwnerClass(), NodePosY);
+			}
+			if (!EventNode)
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("create_node_failed"),
+					FString::Printf(TEXT("could not add event node for '%s'."), *EventName));
+			}
+
+			// The auto-placed ghost node is EnabledState=Disabled and excluded
+			// from compilation; enable it so the event actually fires. bUserAction
+			// false: programmatic enable, not a click in the graph editor.
+			EventNode->SetEnabledState(ENodeEnabledState::Enabled, /*bUserAction*/ false);
+			FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+
+			UE_LOG(
+				LogUnrealOpenMcp, Log,
+				TEXT("[Unreal Open MCP] blueprint_add_event: '%s' enabled on '%s' (stub — body authoring is out of scope)."),
+				*EventName, *Blueprint->GetName());
+
+			TSharedRef<FJsonObject> Out = MakeShared<FJsonObject>();
+			Out->SetStringField(TEXT("event"), EventName);
+			Out->SetBoolField(TEXT("enabled"), true);
+			return FUnrealOpenMcpToolDispatchResult::Ok(
+				WriteJson(MakeShared<FJsonValueObject>(Out)));
+		}, FUnrealOpenMcpToolMetadata::Mutating());
+
 	UE_LOG(
 		LogUnrealOpenMcp, Log,
-		TEXT("[Unreal Open MCP] blueprint tools registered: unreal_open_mcp_blueprint_create, unreal_open_mcp_blueprint_get, unreal_open_mcp_blueprint_add_component, unreal_open_mcp_blueprint_remove_component, unreal_open_mcp_blueprint_add_variable, unreal_open_mcp_blueprint_modify_variable, unreal_open_mcp_blueprint_set_default"));
+		TEXT("[Unreal Open MCP] blueprint tools registered: unreal_open_mcp_blueprint_create, unreal_open_mcp_blueprint_get, unreal_open_mcp_blueprint_add_component, unreal_open_mcp_blueprint_remove_component, unreal_open_mcp_blueprint_add_variable, unreal_open_mcp_blueprint_modify_variable, unreal_open_mcp_blueprint_set_default, unreal_open_mcp_blueprint_add_function, unreal_open_mcp_blueprint_add_event"));
 }

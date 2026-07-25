@@ -139,6 +139,23 @@ import { blueprintRemoveComponent } from "./blueprint-remove-component.js";
 import { blueprintAddVariable } from "./blueprint-add-variable.js";
 import { blueprintModifyVariable } from "./blueprint-modify-variable.js";
 import { blueprintSetDefault } from "./blueprint-set-default.js";
+// P6.4 — Blueprint function / event graph stubs (blueprint_add_function /
+// blueprint_add_event). Both mutating (default gate Enforce; paths_hint
+// required). add_function creates an empty user function-graph stub via
+// FBlueprintEditorUtils::CreateNewGraph + AddFunctionGraph (the K2 schema
+// auto-wires the entry/result nodes; the MVP stub is parameter-less); guards
+// reject the outer-name hijack (CreateNewGraph would otherwise rename the
+// existing object aside — the EventGraph or any graph outered to the Blueprint
+// — and silently report success) and a FunctionGraphs collision. add_event
+// enables or creates an overridable parent event node (ReceiveBeginPlay /
+// ReceiveTick) via the K2 schema's FunctionCanBePlacedAsEvent + AddDefaultEvent-
+// Node; the two-pronged resolution enables a fresh Actor event graph's
+// pre-seeded DISABLED ghost (enabling the ghost IS the "add event" op — never
+// a false no-op), rejects an already-enabled node, and mints + enables a fresh
+// node when none exists. Body authoring (add_node / connect_pins / free-form
+// wiring) is OUT OF SCOPE — both tools create stubs only.
+import { blueprintAddFunction } from "./blueprint-add-function.js";
+import { blueprintAddEvent } from "./blueprint-add-event.js";
 
 // Tool registry. P1.7 registers the first real tool — `unreal_open_mcp_ping` —
 // which the MCP server routes to the bridge's `GET /ping`. Each subsequent tool
@@ -274,4 +291,6 @@ export const ALL_TOOLS: Tool[] = [
   blueprintAddVariable,
   blueprintModifyVariable,
   blueprintSetDefault,
+  blueprintAddFunction,
+  blueprintAddEvent,
 ];

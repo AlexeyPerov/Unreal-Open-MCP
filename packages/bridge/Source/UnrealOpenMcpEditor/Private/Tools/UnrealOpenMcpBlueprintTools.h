@@ -66,9 +66,30 @@
 //     is NOT a property on the generated class until a compile lands it, so
 //     set_default on such a property reports property_not_found with a message
 //     pointing at blueprint_compile.
+//   - `unreal_open_mcp_blueprint_add_function` — add a user function-graph
+//     stub via FBlueprintEditorUtils::CreateNewGraph + AddFunctionGraph (the K2
+//     schema auto-wires the entry/result nodes; AddFunctionGraph is called with
+//     a null SignatureFromObject so the MVP stub is parameter-less). Body
+//     authoring (add_node / connect_pins / free-form wiring) is OUT OF SCOPE —
+//     this is a stub-only surface. Guards: an outer-name hijack probe (Create-
+//     NewGraph resolves an outer-name clash by renaming the existing object
+//     aside — a name colliding with the EventGraph or any other UObject outered
+//     to the Blueprint would silently hijack it and report success; the probe
+//     surfaces that as name_collision), plus a FunctionGraphs collision check.
+//   - `unreal_open_mcp_blueprint_add_event` — enable or create an overridable
+//     parent event node (e.g. ReceiveBeginPlay / ReceiveTick) on the event
+//     graph via the K2 schema's FunctionCanBePlacedAsEvent + FKismetEditor-
+//     Utilities::AddDefaultEventNode. The two-pronged resolution mirrors the K2
+//     editor's own behavior: a fresh Actor event graph is pre-seeded with
+//     DISABLED ghost nodes for the common events (those ghosts are INERT — the
+//     event does NOT fire until enabled); an existing disabled ghost IS the
+//     node the tool enables (enabling the ghost is the "add event" op), while
+//     an ENABLED existing node is a real duplicate (reject). Body authoring is
+//     OUT OF SCOPE. MarkBlueprintAsStructurallyModified follows so a later
+//     compile wires the override.
 //
 // create / add_component / remove_component / add_variable / modify_variable /
-// set_default are MUTATING and register with
+// set_default / add_function / add_event are MUTATING and register with
 // `FUnrealOpenMcpToolMetadata::Mutating()` so the dispatcher wraps them in
 // `GatePolicy.Execute` (the mandatory `paths_hint` is enforced by the
 // dispatcher BEFORE the handler runs). get is read-only (gate Off).
@@ -76,18 +97,21 @@
 // Fidelity: greenfield. There is no Unity Blueprint / prefab-graph twin — the
 // Unity-first porting protocol still applies to shared infrastructure (gate
 // contract, snake_case naming, MCP envelope), but the create/get + SCS add/remove
-// + variable add/modify/set-default surface is Unreal-only. Behavior reference
-// (read-only): Unreal-MCP's blueprint-create / blueprint-get /
-// blueprint-add-component / blueprint-remove-component /
-// blueprint-add-variable / blueprint-modify-variable / blueprint-set-default
-// handlers + ResolveBlueprint / BlueprintRefStruct / MakePinType / PinTypeToString
-// / name helpers (UnrealMcpBlueprintTools.cpp) for the correct Kismet editor API
-// usage (CanCreateBlueprintOfClass / CreateBlueprint / AssetCreated / the
+// + variable add/modify/set-default + function/event stub surface is Unreal-
+// only. Behavior reference (read-only): Unreal-MCP's blueprint-create /
+// blueprint-get / blueprint-add-component / blueprint-remove-component /
+// blueprint-add-variable / blueprint-modify-variable / blueprint-set-default /
+// blueprint-add-function / blueprint-add-event handlers + ResolveBlueprint /
+// BlueprintRefStruct / MakePinType / PinTypeToString / name helpers
+// (UnrealMcpBlueprintTools.cpp) for the correct Kismet editor API usage
+// (CanCreateBlueprintOfClass / CreateBlueprint / AssetCreated / the
 // any-UObject collision probe / the disabled-ghost-event `enabled` flag / the
 // abstract-class ClassFlags guard / the cross-namespace name-collision checks /
 // the USceneComponent attachment validation / RemoveNodeAndPromoteChildren /
 // AddMemberVariable + the validate-before-mutate modify ordering / the CDO
-// ImportText_Direct + Pre/PostEditChangeProperty write protocol).
+// ImportText_Direct + Pre/PostEditChangeProperty write protocol / CreateNewGraph
+// + AddFunctionGraph for the function stub / the FunctionCanBePlacedAsEvent +
+// AddDefaultEventNode + ghost-enable resolution for the event stub).
 //
 // Every handler registered here runs ON THE GAME THREAD (the HTTP server
 // marshals dispatch through the GameThreadDispatcher).
@@ -111,6 +135,8 @@ struct FEdGraphPinType;
  *   - `unreal_open_mcp_blueprint_add_variable`     (mutating; gate Enforce; paths_hint required)
  *   - `unreal_open_mcp_blueprint_modify_variable`  (mutating; gate Enforce; paths_hint required)
  *   - `unreal_open_mcp_blueprint_set_default`      (mutating; gate Enforce; paths_hint required)
+ *   - `unreal_open_mcp_blueprint_add_function`     (mutating; gate Enforce; paths_hint required)
+ *   - `unreal_open_mcp_blueprint_add_event`        (mutating; gate Enforce; paths_hint required)
  */
 namespace FUnrealOpenMcpBlueprintTools
 {

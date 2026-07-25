@@ -1,10 +1,10 @@
 // unreal_open_mcp_blueprint_create / blueprint_get / blueprint_add_component /
 // blueprint_remove_component / blueprint_add_variable /
-// blueprint_modify_variable / blueprint_set_default Automation specs
-// (P6.1 + P6.2 + P6.3).
+// blueprint_modify_variable / blueprint_set_default / blueprint_add_function /
+// blueprint_add_event Automation specs (P6.1 + P6.2 + P6.3 + P6.4).
 //
 // Pins the Blueprint tool family end-to-end at the handler level. The cases
-// mirror the P6.1 + P6.2 + P6.3 plan acceptance criteria + test lists:
+// mirror the P6.1 + P6.2 + P6.3 + P6.4 plan acceptance criteria + test lists:
 //   - create: happy path (new Blueprint from the default Actor parent under
 //     /Game; result echoes name + path + parentClass); package-path AND
 //     object-path forms both accepted and normalised; explicit parent
@@ -49,8 +49,21 @@
 //     property absent on the generated class rejected with property_not_found
 //     whose message points at blueprint_compile; no_generated_class when the
 //     GeneratedClass is missing; missing_parameter.
+//   - add_function: happy path (DoThing function graph added; result echoes the
+//     name; blueprint_get lists it); duplicate function name rejected
+//     (name_collision); an outer-name collision with a UObject already outered
+//     to the Blueprint rejected (name_collision — the CreateNewGraph rename-
+//     aside hijack is never silently accepted); missing_parameter.
+//   - add_event: happy path (ReceiveBeginPlay event enabled; result echoes the
+//     name + enabled:true; blueprint_get lists it as enabled); a non-overridable
+//     parent function rejected (K2_DestroyActor is BlueprintCallable but not a
+//     BlueprintEvent → not_an_event, never a nonsense node); a non-existent
+//     parent function name rejected (not_an_event); a second add of an already
+//     enabled event rejected (event_already_exists); a ghost event (the fresh
+//     Actor event graph is pre-seeded with a DISABLED ReceiveTick ghost) is
+//     ENABLED by add-event (does not false-succeed as no-op); missing_parameter.
 //   - mutation classification: create/add/remove/add_variable/modify_variable/
-//     set_default mutating, get read-only.
+//     set_default/add_function/add_event mutating, get read-only.
 //
 // The suite owns its scratch tree under /Game/__McpP61Blueprint — teardown
 // removes the whole subtree so the automation project does not accumulate test
@@ -60,7 +73,10 @@
 //
 // Fidelity: greenfield vs Unity (no Blueprint twin); behavior-adapted from
 // Unreal-MCP's blueprint-create / blueprint-get test surface (the any-UObject
-// collision probe + the disabled-ghost-event `enabled` flag).
+// collision probe + the disabled-ghost-event `enabled` flag) and the
+// blueprint-add-function / blueprint-add-event test surface (the outer-name
+// hijack probe + the FunctionCanBePlacedAsEvent reject + the ghost-enable +
+// duplicate-event reject).
 #if WITH_DEV_AUTOMATION_TESTS
 
 #include "CoreMinimal.h"
@@ -71,6 +87,9 @@
 
 #include "Engine/Blueprint.h"               // UBlueprint — set_default tests compile + resolve the asset
 #include "Kismet2/KismetEditorUtilities.h"   // CompileBlueprint — set_default needs a property on the generated class
+#include "Kismet2/BlueprintEditorUtils.h"   // FindEventGraph — add_event asserts an enabled node
+#include "EdGraph/EdGraph.h"                // UEdGraph — FindEventGraph return type
+#include "K2Node_Event.h"                   // UK2Node_Event — enabled-node assertion in add_event
 
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
@@ -205,6 +224,58 @@ namespace
 			if (Var.IsValid() && Var->GetStringField(TEXT("name")) == Name)
 			{
 				return Var;
+			}
+		}
+		return nullptr;
+	}
+
+	/** Find a function object by name inside a blueprint_get result's
+	 *  `functions` array. Returns null when the array is absent or no entry
+	 *  matches. Used by the add_function cases to assert the function state
+	 *  blueprint_get reports. */
+	TSharedPtr<FJsonObject> FindFunctionByName(const TSharedPtr<FJsonObject>& GetResult, const FString& Name)
+	{
+		if (!GetResult.IsValid())
+		{
+			return nullptr;
+		}
+		const TArray<TSharedPtr<FJsonValue>>* Functions = nullptr;
+		if (!GetResult->TryGetArrayField(TEXT("functions"), Functions))
+		{
+			return nullptr;
+		}
+		for (const TSharedPtr<FJsonValue>& Entry : *Functions)
+		{
+			const TSharedPtr<FJsonObject> Func = Entry.IsValid() ? Entry->AsObject() : nullptr;
+			if (Func.IsValid() && Func->GetStringField(TEXT("name")) == Name)
+			{
+				return Func;
+			}
+		}
+		return nullptr;
+	}
+
+	/** Find an event object by name inside a blueprint_get result's `events`
+	 *  array. Returns null when the array is absent or no entry matches. Used
+	 *  by the add_event cases to assert the event state blueprint_get reports.
+	 *  An event entry is { name, enabled }. */
+	TSharedPtr<FJsonObject> FindEventByName(const TSharedPtr<FJsonObject>& GetResult, const FString& Name)
+	{
+		if (!GetResult.IsValid())
+		{
+			return nullptr;
+		}
+		const TArray<TSharedPtr<FJsonValue>>* Events = nullptr;
+		if (!GetResult->TryGetArrayField(TEXT("events"), Events))
+		{
+			return nullptr;
+		}
+		for (const TSharedPtr<FJsonValue>& Entry : *Events)
+		{
+			const TSharedPtr<FJsonObject> Ev = Entry.IsValid() ? Entry->AsObject() : nullptr;
+			if (Ev.IsValid() && Ev->GetStringField(TEXT("name")) == Name)
+			{
+				return Ev;
 			}
 		}
 		return nullptr;
@@ -506,7 +577,7 @@ void FUnrealOpenMcpBlueprintToolsSpec::Define()
 	{
 		// Pin the mutating/read-only classification so a later refactor cannot
 		// accidentally re-classify a tool and break the gate contract.
-		It("create/add/remove/add_variable/modify_variable/set_default are mutating; get is read-only", [this]()
+		It("create/add/remove/add_variable/modify_variable/set_default/add_function/add_event are mutating; get is read-only", [this]()
 		{
 			FUnrealOpenMcpToolRegistry Registry;
 			FUnrealOpenMcpBlueprintTools::Register(Registry);
@@ -531,6 +602,8 @@ void FUnrealOpenMcpBlueprintToolsSpec::Define()
 			CheckMutating(TEXT("unreal_open_mcp_blueprint_add_variable"), true);
 			CheckMutating(TEXT("unreal_open_mcp_blueprint_modify_variable"), true);
 			CheckMutating(TEXT("unreal_open_mcp_blueprint_set_default"), true);
+			CheckMutating(TEXT("unreal_open_mcp_blueprint_add_function"), true);
+			CheckMutating(TEXT("unreal_open_mcp_blueprint_add_event"), true);
 		});
 	});
 
@@ -1586,6 +1659,346 @@ void FUnrealOpenMcpBlueprintToolsSpec::Define()
 					{ TEXT("path"), Quote(TEXT("/Game/__DoesNotExist/BP_Nope")) },
 					{ TEXT("property"), Quote(TEXT("X")) },
 					{ TEXT("value"), Quote(TEXT("1")) },
+				}));
+			TestFalse(TEXT("ok false"), R.bOk);
+			TestEqual(TEXT("code"), R.Code, FString(TEXT("blueprint_not_found")));
+		});
+	});
+
+	Describe("unreal_open_mcp_blueprint_add_function", [this]()
+	{
+		// Happy path — add a DoThing function graph; the result echoes the
+		// function name, and blueprint_get lists it.
+		It("adds a function graph reflected by blueprint_get", [this]()
+		{
+			FUnrealOpenMcpToolRegistry Registry;
+			FUnrealOpenMcpBlueprintTools::Register(Registry);
+
+			const FString Dest = FString::Printf(TEXT("%s/BP_AddFunc"), BlueprintScratchRoot);
+			if (!TestTrue(TEXT("create ok"), Invoke(Registry, TEXT("unreal_open_mcp_blueprint_create"),
+				MakeBody({ { TEXT("path"), Quote(Dest) } })).bOk)) return;
+
+			const FUnrealOpenMcpToolDispatchResult R = Invoke(
+				Registry,
+				TEXT("unreal_open_mcp_blueprint_add_function"),
+				MakeBody({
+					{ TEXT("path"), Quote(Dest) },
+					{ TEXT("name"), Quote(TEXT("DoThing")) },
+				}));
+			if (!TestTrue(TEXT("ok"), R.bOk)) return;
+
+			const TSharedPtr<FJsonObject> Json = ParseJson(R.Output);
+			if (!TestNotNull(TEXT("result json"), Json.Get())) return;
+			TestEqual(TEXT("function name"), Json->GetStringField(TEXT("function")), FString(TEXT("DoThing")));
+
+			// blueprint_get now lists the function.
+			const FUnrealOpenMcpToolDispatchResult Get = Invoke(
+				Registry, TEXT("unreal_open_mcp_blueprint_get"), MakeBody({ { TEXT("path"), Quote(Dest) } }));
+			if (!TestTrue(TEXT("get ok"), Get.bOk)) return;
+			TestTrue(TEXT("function present in get"), FindFunctionByName(ParseJson(Get.Output), TEXT("DoThing")).IsValid());
+		});
+
+		// Duplicate function name — rejected with name_collision.
+		It("rejects a duplicate function name with name_collision", [this]()
+		{
+			FUnrealOpenMcpToolRegistry Registry;
+			FUnrealOpenMcpBlueprintTools::Register(Registry);
+
+			const FString Dest = FString::Printf(TEXT("%s/BP_FuncDup"), BlueprintScratchRoot);
+			if (!TestTrue(TEXT("create ok"), Invoke(Registry, TEXT("unreal_open_mcp_blueprint_create"),
+				MakeBody({ { TEXT("path"), Quote(Dest) } })).bOk)) return;
+			if (!TestTrue(TEXT("add first"), Invoke(Registry, TEXT("unreal_open_mcp_blueprint_add_function"),
+				MakeBody({
+					{ TEXT("path"), Quote(Dest) },
+					{ TEXT("name"), Quote(TEXT("DoThing")) },
+				})).bOk)) return;
+
+			const FUnrealOpenMcpToolDispatchResult R = Invoke(
+				Registry,
+				TEXT("unreal_open_mcp_blueprint_add_function"),
+				MakeBody({
+					{ TEXT("path"), Quote(Dest) },
+					{ TEXT("name"), Quote(TEXT("DoThing")) },
+				}));
+			TestFalse(TEXT("ok false"), R.bOk);
+			TestEqual(TEXT("code"), R.Code, FString(TEXT("name_collision")));
+		});
+
+		// Outer-name hijack — a name colliding with the EventGraph (a UObject
+		// outered to the Blueprint) is rejected up front. CreateNewGraph would
+		// otherwise resolve the clash by renaming the EXISTING object aside,
+		// silently hijacking it and reporting success.
+		It("rejects an outer-name collision with the EventGraph (no silent hijack)", [this]()
+		{
+			FUnrealOpenMcpToolRegistry Registry;
+			FUnrealOpenMcpBlueprintTools::Register(Registry);
+
+			const FString Dest = FString::Printf(TEXT("%s/BP_OuterClash"), BlueprintScratchRoot);
+			if (!TestTrue(TEXT("create ok"), Invoke(Registry, TEXT("unreal_open_mcp_blueprint_create"),
+				MakeBody({ { TEXT("path"), Quote(Dest) } })).bOk)) return;
+
+			// Resolve the Blueprint to read its EventGraph's actual FName — the
+			// pre-seeded event graph is outered to the Blueprint under a stable
+			// name, so a function with that name is the hijack case.
+			UBlueprint* Blueprint = FUnrealOpenMcpBlueprintHelpers::ResolveBlueprint(Dest);
+			if (!TestNotNull(TEXT("resolve blueprint"), Blueprint)) return;
+			FString EventGraphName;
+			if (UEdGraph* EventGraph = FBlueprintEditorUtils::FindEventGraph(Blueprint))
+			{
+				EventGraphName = EventGraph->GetName();
+			}
+			if (!TestTrue(TEXT("event graph resolved"), !EventGraphName.IsEmpty())) return;
+
+			const FUnrealOpenMcpToolDispatchResult R = Invoke(
+				Registry,
+				TEXT("unreal_open_mcp_blueprint_add_function"),
+				MakeBody({
+					{ TEXT("path"), Quote(Dest) },
+					{ TEXT("name"), Quote(EventGraphName) },
+				}));
+			TestFalse(TEXT("ok false"), R.bOk);
+			TestEqual(TEXT("code"), R.Code, FString(TEXT("name_collision")));
+		});
+
+		// Missing args — path or name absent.
+		It("returns missing_parameter when path/name absent", [this]()
+		{
+			FUnrealOpenMcpToolRegistry Registry;
+			FUnrealOpenMcpBlueprintTools::Register(Registry);
+
+			const FString Dest = FString::Printf(TEXT("%s/BP_FuncMissing"), BlueprintScratchRoot);
+			if (!TestTrue(TEXT("create ok"), Invoke(Registry, TEXT("unreal_open_mcp_blueprint_create"),
+				MakeBody({ { TEXT("path"), Quote(Dest) } })).bOk)) return;
+
+			// No name.
+			TestEqual(TEXT("missing name"),
+				Invoke(Registry, TEXT("unreal_open_mcp_blueprint_add_function"),
+					MakeBody({ { TEXT("path"), Quote(Dest) } })).Code,
+				FString(TEXT("missing_parameter")));
+			// No path at all.
+			TestEqual(TEXT("missing path"),
+				Invoke(Registry, TEXT("unreal_open_mcp_blueprint_add_function"), TEXT("{}")).Code,
+				FString(TEXT("missing_parameter")));
+		});
+
+		// Missing Blueprint — add_function on an absent path.
+		It("returns blueprint_not_found for a missing Blueprint", [this]()
+		{
+			FUnrealOpenMcpToolRegistry Registry;
+			FUnrealOpenMcpBlueprintTools::Register(Registry);
+
+			const FUnrealOpenMcpToolDispatchResult R = Invoke(
+				Registry,
+				TEXT("unreal_open_mcp_blueprint_add_function"),
+				MakeBody({
+					{ TEXT("path"), Quote(TEXT("/Game/__DoesNotExist/BP_Nope")) },
+					{ TEXT("name"), Quote(TEXT("DoThing")) },
+				}));
+			TestFalse(TEXT("ok false"), R.bOk);
+			TestEqual(TEXT("code"), R.Code, FString(TEXT("blueprint_not_found")));
+		});
+	});
+
+	Describe("unreal_open_mcp_blueprint_add_event", [this]()
+	{
+		// Happy path — add ReceiveBeginPlay; the result echoes the event name +
+		// enabled:true, and blueprint_get lists it as enabled. The fresh Actor
+		// event graph is pre-seeded with a DISABLED ghost for ReceiveBeginPlay,
+		// so this case also pins the ghost-enable path (the event goes from a
+		// disabled ghost to an enabled node — add_event does NOT false-succeed
+		// as a no-op).
+		It("enables the ReceiveBeginPlay event reflected by blueprint_get as enabled", [this]()
+		{
+			FUnrealOpenMcpToolRegistry Registry;
+			FUnrealOpenMcpBlueprintTools::Register(Registry);
+
+			const FString Dest = FString::Printf(TEXT("%s/BP_AddEvent"), BlueprintScratchRoot);
+			if (!TestTrue(TEXT("create ok"), Invoke(Registry, TEXT("unreal_open_mcp_blueprint_create"),
+				MakeBody({ { TEXT("path"), Quote(Dest) } })).bOk)) return;
+
+			const FUnrealOpenMcpToolDispatchResult R = Invoke(
+				Registry,
+				TEXT("unreal_open_mcp_blueprint_add_event"),
+				MakeBody({
+					{ TEXT("path"), Quote(Dest) },
+					{ TEXT("name"), Quote(TEXT("ReceiveBeginPlay")) },
+				}));
+			if (!TestTrue(TEXT("ok"), R.bOk)) return;
+
+			const TSharedPtr<FJsonObject> Json = ParseJson(R.Output);
+			if (!TestNotNull(TEXT("result json"), Json.Get())) return;
+			TestEqual(TEXT("event name"), Json->GetStringField(TEXT("event")), FString(TEXT("ReceiveBeginPlay")));
+			TestEqual(TEXT("enabled flag"), Json->GetBoolField(TEXT("enabled")), true);
+
+			// blueprint_get now lists the event with enabled:true.
+			const FUnrealOpenMcpToolDispatchResult Get = Invoke(
+				Registry, TEXT("unreal_open_mcp_blueprint_get"), MakeBody({ { TEXT("path"), Quote(Dest) } }));
+			if (!TestTrue(TEXT("get ok"), Get.bOk)) return;
+			const TSharedPtr<FJsonObject> Ev = FindEventByName(ParseJson(Get.Output), TEXT("ReceiveBeginPlay"));
+			if (!TestNotNull(TEXT("event present in get"), Ev.Get())) return;
+			TestEqual(TEXT("get enabled"), Ev->GetBoolField(TEXT("enabled")), true);
+
+			// The node must be ENABLED on the actual graph — confirm via the
+			// K2Node_Event's IsNodeEnabled so the ghost-enable contract holds at
+			// the editor-object level too (not just the get surface).
+			UBlueprint* Blueprint = FUnrealOpenMcpBlueprintHelpers::ResolveBlueprint(Dest);
+			if (!TestNotNull(TEXT("resolve blueprint"), Blueprint)) return;
+			bool bFoundEnabled = false;
+			if (UEdGraph* EventGraph = FBlueprintEditorUtils::FindEventGraph(Blueprint))
+			{
+				for (const UEdGraphNode* Node : EventGraph->Nodes)
+				{
+					if (const UK2Node_Event* EventNode = Cast<UK2Node_Event>(Node))
+					{
+						if (EventNode->EventReference.GetMemberName() == FName(TEXT("ReceiveBeginPlay"))
+							&& EventNode->IsNodeEnabled())
+						{
+							bFoundEnabled = true;
+							break;
+						}
+					}
+				}
+			}
+			TestTrue(TEXT("enabled node present on graph"), bFoundEnabled);
+		});
+
+		// Non-overridable parent function — K2_DestroyActor is BlueprintCallable
+		// but not a BlueprintEvent, so FunctionCanBePlacedAsEvent rejects it with
+		// not_an_event (never a nonsense node seeded + reported as success).
+		It("rejects a non-overridable parent function (K2_DestroyActor) with not_an_event", [this]()
+		{
+			FUnrealOpenMcpToolRegistry Registry;
+			FUnrealOpenMcpBlueprintTools::Register(Registry);
+
+			const FString Dest = FString::Printf(TEXT("%s/BP_BadEvent"), BlueprintScratchRoot);
+			if (!TestTrue(TEXT("create ok"), Invoke(Registry, TEXT("unreal_open_mcp_blueprint_create"),
+				MakeBody({ { TEXT("path"), Quote(Dest) } })).bOk)) return;
+
+			const FUnrealOpenMcpToolDispatchResult R = Invoke(
+				Registry,
+				TEXT("unreal_open_mcp_blueprint_add_event"),
+				MakeBody({
+					{ TEXT("path"), Quote(Dest) },
+					{ TEXT("name"), Quote(TEXT("K2_DestroyActor")) },
+				}));
+			TestFalse(TEXT("ok false"), R.bOk);
+			TestEqual(TEXT("code"), R.Code, FString(TEXT("not_an_event")));
+		});
+
+		// Non-existent parent function — a name that names no parent UFunction
+		// is rejected with not_an_event.
+		It("rejects a non-existent parent function with not_an_event", [this]()
+		{
+			FUnrealOpenMcpToolRegistry Registry;
+			FUnrealOpenMcpBlueprintTools::Register(Registry);
+
+			const FString Dest = FString::Printf(TEXT("%s/BP_NoEvent"), BlueprintScratchRoot);
+			if (!TestTrue(TEXT("create ok"), Invoke(Registry, TEXT("unreal_open_mcp_blueprint_create"),
+				MakeBody({ { TEXT("path"), Quote(Dest) } })).bOk)) return;
+
+			const FUnrealOpenMcpToolDispatchResult R = Invoke(
+				Registry,
+				TEXT("unreal_open_mcp_blueprint_add_event"),
+				MakeBody({
+					{ TEXT("path"), Quote(Dest) },
+					{ TEXT("name"), Quote(TEXT("__DefinitelyNotAnEvent__")) },
+				}));
+			TestFalse(TEXT("ok false"), R.bOk);
+			TestEqual(TEXT("code"), R.Code, FString(TEXT("not_an_event")));
+		});
+
+		// Duplicate event — a second add of an already enabled event is rejected
+		// with event_already_exists (no second ghost node minted).
+		It("rejects a second add of an already enabled event with event_already_exists", [this]()
+		{
+			FUnrealOpenMcpToolRegistry Registry;
+			FUnrealOpenMcpBlueprintTools::Register(Registry);
+
+			const FString Dest = FString::Printf(TEXT("%s/BP_EventDup"), BlueprintScratchRoot);
+			if (!TestTrue(TEXT("create ok"), Invoke(Registry, TEXT("unreal_open_mcp_blueprint_create"),
+				MakeBody({ { TEXT("path"), Quote(Dest) } })).bOk)) return;
+			if (!TestTrue(TEXT("add first"), Invoke(Registry, TEXT("unreal_open_mcp_blueprint_add_event"),
+				MakeBody({
+					{ TEXT("path"), Quote(Dest) },
+					{ TEXT("name"), Quote(TEXT("ReceiveBeginPlay")) },
+				})).bOk)) return;
+
+			const FUnrealOpenMcpToolDispatchResult R = Invoke(
+				Registry,
+				TEXT("unreal_open_mcp_blueprint_add_event"),
+				MakeBody({
+					{ TEXT("path"), Quote(Dest) },
+					{ TEXT("name"), Quote(TEXT("ReceiveBeginPlay")) },
+				}));
+			TestFalse(TEXT("ok false"), R.bOk);
+			TestEqual(TEXT("code"), R.Code, FString(TEXT("event_already_exists")));
+		});
+
+		// Ghost-enable on a fresh event — ReceiveTick is also a pre-seeded
+		// DISABLED ghost on a fresh Actor event graph; add-event must ENABLE it
+		// (not false-succeed as a no-op). Distinct from the ReceiveBeginPlay
+		// case so the ghost-enable contract is exercised on a second seed.
+		It("enables the ReceiveTick ghost (no false no-op)", [this]()
+		{
+			FUnrealOpenMcpToolRegistry Registry;
+			FUnrealOpenMcpBlueprintTools::Register(Registry);
+
+			const FString Dest = FString::Printf(TEXT("%s/BP_TickGhost"), BlueprintScratchRoot);
+			if (!TestTrue(TEXT("create ok"), Invoke(Registry, TEXT("unreal_open_mcp_blueprint_create"),
+				MakeBody({ { TEXT("path"), Quote(Dest) } })).bOk)) return;
+
+			const FUnrealOpenMcpToolDispatchResult R = Invoke(
+				Registry,
+				TEXT("unreal_open_mcp_blueprint_add_event"),
+				MakeBody({
+					{ TEXT("path"), Quote(Dest) },
+					{ TEXT("name"), Quote(TEXT("ReceiveTick")) },
+				}));
+			if (!TestTrue(TEXT("ok"), R.bOk)) return;
+
+			// blueprint_get must list ReceiveTick with enabled:true (the ghost
+			// transitioned from disabled to enabled — add_event did not no-op).
+			const FUnrealOpenMcpToolDispatchResult Get = Invoke(
+				Registry, TEXT("unreal_open_mcp_blueprint_get"), MakeBody({ { TEXT("path"), Quote(Dest) } }));
+			if (!TestTrue(TEXT("get ok"), Get.bOk)) return;
+			const TSharedPtr<FJsonObject> Ev = FindEventByName(ParseJson(Get.Output), TEXT("ReceiveTick"));
+			if (!TestNotNull(TEXT("event present in get"), Ev.Get())) return;
+			TestEqual(TEXT("get enabled"), Ev->GetBoolField(TEXT("enabled")), true);
+		});
+
+		// Missing args — path or name absent.
+		It("returns missing_parameter when path/name absent", [this]()
+		{
+			FUnrealOpenMcpToolRegistry Registry;
+			FUnrealOpenMcpBlueprintTools::Register(Registry);
+
+			const FString Dest = FString::Printf(TEXT("%s/BP_EventMissing"), BlueprintScratchRoot);
+			if (!TestTrue(TEXT("create ok"), Invoke(Registry, TEXT("unreal_open_mcp_blueprint_create"),
+				MakeBody({ { TEXT("path"), Quote(Dest) } })).bOk)) return;
+
+			// No name.
+			TestEqual(TEXT("missing name"),
+				Invoke(Registry, TEXT("unreal_open_mcp_blueprint_add_event"),
+					MakeBody({ { TEXT("path"), Quote(Dest) } })).Code,
+				FString(TEXT("missing_parameter")));
+			// No path at all.
+			TestEqual(TEXT("missing path"),
+				Invoke(Registry, TEXT("unreal_open_mcp_blueprint_add_event"), TEXT("{}")).Code,
+				FString(TEXT("missing_parameter")));
+		});
+
+		// Missing Blueprint — add_event on an absent path.
+		It("returns blueprint_not_found for a missing Blueprint", [this]()
+		{
+			FUnrealOpenMcpToolRegistry Registry;
+			FUnrealOpenMcpBlueprintTools::Register(Registry);
+
+			const FUnrealOpenMcpToolDispatchResult R = Invoke(
+				Registry,
+				TEXT("unreal_open_mcp_blueprint_add_event"),
+				MakeBody({
+					{ TEXT("path"), Quote(TEXT("/Game/__DoesNotExist/BP_Nope")) },
+					{ TEXT("name"), Quote(TEXT("ReceiveBeginPlay")) },
 				}));
 			TestFalse(TEXT("ok false"), R.bOk);
 			TestEqual(TEXT("code"), R.Code, FString(TEXT("blueprint_not_found")));

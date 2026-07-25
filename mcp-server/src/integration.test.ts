@@ -224,9 +224,10 @@ test("integration: tools/list advertises unreal_open_mcp_ping", async () => {
     // blueprint_create / blueprint_get; P6.2 added the Blueprint SCS component
     // pair — blueprint_add_component / blueprint_remove_component; P6.3 added
     // the Blueprint variable family — blueprint_add_variable /
-    // blueprint_modify_variable / blueprint_set_default). Guard against
-    // accidental registry drift silently changing what the phase-gate smoke
-    // covers.
+    // blueprint_modify_variable / blueprint_set_default; P6.4 added the
+    // Blueprint function/event stub pair — blueprint_add_function /
+    // blueprint_add_event). Guard against accidental registry drift silently
+    // changing what the phase-gate smoke covers.
     assert.deepEqual(names, [
       "unreal_open_mcp_ping",
       "unreal_open_mcp_actor_find",
@@ -285,6 +286,8 @@ test("integration: tools/list advertises unreal_open_mcp_ping", async () => {
       "unreal_open_mcp_blueprint_add_variable",
       "unreal_open_mcp_blueprint_modify_variable",
       "unreal_open_mcp_blueprint_set_default",
+      "unreal_open_mcp_blueprint_add_function",
+      "unreal_open_mcp_blueprint_add_event",
     ]);
   } finally {
     await cleanup();

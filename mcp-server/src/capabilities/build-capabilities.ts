@@ -153,6 +153,12 @@ const TOOL_CATEGORY: Record<string, string> = {
   unreal_open_mcp_blueprint_add_variable: "blueprint",
   unreal_open_mcp_blueprint_modify_variable: "blueprint",
   unreal_open_mcp_blueprint_set_default: "blueprint",
+  // P6.4 — Blueprint function / event graph stubs. Both mutating (route live,
+  // default gate Enforce, paths_hint required) — add_function creates an empty
+  // user function-graph stub; add_event enables or creates an overridable
+  // parent event node. Body authoring is out of scope (stub-only).
+  unreal_open_mcp_blueprint_add_function: "blueprint",
+  unreal_open_mcp_blueprint_add_event: "blueprint",
 };
 
 function categoryFor(toolName: string): string {

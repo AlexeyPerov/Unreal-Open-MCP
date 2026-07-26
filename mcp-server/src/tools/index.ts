@@ -168,6 +168,14 @@ import { blueprintAddEvent } from "./blueprint-add-event.js";
 // structure-edit loop — a member variable / function stub / event added via
 // the P6.2–P6.4 tools only lands on the generated class once compile runs.
 import { blueprintCompile } from "./blueprint-compile.js";
+// P6.6 — Blueprint spawn (blueprint_spawn). Mutating (default gate Enforce;
+// paths_hint required). Instances a compiled Actor Blueprint's GeneratedClass
+// into the current editor level via UWorld::SpawnActor (headless-safe — NOT
+// the viewport-aware editor subsystem that crashes under -nullrhi). Closes the
+// Phase 6 create -> edit -> compile -> spawn loop. Requires a non-null
+// GeneratedClass (not_compiled -> compile first) and an AActor-derived class
+// (not_actor_blueprint). Optional `location` ({x,y,z}) + `name` (actor label).
+import { blueprintSpawn } from "./blueprint-spawn.js";
 
 // Tool registry. P1.7 registers the first real tool — `unreal_open_mcp_ping` —
 // which the MCP server routes to the bridge's `GET /ping`. Each subsequent tool
@@ -306,4 +314,5 @@ export const ALL_TOOLS: Tool[] = [
   blueprintAddFunction,
   blueprintAddEvent,
   blueprintCompile,
+  blueprintSpawn,
 ];

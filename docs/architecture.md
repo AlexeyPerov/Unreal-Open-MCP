@@ -136,7 +136,7 @@ Failure classification is the load-bearing contract — an agent (or a human rea
 Two layers guard the MCP ↔ bridge route. Use both when changing transport, discovery, or tool routing:
 
 1. **In-process integration tests** — `mcp-server/src/integration.test.ts` (`npm test`). Wires a real MCP SDK `Client` to `createServer()` over an in-memory transport, with the live router pointed at a `LiveClient` aimed at a loopback HTTP stub.
-2. **Scripted stdio smoke** — `mcp-server/scripts/*-parity-smoke.mjs` (`npm run smoke:p1` / `smoke:p2` / `smoke:p4`). Spawns the built `dist/index.js` and drives `initialize → tools/list → tools/call …` over stdio. This catches packaging, transport, and instance-discovery wiring drift the in-process suite cannot see. Pass `--port <n> --project <path>` to run the healthy case against a live Unreal Editor (bridge-down and tool-error cases require the stub harness and are skipped in `--port` mode).
+2. **Scripted stdio smoke** — `mcp-server/scripts/*-parity-smoke.mjs` (`npm run smoke:p1` / `smoke:p2` / `smoke:p4` / `smoke:p6`). Spawns the built `dist/index.js` and drives `initialize → tools/list → tools/call …` over stdio. This catches packaging, transport, and instance-discovery wiring drift the in-process suite cannot see. Pass `--port <n> --project <path>` to run the healthy case against a live Unreal Editor (bridge-down, tool-error, and compile-failed cases require the stub harness and are skipped in `--port` mode).
 
 ### Ping route
 
@@ -197,6 +197,23 @@ Pinned outcomes: healthy (the INNER `{total, offset, count, assets}` pagination 
 | `bridge_offline` on a healthy stub | discovery / port / lock-path regression |
 | Envelope unwrap error | `live-client` result parsing |
 | Live-editor find empty under `/Game` | bridge AssetRegistry handler / content not scanned |
+
+### Blueprint compile-loop route (`blueprint_spawn` + `blueprint_compile`)
+
+```
+stdio MCP client  →  unreal_open_mcp_blueprint_spawn  →  POST /tools/unreal_open_mcp_blueprint_spawn
+                  →  {ok, result, error} envelope  →  unwrapped result body
+```
+
+`blueprint_spawn` is the smoke default because it closes the create → edit → compile → spawn loop (the phase-gate for the Blueprint family). It is a mutator, so the tools/call args carry a `paths_hint`. Four cases are pinned (the four the `smoke:p6` acceptance criteria call out as load-bearing): healthy spawn (the INNER `{actor, name, class, path, location}` identity survives the round-trip verbatim), bridge-down (`bridge_offline` with the instance-lock hint), tool-error (`not_compiled` — an uncompiled Blueprint, the structured code an agent branches on to run `blueprint_compile`), and **compile-failed = data** — `blueprint_compile` returns `succeeded:false` on an `ok:true` envelope, so MCP `isError` stays `false` and the diagnostics ride through as data (the contract that lets an agent treat "compile failed" as data, not an opaque error). Stdio smoke: `mcp-server/scripts/p6-parity-smoke.mjs`. Transport failure codes match the typed-tool table; tool-specific codes for `blueprint_spawn` include `not_compiled` / `not_actor_blueprint` / `no_editor_world` / `spawn_failed` / `blueprint_not_found` / `missing_parameter` / `invalid_parameter`.
+
+| Failure signature | Likely owner |
+|---|---|
+| `tools/list` missing `blueprint_spawn` | MCP `tools/index.ts` registration |
+| `isError:true` on a `succeeded:false` compile | envelope contract regression (a failed compile is data, not a transport error) — `live-client` / bridge compile handler |
+| `not_compiled` ignored by an agent | tool-description regression (`blueprint-spawn.ts` must point at `blueprint_compile`) |
+| `spawn_failed` under `-nullrhi` | bridge spawn handler used the viewport-aware editor subsystem instead of `UWorld::SpawnActor` (headless-safe path) |
+| Live-editor spawn null after compile | bridge spawn handler resolved a stale `GeneratedClass`; re-run `blueprint_compile` |
 
 ## Versioning
 

@@ -98,9 +98,19 @@
 //     an agent reads the diagnostics, fixes via the structure-edit tools, and
 //     recompiles. (Tool-level errors like a missing path or a missing asset are
 //     still `ok:false`.)
+//   - `unreal_open_mcp_blueprint_spawn` — spawn an instance of a compiled
+//     Actor Blueprint's `GeneratedClass` into the current editor level via
+//     `UWorld::SpawnActor` (headless-safe — the `-nullrhi` / Automation path
+//     that the viewport-aware `UEditorActorSubsystem::SpawnActorFromClass`
+//     would crash on). Requires a compiled Actor Blueprint: a missing
+//     `GeneratedClass` returns `not_compiled` (the message tells the agent to
+//     run `blueprint_compile` first); a non-Actor parent returns
+//     `not_actor_blueprint`. Optional `location` ({x,y,z}, default origin) and
+//     `name` (actor label via `SetActorLabelUnique`). Rotation is fixed at
+//     identity in the MVP. The level package is marked dirty.
 //
 // create / add_component / remove_component / add_variable / modify_variable /
-// set_default / add_function / add_event / compile are MUTATING and register
+// set_default / add_function / add_event / compile / spawn are MUTATING and register
 // with `FUnrealOpenMcpToolMetadata::Mutating()` so the dispatcher wraps them in
 // `GatePolicy.Execute` (the mandatory `paths_hint` is enforced by the
 // dispatcher BEFORE the handler runs). get is read-only (gate Off).
@@ -149,6 +159,7 @@ struct FEdGraphPinType;
  *   - `unreal_open_mcp_blueprint_add_function`     (mutating; gate Enforce; paths_hint required)
  *   - `unreal_open_mcp_blueprint_add_event`        (mutating; gate Enforce; paths_hint required)
  *   - `unreal_open_mcp_blueprint_compile`          (mutating; gate Enforce; paths_hint required)
+ *   - `unreal_open_mcp_blueprint_spawn`            (mutating; gate Enforce; paths_hint required)
  */
 namespace FUnrealOpenMcpBlueprintTools
 {

@@ -226,9 +226,9 @@ test("integration: tools/list advertises unreal_open_mcp_ping", async () => {
     // the Blueprint variable family — blueprint_add_variable /
     // blueprint_modify_variable / blueprint_set_default; P6.4 added the
     // Blueprint function/event stub pair — blueprint_add_function /
-    // blueprint_add_event; P6.5 added blueprint_compile). Guard against
-    // accidental registry drift silently changing what the phase-gate smoke
-    // covers.
+    // blueprint_add_event; P6.5 added blueprint_compile; P6.6 added
+    // blueprint_spawn). Guard against accidental registry drift silently
+    // changing what the phase-gate smoke covers.
     assert.deepEqual(names, [
       "unreal_open_mcp_ping",
       "unreal_open_mcp_actor_find",
@@ -290,6 +290,7 @@ test("integration: tools/list advertises unreal_open_mcp_ping", async () => {
       "unreal_open_mcp_blueprint_add_function",
       "unreal_open_mcp_blueprint_add_event",
       "unreal_open_mcp_blueprint_compile",
+      "unreal_open_mcp_blueprint_spawn",
     ]);
   } finally {
     await cleanup();
@@ -746,6 +747,331 @@ test("P4.5 integration: tools/call asset_find surfaces the tool error envelope o
       assert.equal(
         body.error.message,
         "class_path 'Material' is not a '/Script/Module.Class' path.",
+      );
+    } finally {
+      await cleanup();
+    }
+  } finally {
+    await bridge.close();
+  }
+});
+
+// ===========================================================================
+// P6.6 — Phase 6 parity smoke (blueprint compile-loop: spawn + compile)
+// ===========================================================================
+//
+// Phase 6 shipped the Blueprint family; P6.6 is the mandatory phase-gate
+// before Phase 7 and closes the create -> edit -> compile -> spawn loop. The
+// P6.6 cases pin the two compile-loop tools (blueprint_compile +
+// blueprint_spawn) through the full MCP ↔ bridge path and add the CRITICAL
+// compile-failure data-path assertion the P6.5 contract rides on: a
+// succeeded:false compile is a NORMAL result (ok:true envelope, MCP
+// isError:false), NOT a transport error.
+//
+// These cases mirror the P2.8 / P4.5 structure exactly, swapping in the
+// Blueprint-family tools. spawn is the loop-closer (mutating, gate Enforce);
+// compile is the AI feedback loop (mutating, gate Enforce, succeeded:false is
+// data). The compile-failure case is P6.5's load-bearing contract asserted at
+// the MCP layer for the first time.
+
+/**
+ * Canonical blueprint_spawn result body the bridge emits — minimal actor
+ * identity for the agent to chain from. The stub returns this inside
+ * {ok:true,result:<body>}; the MCP `bodyOf` helper sees the INNER object
+ * after LiveClient.postTool unwraps the envelope.
+ */
+const BLUEPRINT_SPAWN_OK = {
+  actor: "BP_Smoke",
+  name: "BP_Smoke_C_0",
+  class: "/Game/McpTemp/BP_Smoke.BP_Smoke_C",
+  path: "/Game/Maps/UEDPIE_0_TestMap.TestMap:PersistentLevel.BP_Smoke_C_0",
+  location: { x: 0, y: 0, z: 100 },
+};
+
+/**
+ * Canonical blueprint_compile CLEAN result body — succeeded:true + numErrors:0
+ * + empty messages[] on an ok:true envelope.
+ */
+const BLUEPRINT_COMPILE_CLEAN = {
+  succeeded: true,
+  numErrors: 0,
+  numWarnings: 0,
+  messages: [],
+};
+
+/**
+ * Canonical blueprint_compile FAILED result body — succeeded:false + a
+ * populated messages[] on an ok:true envelope. This is the P6.5 contract: a
+ * failed compile is a NORMAL result, NOT a transport failure, so MCP
+ * isError MUST stay false and the diagnostics ride through as data.
+ */
+const BLUEPRINT_COMPILE_FAILED = {
+  succeeded: false,
+  numErrors: 1,
+  numWarnings: 0,
+  messages: [
+    {
+      severity: "error",
+      message: "Foo node: pin 'A' is not connected.",
+      node: "Foo",
+      graph: "EventGraph",
+    },
+  ],
+};
+
+/**
+ * Bridge handler that serves GET /ping (healthy) AND POST
+ * /tools/unreal_open_mcp_blueprint_spawn with the canonical ok:true envelope.
+ * Used by the P6.6 spawn round-trip.
+ */
+async function blueprintSpawnHandler(
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<void> {
+  if (req.method === "GET" && req.url === "/ping") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(HEALTHY_PING));
+    return;
+  }
+  if (
+    req.method === "POST" &&
+    req.url === "/tools/unreal_open_mcp_blueprint_spawn"
+  ) {
+    await readBody(req);
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: true, result: BLUEPRINT_SPAWN_OK }));
+    return;
+  }
+  res.writeHead(404, { "Content-Type": "application/json" });
+  res.end(
+    JSON.stringify({
+      error: { code: "not_found", message: `${req.method} ${req.url}` },
+    }),
+  );
+}
+
+// --- P6.6 healthy: blueprint_spawn round-trip unwraps the result body -------
+
+test("P6.6 integration: tools/call blueprint_spawn returns the unwrapped result body on 200", async () => {
+  const bridge = await startHandlerStub(blueprintSpawnHandler);
+  try {
+    const { client, cleanup } = await setupClient(bridge.port);
+    try {
+      const result = await client.callTool({
+        name: "unreal_open_mcp_blueprint_spawn",
+        arguments: {
+          path: "/Game/McpTemp/BP_Smoke",
+          location: { x: 0, y: 0, z: 100 },
+          paths_hint: ["/Game/McpTemp/BP_Smoke"],
+        },
+      });
+      // Success envelope → isError:false and the INNER result object (not the
+      // {ok,result} wrapper) survives the MCP round-trip verbatim — the parity
+      // pin on the spawn identity field set ({ actor, name, class, path,
+      // location }).
+      assert.equal(result.isError, false);
+      assert.deepEqual(bodyOf(result), BLUEPRINT_SPAWN_OK);
+    } finally {
+      await cleanup();
+    }
+  } finally {
+    await bridge.close();
+  }
+});
+
+// --- P6.6 compile-failure data path: succeeded:false stays isError:false ----
+//
+// The P6.5 contract: a FAILED compile is a NORMAL, expected result, NOT a
+// transport failure. The bridge keeps the envelope ok:true and carries
+// succeeded:false + the populated messages[] so an agent reads the
+// diagnostics and recompiles. At the MCP layer that means isError MUST stay
+// false — the diagnostics are data, not an error. This case pins that
+// invariant at the MCP boundary for the first time (P6.5 pinned it at the
+// bridge handler level only).
+
+test("P6.6 integration: tools/call blueprint_compile with succeeded:false stays isError:false (compile failure is data, not a transport error)", async () => {
+  const bridge = await startHandlerStub(async (req, res) => {
+    if (req.method === "GET" && req.url === "/ping") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(HEALTHY_PING));
+      return;
+    }
+    if (
+      req.method === "POST" &&
+      req.url === "/tools/unreal_open_mcp_blueprint_compile"
+    ) {
+      await readBody(req);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: true, result: BLUEPRINT_COMPILE_FAILED }));
+      return;
+    }
+    res.writeHead(404, { "Content-Type": "application/json" });
+    res.end(
+      JSON.stringify({
+        error: { code: "not_found", message: `${req.method} ${req.url}` },
+      }),
+    );
+  });
+  try {
+    const { client, cleanup } = await setupClient(bridge.port);
+    try {
+      const result = await client.callTool({
+        name: "unreal_open_mcp_blueprint_compile",
+        arguments: {
+          path: "/Game/McpTemp/BP_Broken",
+          paths_hint: ["/Game/McpTemp/BP_Broken"],
+        },
+      });
+      // CRITICAL P6.5 invariant at the MCP boundary: a failed compile is
+      // data, not an error. isError stays false and the diagnostics ride
+      // through on the ok:true result object.
+      assert.equal(
+        result.isError,
+        false,
+        "succeeded:false compile must surface as isError:false (data, not transport error)",
+      );
+      const body = bodyOf(result) as typeof BLUEPRINT_COMPILE_FAILED;
+      assert.equal(body.succeeded, false);
+      assert.equal(body.numErrors, 1);
+      assert.ok(Array.isArray(body.messages) && body.messages.length === 1);
+      assert.equal(body.messages[0].severity, "error");
+    } finally {
+      await cleanup();
+    }
+  } finally {
+    await bridge.close();
+  }
+});
+
+// --- P6.6 clean compile round-trip -------------------------------------------
+
+test("P6.6 integration: tools/call blueprint_compile returns the clean result body on 200", async () => {
+  const bridge = await startHandlerStub(async (req, res) => {
+    if (req.method === "GET" && req.url === "/ping") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(HEALTHY_PING));
+      return;
+    }
+    if (
+      req.method === "POST" &&
+      req.url === "/tools/unreal_open_mcp_blueprint_compile"
+    ) {
+      await readBody(req);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: true, result: BLUEPRINT_COMPILE_CLEAN }));
+      return;
+    }
+    res.writeHead(404, { "Content-Type": "application/json" });
+    res.end(
+      JSON.stringify({
+        error: { code: "not_found", message: `${req.method} ${req.url}` },
+      }),
+    );
+  });
+  try {
+    const { client, cleanup } = await setupClient(bridge.port);
+    try {
+      const result = await client.callTool({
+        name: "unreal_open_mcp_blueprint_compile",
+        arguments: {
+          path: "/Game/McpTemp/BP_Clean",
+          paths_hint: ["/Game/McpTemp/BP_Clean"],
+        },
+      });
+      assert.equal(result.isError, false);
+      assert.deepEqual(bodyOf(result), BLUEPRINT_COMPILE_CLEAN);
+    } finally {
+      await cleanup();
+    }
+  } finally {
+    await bridge.close();
+  }
+});
+
+// --- P6.6 bridge-down: blueprint_spawn inherits bridge_offline --------------
+
+test("P6.6 integration: bridge-down tools/call blueprint_spawn surfaces bridge_offline with the lock hint", async () => {
+  // Port 1 — nothing listening. The blueprint path inherits P1's
+  // bridge_offline classification with the instance-lock hint, exactly like
+  // the actor_find / asset_find paths.
+  const { client, cleanup } = await setupClient(1);
+  setLiveRouter(new LiveClient(1, undefined, "/tmp/MyGame"));
+  try {
+    const result = await client.callTool({
+      name: "unreal_open_mcp_blueprint_spawn",
+      arguments: {
+        path: "/Game/McpTemp/BP_Smoke",
+        paths_hint: ["/Game/McpTemp/BP_Smoke"],
+      },
+    });
+    assert.equal(result.isError, true);
+    const body = bodyOf(result) as { error: { code: string; message: string } };
+    assert.equal(body.error.code, "bridge_offline");
+    assert.match(
+      body.error.message,
+      /\.unreal-open-mcp\/instances\//,
+      "offline hint must name the instance lock dir",
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+// --- P6.6 tool error: {ok,false,error} surfaces as a structured MCP error ----
+
+test("P6.6 integration: tools/call blueprint_spawn surfaces the tool error envelope on ok:false (not_compiled)", async () => {
+  // The bridge ran the handler and it returned a structured failure — here an
+  // uncompiled Blueprint (no GeneratedClass). The {ok:false,error:{code,
+  // message}} envelope must surface as an MCP error (isError:true) carrying
+  // the tool-specific not_compiled code so an agent can branch on the cause
+  // and run blueprint_compile instead of retrying blindly.
+  const bridge = await startHandlerStub(async (req, res) => {
+    if (
+      req.method === "POST" &&
+      req.url === "/tools/unreal_open_mcp_blueprint_spawn"
+    ) {
+      await readBody(req);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          ok: false,
+          error: {
+            code: "not_compiled",
+            message:
+              "Blueprint 'BP_New' has no GeneratedClass — run blueprint_compile first.",
+          },
+        }),
+      );
+      return;
+    }
+    res.writeHead(404, { "Content-Type": "application/json" });
+    res.end(
+      JSON.stringify({
+        error: { code: "not_found", message: `${req.method} ${req.url}` },
+      }),
+    );
+  });
+  try {
+    const { client, cleanup } = await setupClient(bridge.port);
+    try {
+      const result = await client.callTool({
+        name: "unreal_open_mcp_blueprint_spawn",
+        arguments: {
+          path: "/Game/McpTemp/BP_New",
+          paths_hint: ["/Game/McpTemp/BP_New"],
+        },
+      });
+      assert.equal(result.isError, true);
+      const body = bodyOf(result) as {
+        error: { code: string; message: string };
+      };
+      // The tool-specific error code rides through — an agent can branch on
+      // not_compiled (run blueprint_compile) rather than seeing an opaque
+      // transport error.
+      assert.equal(body.error.code, "not_compiled");
+      assert.equal(
+        body.error.message,
+        "Blueprint 'BP_New' has no GeneratedClass — run blueprint_compile first.",
       );
     } finally {
       await cleanup();

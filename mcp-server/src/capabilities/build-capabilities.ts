@@ -164,6 +164,11 @@ const TOOL_CATEGORY: Record<string, string> = {
   // error/warning list. A failed compile is a normal result (ok:true +
   // succeeded:false), not a transport failure.
   unreal_open_mcp_blueprint_compile: "blueprint",
+  // P6.6 — Blueprint spawn. Mutating (route live, default gate Enforce,
+  // paths_hint required) — instances a compiled Actor Blueprint's
+  // GeneratedClass into the current editor level via UWorld::SpawnActor
+  // (headless-safe). Closes the create -> edit -> compile -> spawn loop.
+  unreal_open_mcp_blueprint_spawn: "blueprint",
 };
 
 function categoryFor(toolName: string): string {

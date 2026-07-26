@@ -1,8 +1,8 @@
 // unreal_open_mcp_blueprint_create / blueprint_get / blueprint_add_component /
 // blueprint_remove_component / blueprint_add_variable /
 // blueprint_modify_variable / blueprint_set_default / blueprint_add_function /
-// blueprint_add_event / blueprint_compile Automation specs
-// (P6.1 + P6.2 + P6.3 + P6.4 + P6.5).
+// blueprint_add_event / blueprint_compile / blueprint_spawn Automation specs
+// (P6.1 + P6.2 + P6.3 + P6.4 + P6.5 + P6.6).
 //
 // Pins the Blueprint tool family end-to-end at the handler level. The cases
 // mirror the P6.1 + P6.2 + P6.3 + P6.4 + P6.5 plan acceptance criteria + test lists:
@@ -70,7 +70,7 @@
 //     missing_parameter for absent path; the ok-vs-succeeded contract is pinned
 //     — a normal compile is always ok:true regardless of the succeeded flag.
 //   - mutation classification: create/add/remove/add_variable/modify_variable/
-//     set_default/add_function/add_event/compile mutating, get read-only.
+//     set_default/add_function/add_event/compile/spawn mutating, get read-only.
 //
 // The suite owns its scratch tree under /Game/__McpP61Blueprint — teardown
 // removes the whole subtree so the automation project does not accumulate test
@@ -97,6 +97,9 @@
 #include "Kismet2/BlueprintEditorUtils.h"   // FindEventGraph — add_event asserts an enabled node
 #include "EdGraph/EdGraph.h"                // UEdGraph — FindEventGraph return type
 #include "K2Node_Event.h"                   // UK2Node_Event — enabled-node assertion in add_event
+// P6.6 spawn round-trip — iterate the editor world for spawned-actor assertions.
+#include "GameFramework/Actor.h"            // AActor — spawn label + class assertions
+#include "EngineUtils.h"                    // TActorIterator — find the actor spawn created
 
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
@@ -284,6 +287,29 @@ namespace
 			{
 				return Ev;
 			}
+		}
+		return nullptr;
+	}
+
+	/** Find a spawned actor in the current editor world by its exact generated
+	 *  class. P6.6 spawn round-trip uses it to assert blueprint_spawn actually
+	 *  placed an actor (and to clean the actor up so the next case starts
+	 *  clean — the editor world is NOT torn down between cases). Returns null
+	 *  when no world or no matching actor. */
+	AActor* FindSpawnedActorByClass(UClass* Class)
+	{
+		if (Class == nullptr)
+		{
+			return nullptr;
+		}
+		UWorld* World = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
+		if (World == nullptr)
+		{
+			return nullptr;
+		}
+		for (TActorIterator<AActor> It(World, Class); It; ++It)
+		{
+			return *It; // first match is fine — each spawn case mints a unique BP
 		}
 		return nullptr;
 	}
@@ -2124,6 +2150,162 @@ void FUnrealOpenMcpBlueprintToolsSpec::Define()
 
 			TestEqual(TEXT("invalid body"),
 				Invoke(Registry, TEXT("unreal_open_mcp_blueprint_compile"), TEXT("not json")).Code,
+				FString(TEXT("invalid_parameter")));
+		});
+	});
+
+	Describe("unreal_open_mcp_blueprint_spawn", [this]()
+	{
+		// The full Phase 6 create -> edit -> compile -> spawn round-trip. This
+		// is the loop P6.6 closes + the Phase 6 exit gate: create a Blueprint,
+		// add a member variable, add an SCS component, add the ReceiveBeginPlay
+		// event, compile it green, spawn an instance, and confirm the spawned
+		// actor carries the Blueprint's generated class. Mirrors Unreal-MCP's
+		// "create -> edit -> compile -> spawn round-trip" spec.
+		//
+		// Headless-safe: spawn goes through UWorld::SpawnActor (not the
+		// viewport-aware editor subsystem), so this runs under `-nullrhi` /
+		// Automation. The location arg is asserted verbatim on the spawned
+		// actor's transform.
+		It("round-trips create -> add_variable -> add_component -> add_event -> compile -> spawn", [this]()
+		{
+			FUnrealOpenMcpToolRegistry Registry;
+			FUnrealOpenMcpBlueprintTools::Register(Registry);
+
+			const FString Dest = FString::Printf(TEXT("%s/BP_Spawn"), BlueprintScratchRoot);
+			if (!TestTrue(TEXT("create ok"), Invoke(Registry, TEXT("unreal_open_mcp_blueprint_create"),
+				MakeBody({ { TEXT("path"), Quote(Dest) } })).bOk)) return;
+			if (!TestTrue(TEXT("add_variable ok"), Invoke(Registry, TEXT("unreal_open_mcp_blueprint_add_variable"),
+				MakeBody({
+					{ TEXT("path"), Quote(Dest) },
+					{ TEXT("name"), Quote(TEXT("Speed")) },
+					{ TEXT("type"), Quote(TEXT("int")) },
+				})).bOk)) return;
+			if (!TestTrue(TEXT("add_component ok"), Invoke(Registry, TEXT("unreal_open_mcp_blueprint_add_component"),
+				MakeBody({
+					{ TEXT("path"), Quote(Dest) },
+					{ TEXT("name"), Quote(TEXT("Mesh")) },
+					{ TEXT("class"), Quote(TEXT("/Script/Engine.StaticMeshComponent")) },
+				})).bOk)) return;
+			if (!TestTrue(TEXT("add_event ok"), Invoke(Registry, TEXT("unreal_open_mcp_blueprint_add_event"),
+				MakeBody({
+					{ TEXT("path"), Quote(Dest) },
+					{ TEXT("name"), Quote(TEXT("ReceiveBeginPlay")) },
+				})).bOk)) return;
+			// Compile must land the structure on the generated class so spawn
+			// has a non-null GeneratedClass to instance.
+			const FUnrealOpenMcpToolDispatchResult Compile = Invoke(
+				Registry, TEXT("unreal_open_mcp_blueprint_compile"),
+				MakeBody({ { TEXT("path"), Quote(Dest) } }));
+			if (!TestTrue(TEXT("compile ok"), Compile.bOk)) return;
+			if (!TestTrue(TEXT("compile succeeded"), ParseJson(Compile.Output)->GetBoolField(TEXT("succeeded")))) return;
+
+			// Spawn into the current editor level at a non-origin location so
+			// the transform assertion is unambiguous.
+			const FUnrealOpenMcpToolDispatchResult Spawn = Invoke(
+				Registry, TEXT("unreal_open_mcp_blueprint_spawn"),
+				MakeBody({
+					{ TEXT("path"), Quote(Dest) },
+					{ TEXT("name"), Quote(TEXT("BP_Spawn_Actor")) },
+					{ TEXT("location"), TEXT("{\"x\":10,\"y\":20,\"z\":30}") },
+				}));
+			if (!TestTrue(TEXT("spawn ok"), Spawn.bOk)) return;
+
+			const TSharedPtr<FJsonObject> Json = ParseJson(Spawn.Output);
+			if (!TestNotNull(TEXT("spawn result json"), Json.Get())) return;
+			// The spawn result carries the actor identity the agent chains from.
+			TestTrue(TEXT("has actor"), Json->HasField(TEXT("actor")));
+			TestTrue(TEXT("has class"), Json->HasField(TEXT("class")));
+			TestTrue(TEXT("has path"), Json->HasField(TEXT("path")));
+			TestEqual(TEXT("label"), Json->GetStringField(TEXT("actor")), FString(TEXT("BP_Spawn_Actor")));
+
+			// The location asserted on the spawned actor's transform must match
+			// the request (the spawn handler reads the same {x,y,z} object).
+			const TSharedPtr<FJsonObject>* LocPtr = nullptr;
+			Json->TryGetObjectField(TEXT("location"), LocPtr);
+			if (!TestNotNull(TEXT("location obj"), LocPtr ? LocPtr->Get() : nullptr)) return;
+			const TSharedPtr<FJsonObject> Loc = *LocPtr;
+			TestEqual(TEXT("loc.x"), Loc->GetNumberField(TEXT("x")), 10.0);
+			TestEqual(TEXT("loc.y"), Loc->GetNumberField(TEXT("y")), 20.0);
+			TestEqual(TEXT("loc.z"), Loc->GetNumberField(TEXT("z")), 30.0);
+
+			// The actor must actually be in the editor world, spawned from the
+			// Blueprint's generated class. Resolve the generated class through
+			// the same helper the spawn handler uses and iterate the world.
+			UBlueprint* Blueprint = FUnrealOpenMcpBlueprintHelpers::ResolveBlueprint(Dest);
+			if (!TestNotNull(TEXT("resolve blueprint"), Blueprint)) return;
+			if (!TestNotNull(TEXT("generated class"), Blueprint->GeneratedClass)) return;
+			AActor* Spawned = FindSpawnedActorByClass(Blueprint->GeneratedClass);
+			if (!TestNotNull(TEXT("spawned actor in world"), Spawned)) return;
+			TestEqual(TEXT("spawned location.x"), Spawned->GetActorLocation().X, 10.0);
+			TestEqual(TEXT("spawned location.z"), Spawned->GetActorLocation().Z, 30.0);
+
+			// Clean up the spawned actor so the next case's world-iteration is
+			// not polluted (the editor world is shared across cases).
+			GEditor->GetEditorWorldContext().World()->DestroyActor(Spawned, true);
+		});
+
+		// Spawn on a never-compiled Blueprint: GeneratedClass is null, so the
+		// handler must refuse with not_compiled pointing the agent at
+		// blueprint_compile — NOT a native null-deref crash. A freshly-created
+		// Blueprint may have a null GeneratedClass until the first compile.
+		It("refuses an uncompiled Blueprint with not_compiled (run compile first)", [this]()
+		{
+			FUnrealOpenMcpToolRegistry Registry;
+			FUnrealOpenMcpBlueprintTools::Register(Registry);
+
+			const FString Dest = FString::Printf(TEXT("%s/BP_SpawnUncompiled"), BlueprintScratchRoot);
+			if (!TestTrue(TEXT("create ok"), Invoke(Registry, TEXT("unreal_open_mcp_blueprint_create"),
+				MakeBody({ { TEXT("path"), Quote(Dest) } })).bOk)) return;
+
+			// Force the GeneratedClass null so the case does not depend on the
+			// CreateBlueprint auto-compile behavior (some engine versions
+			// mint a stub class on create). Clearing the field lets the
+			// handler's not_compiled branch fire deterministically.
+			UBlueprint* Blueprint = FUnrealOpenMcpBlueprintHelpers::ResolveBlueprint(Dest);
+			if (!TestNotNull(TEXT("resolve blueprint"), Blueprint)) return;
+			Blueprint->GeneratedClass = nullptr;
+
+			const FUnrealOpenMcpToolDispatchResult R = Invoke(
+				Registry, TEXT("unreal_open_mcp_blueprint_spawn"),
+				MakeBody({ { TEXT("path"), Quote(Dest) } }));
+			TestFalse(TEXT("ok false"), R.bOk);
+			TestEqual(TEXT("code"), R.Code, FString(TEXT("not_compiled")));
+		});
+
+		// Missing Blueprint — spawn on an absent path is a tool-level error
+		// (ok:false / blueprint_not_found), not a crash.
+		It("returns blueprint_not_found for a missing Blueprint (ok:false)", [this]()
+		{
+			FUnrealOpenMcpToolRegistry Registry;
+			FUnrealOpenMcpBlueprintTools::Register(Registry);
+
+			const FUnrealOpenMcpToolDispatchResult R = Invoke(
+				Registry, TEXT("unreal_open_mcp_blueprint_spawn"),
+				MakeBody({ { TEXT("path"), Quote(TEXT("/Game/__DoesNotExist/BP_Nope")) } }));
+			TestFalse(TEXT("ok false"), R.bOk);
+			TestEqual(TEXT("code"), R.Code, FString(TEXT("blueprint_not_found")));
+		});
+
+		// Missing path parameter.
+		It("returns missing_parameter for an absent path", [this]()
+		{
+			FUnrealOpenMcpToolRegistry Registry;
+			FUnrealOpenMcpBlueprintTools::Register(Registry);
+
+			TestEqual(TEXT("missing path"),
+				Invoke(Registry, TEXT("unreal_open_mcp_blueprint_spawn"), TEXT("{}")).Code,
+				FString(TEXT("missing_parameter")));
+		});
+
+		// Malformed body.
+		It("returns invalid_parameter for a malformed body", [this]()
+		{
+			FUnrealOpenMcpToolRegistry Registry;
+			FUnrealOpenMcpBlueprintTools::Register(Registry);
+
+			TestEqual(TEXT("invalid body"),
+				Invoke(Registry, TEXT("unreal_open_mcp_blueprint_spawn"), TEXT("not json")).Code,
 				FString(TEXT("invalid_parameter")));
 		});
 	});

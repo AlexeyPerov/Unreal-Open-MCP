@@ -1,11 +1,11 @@
 // Blueprint-tool family — see header for the create/get/component/variable/
-// function/event/compile contracts. This file owns the handlers
+// function/event/compile/spawn contracts. This file owns the handlers
 // (blueprint_create, blueprint_get, blueprint_add/remove_component,
 // blueprint_add/modify_variable, blueprint_set_default,
-// blueprint_add_function, blueprint_add_event, blueprint_compile) plus the
-// shared helpers the later P6 sub-plans reuse (ResolveBlueprint, path
-// normalization, name well-formedness, BlueprintRef JSON, pin-type reverse
-// mapping).
+// blueprint_add_function, blueprint_add_event, blueprint_compile,
+// blueprint_spawn) plus the shared helpers the later P6 sub-plans reuse
+// (ResolveBlueprint, path normalization, name well-formedness, BlueprintRef
+// JSON, pin-type reverse mapping).
 //
 // Arg parsing + output mirror the material / asset families: each handler
 // parses the raw POST body into an FJsonObject and emits a pre-serialized JSON
@@ -39,6 +39,13 @@
 #include "Engine/SCS_Node.h"
 #include "Components/ActorComponent.h"
 #include "Components/SceneComponent.h"
+// blueprint_spawn — spawn the GeneratedClass into the editor level. Headless-
+// safe (UWorld::SpawnActor, not the viewport-aware editor subsystem). Needs
+// AActor + SetActorLabelUnique + FScopedTransaction + UWorld.
+#include "GameFramework/Actor.h"
+#include "Engine/World.h"
+#include "ActorEditorUtils.h"
+#include "ScopedTransaction.h"
 
 #include "Kismet2/KismetEditorUtilities.h"
 #include "Kismet2/BlueprintEditorUtils.h"
@@ -205,6 +212,41 @@ namespace
 		OutError = FString::Printf(TEXT("invalid name '%s': %s"), *Name,
 			*INameValidatorInterface::GetErrorString(Name, Result));
 		return false;
+	}
+
+	/**
+	 * Read a `{x,y,z}` object field as an FVector. blueprint_spawn uses the same
+	 * loose-typed convention as actor_create's ReadVectorField: a missing field
+	 * returns the default, a missing axis falls back to the default's component,
+	 * so a caller that sends only `{x,y}` still gets a sane vector.
+	 */
+	FVector ReadVectorField(const TSharedPtr<FJsonObject>& Args, const FString& FieldName, const FVector& Default)
+	{
+		if (!Args.IsValid() || !Args->HasTypedField<EJson::Object>(FieldName))
+		{
+			return Default;
+		}
+		const TSharedPtr<FJsonObject>* ObjPtr = nullptr;
+		Args->TryGetObjectField(FieldName, ObjPtr);
+		if (ObjPtr == nullptr || !ObjPtr->IsValid())
+		{
+			return Default;
+		}
+		const TSharedPtr<FJsonObject>& Obj = *ObjPtr;
+		FVector Out = Default;
+		if (Obj->HasTypedField<EJson::Number>(TEXT("x")))
+		{
+			Out.X = Obj->GetNumberField(TEXT("x"));
+		}
+		if (Obj->HasTypedField<EJson::Number>(TEXT("y")))
+		{
+			Out.Y = Obj->GetNumberField(TEXT("y"));
+		}
+		if (Obj->HasTypedField<EJson::Number>(TEXT("z")))
+		{
+			Out.Z = Obj->GetNumberField(TEXT("z"));
+		}
+		return Out;
 	}
 
 	/** Serialize a UBlueprint into the compact { name, path, parentClass } ref
@@ -1931,7 +1973,192 @@ void FUnrealOpenMcpBlueprintTools::Register(FUnrealOpenMcpToolRegistry& Registry
 				WriteJson(MakeShared<FJsonValueObject>(Out)));
 		}, FUnrealOpenMcpToolMetadata::Mutating());
 
+	// =========================================================================
+	// unreal_open_mcp_blueprint_spawn — instance a compiled Actor Blueprint's
+	// GeneratedClass into the current editor level.
+	// =========================================================================
+	//
+	// `path` is the Blueprint asset object path (package-path form also accepted
+	// via ResolveBlueprint's FindObject-first chain). The handler resolves the
+	// Blueprint, requires a non-null `GeneratedClass` (the result of a compile —
+	// an uncompiled-or-stale Blueprint has no spawnable class and is rejected
+	// with `not_compiled` pointing the agent at blueprint_compile), and requires
+	// that class to derive from AActor (a non-Actor Blueprint like a Blueprint
+	// Function Library is rejected with `not_actor_blueprint`).
+	//
+	// HEADLESS-SAFE spawn path: `UWorld::SpawnActor` is used, NOT the viewport-
+	// aware `UEditorActorSubsystem::SpawnActorFromClass`. The editor subsystem
+	// touches the active 3D viewport and crashes under `-nullrhi` / Automation
+	// (no viewport, no RHI), so the plain world spawn is the only path the
+	// editor spec harness can exercise and the only one safe under a headless
+	// editor. The world comes from `GEditor->GetEditorWorldContext().World()`
+	// (resolved via the shared FUnrealOpenMcpObjectRef::GetEditorWorld helper
+	// the actor family uses); no editor world → `no_editor_world`.
+	//
+	// Optional args:
+	//   - `location` — `{x,y,z}` world location, default `{0,0,0}` (origin).
+	//   - `name`     — actor label (SetActorLabelUnique so a colliding label is
+	//                  de-duplicated and stays unambiguous to actor lookups).
+	//
+	// MVP scope: rotation is fixed at identity. No PIE-only spawn path, no
+	// multiplayer, no parent attachment (use actor_create / actor_set_parent
+	// for those). The spawn is wrapped in FScopedTransaction for editor Undo
+	// and marks the level package dirty so the editor's save prompt fires.
+	//
+	// Mutating. The gate's mandatory `paths_hint` is enforced by the dispatcher
+	// BEFORE the handler runs. Structured errors:
+	//   - invalid_parameter       — malformed body
+	//   - missing_parameter       — `path` absent
+	//   - blueprint_not_found     — no Blueprint at path
+	//   - not_compiled            — GeneratedClass missing (compile first)
+	//   - not_actor_blueprint     — GeneratedClass is not AActor-derived
+	//   - no_editor_world         — no GEditor / editor world
+	//   - spawn_failed            — SpawnActor returned null
+	Registry.Register(
+		TEXT("unreal_open_mcp_blueprint_spawn"),
+		[](const FString& Body) -> FUnrealOpenMcpToolDispatchResult
+		{
+			TSharedPtr<FJsonObject> Args = ParseBody(Body);
+			if (!Args.IsValid())
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("invalid_parameter"),
+					TEXT("Request body was not a valid JSON object."));
+			}
+
+			const FString Path = Args->HasTypedField<EJson::String>(TEXT("path"))
+				? Args->GetStringField(TEXT("path"))
+				: FString();
+			if (Path.IsEmpty())
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("missing_parameter"),
+					TEXT("'path' is required (Blueprint asset object path)."));
+			}
+
+			UBlueprint* Blueprint = FUnrealOpenMcpBlueprintHelpers::ResolveBlueprint(Path);
+			if (!Blueprint)
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("blueprint_not_found"),
+					FString::Printf(TEXT("Blueprint not found at '%s'."), *Path));
+			}
+
+			// Require a compiled GeneratedClass. A freshly-created Blueprint may
+			// have a null GeneratedClass until the first compile; spawn on that
+			// would dereference null, so surface a structured error that points
+			// the agent at blueprint_compile instead of a native crash.
+			UClass* GeneratedClass = Blueprint->GeneratedClass;
+			if (GeneratedClass == nullptr)
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("not_compiled"),
+					FString::Printf(
+						TEXT("Blueprint '%s' has no GeneratedClass — run blueprint_compile first."),
+						*Blueprint->GetName()));
+			}
+
+			// Only Actor Blueprints can be spawned. A Blueprint Function Library
+			// / Object Blueprint compiles to a non-AActor generated class; the
+			// explicit check turns the otherwise-silent SpawnActor null return
+			// into a structured not_actor_blueprint.
+			if (!GeneratedClass->IsChildOf(AActor::StaticClass()))
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("not_actor_blueprint"),
+					FString::Printf(
+						TEXT("Blueprint '%s' GeneratedClass is not an Actor class (only Actor Blueprints can be spawned)."),
+						*Blueprint->GetName()));
+			}
+
+			UWorld* World = FUnrealOpenMcpObjectRef::GetEditorWorld();
+			if (World == nullptr)
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("no_editor_world"),
+					TEXT("No editor world is available. Open a level in the Unreal Editor."));
+			}
+
+			const FString Label = Args->HasTypedField<EJson::String>(TEXT("name"))
+				? Args->GetStringField(TEXT("name"))
+				: FString();
+			const FVector Location = ReadVectorField(Args, TEXT("location"), FVector::ZeroVector);
+
+			// FScopedTransaction opens the undo bracket; SpawnActor + the label
+			// Modify() record into it. RF_Transactional on the spawn flags keeps
+			// the new actor itself undo-trackable (matches the actor_create
+			// pattern). ESPawnActorFlags here is the default set MINUS
+			// `DeferredBegin` (the standard SpawnActor template default), which
+			// is what the behavior reference (Unreal-MCP blueprint-spawn) passes
+			// — plain spawn, no special collision/script init flags.
+			const FScopedTransaction Transaction(
+				NSLOCTEXT("UnrealOpenMcp", "BlueprintSpawn", "MCP: Spawn Blueprint"));
+			FActorSpawnParameters SpawnParams;
+			SpawnParams.ObjectFlags |= RF_Transactional;
+			SpawnParams.bDeferConstruction = false;
+			// AlwaysSpawn: skip the editor's try-to-reuse-instance path so a
+			// spawn request always yields a fresh actor (matches actor_create).
+			SpawnParams.SpawnCollisionHandlingOverride =
+				ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+
+			AActor* Actor = World->SpawnActor<AActor>(
+				GeneratedClass, Location, FRotator::ZeroRotator, SpawnParams);
+			if (Actor == nullptr)
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("spawn_failed"),
+					FString::Printf(
+						TEXT("SpawnActor returned null for Blueprint '%s' (class '%s')."),
+						*Blueprint->GetName(),
+						*GeneratedClass->GetName()));
+			}
+
+			// SetActorLabelUnique (not SetActorLabel): a user-supplied label
+			// colliding with an existing actor's label would make both ambiguous
+			// to ResolveActor. Empty label → keep the engine default.
+			if (!Label.IsEmpty())
+			{
+				FActorLabelUtilities::SetActorLabelUnique(Actor, Label);
+			}
+
+			// Mark the level package dirty so the editor's save prompt fires.
+			// The outer of a spawned actor is its ULevel; MarkPackageDirty on
+			// the level propagates the dirty bit the editor keys off.
+			if (ULevel* Level = Actor->GetLevel())
+			{
+				Level->MarkPackageDirty();
+			}
+
+			// Minimal actor identity for the agent: label + class + path + the
+			// spawned transform's location. Deliberately lighter than actor_create's
+			// full ActorData — spawn is the last step of the compile loop, the
+			// agent already knows the Blueprint's structure from blueprint_get.
+			const TSharedRef<FJsonObject> Out = MakeShared<FJsonObject>();
+			Out->SetStringField(TEXT("actor"), Actor->GetActorLabel());
+			Out->SetStringField(TEXT("name"), Actor->GetName());
+			Out->SetStringField(TEXT("class"),
+				Actor->GetClass() ? Actor->GetClass()->GetPathName() : FString());
+			Out->SetStringField(TEXT("path"), Actor->GetPathName());
+
+			const TSharedRef<FJsonObject> LocJson = MakeShared<FJsonObject>();
+			LocJson->SetNumberField(TEXT("x"), Actor->GetActorLocation().X);
+			LocJson->SetNumberField(TEXT("y"), Actor->GetActorLocation().Y);
+			LocJson->SetNumberField(TEXT("z"), Actor->GetActorLocation().Z);
+			Out->SetObjectField(TEXT("location"), LocJson);
+
+			UE_LOG(
+				LogUnrealOpenMcp, Log,
+				TEXT("[Unreal Open MCP] blueprint_spawn: '%s' -> actor '%s' (class %s) at %s."),
+				*Blueprint->GetName(),
+				*Actor->GetActorLabel(),
+				Actor->GetClass() ? *Actor->GetClass()->GetName() : TEXT("?"),
+				*Actor->GetActorLocation().ToString());
+
+			return FUnrealOpenMcpToolDispatchResult::Ok(
+				WriteJson(MakeShared<FJsonValueObject>(Out)));
+		}, FUnrealOpenMcpToolMetadata::Mutating());
+
 	UE_LOG(
 		LogUnrealOpenMcp, Log,
-		TEXT("[Unreal Open MCP] blueprint tools registered: unreal_open_mcp_blueprint_create, unreal_open_mcp_blueprint_get, unreal_open_mcp_blueprint_add_component, unreal_open_mcp_blueprint_remove_component, unreal_open_mcp_blueprint_add_variable, unreal_open_mcp_blueprint_modify_variable, unreal_open_mcp_blueprint_set_default, unreal_open_mcp_blueprint_add_function, unreal_open_mcp_blueprint_add_event, unreal_open_mcp_blueprint_compile"));
+		TEXT("[Unreal Open MCP] blueprint tools registered: unreal_open_mcp_blueprint_create, unreal_open_mcp_blueprint_get, unreal_open_mcp_blueprint_add_component, unreal_open_mcp_blueprint_remove_component, unreal_open_mcp_blueprint_add_variable, unreal_open_mcp_blueprint_modify_variable, unreal_open_mcp_blueprint_set_default, unreal_open_mcp_blueprint_add_function, unreal_open_mcp_blueprint_add_event, unreal_open_mcp_blueprint_compile, unreal_open_mcp_blueprint_spawn"));
 }

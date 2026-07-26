@@ -1,7 +1,8 @@
 // Blueprint-tool family — see header for the create/get/component/variable/
-// function/event contracts. This file owns the handlers (blueprint_create,
-// blueprint_get, blueprint_add/remove_component, blueprint_add/modify_variable,
-// blueprint_set_default, blueprint_add_function, blueprint_add_event) plus the
+// function/event/compile contracts. This file owns the handlers
+// (blueprint_create, blueprint_get, blueprint_add/remove_component,
+// blueprint_add/modify_variable, blueprint_set_default,
+// blueprint_add_function, blueprint_add_event, blueprint_compile) plus the
 // shared helpers the later P6 sub-plans reuse (ResolveBlueprint, path
 // normalization, name well-formedness, BlueprintRef JSON, pin-type reverse
 // mapping).
@@ -42,6 +43,9 @@
 #include "Kismet2/KismetEditorUtilities.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/Kismet2NameValidators.h"
+#include "Kismet2/CompilerResultsLog.h"   // FCompilerResultsLog — blueprint_compile structured diagnostics
+#include "Logging/TokenizedMessage.h"     // FTokenizedMessage / IMessageToken / EMessageToken / EMessageSeverity
+#include "Misc/UObjectToken.h"            // FUObjectToken — node/graph attribution from compiler UObject tokens
 #include "EdGraphSchema_K2.h"
 #include "EdGraph/EdGraph.h"
 #include "EdGraph/EdGraphNode.h"
@@ -1776,7 +1780,158 @@ void FUnrealOpenMcpBlueprintTools::Register(FUnrealOpenMcpToolRegistry& Registry
 				WriteJson(MakeShared<FJsonValueObject>(Out)));
 		}, FUnrealOpenMcpToolMetadata::Mutating());
 
+	// =========================================================================
+	// unreal_open_mcp_blueprint_compile — compile a Blueprint and return a
+	// STRUCTURED error/warning list (the AI feedback loop).
+	// =========================================================================
+	//
+	// `path` is the Blueprint asset object path. The handler runs
+	// FKismetEditorUtilities::CompileBlueprint with a silent
+	// FCompilerResultsLog (bSilentMode = true so the Output Log is not
+	// flooded), then walks Results.Messages and maps each FTokenizedMessage to
+	// { severity, message, node, graph }. The `node` / `graph` attribution is
+	// best-effort: it is populated only when the compiler attached UObject
+	// tokens pointing at a UEdGraphNode / UEdGraph (a missing field is the
+	// common case for messages with no graph context).
+	//
+	// A FAILED compile is a NORMAL, expected result for the AI loop — it is NOT
+	// a transport failure. The envelope stays `ok:true` (the dispatch itself
+	// succeeded) and the result object carries `succeeded:false` + the
+	// populated `messages[]` so an agent reads the diagnostics, fixes the
+	// structure via the add/modify tools, and recompiles. Only TOOL-LEVEL
+	// errors (malformed body, missing path, missing asset, reserved root) map
+	// to `ok:false` / structured codes. This is the key contract that lets an
+	// agent treat "compile failed" as data, not as an opaque isError.
+	//
+	// Mutating. The gate's mandatory `paths_hint` is enforced by the dispatcher
+	// BEFORE the handler runs. Structured errors:
+	//   - invalid_parameter          — malformed body
+	//   - missing_parameter          — `path` absent
+	//   - blueprint_not_found        — no Blueprint at path
+	//   - invalid_content_root       — Blueprint under /Engine, /Script, /Temp
+	//
+	// (A non-zero error count from the compiler is NOT a structured error — it
+	// rides through as `succeeded:false` on an `ok:true` envelope.)
+	Registry.Register(
+		TEXT("unreal_open_mcp_blueprint_compile"),
+		[](const FString& Body) -> FUnrealOpenMcpToolDispatchResult
+		{
+			TSharedPtr<FJsonObject> Args = ParseBody(Body);
+			if (!Args.IsValid())
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("invalid_parameter"),
+					TEXT("Request body was not a valid JSON object."));
+			}
+
+			const FString Path = Args->HasTypedField<EJson::String>(TEXT("path"))
+				? Args->GetStringField(TEXT("path"))
+				: FString();
+			if (Path.IsEmpty())
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("missing_parameter"),
+					TEXT("'path' is required (Blueprint asset object path)."));
+			}
+
+			UBlueprint* Blueprint = FUnrealOpenMcpBlueprintHelpers::ResolveBlueprint(Path);
+			if (!Blueprint)
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("blueprint_not_found"),
+					FString::Printf(TEXT("Blueprint not found at '%s'."), *Path));
+			}
+
+			// Compile mutates the generated class + bytecode and dirties the
+			// package, so the reserved-root refuse applies for the same reason
+			// as every other Blueprint mutator (even a save:false call dirties
+			// the package).
+			FString BlueprintPackageName;
+			if (!IsBlueprintInWritableRoot(Blueprint, BlueprintPackageName))
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("invalid_content_root"),
+					FString::Printf(
+						TEXT("Refusing to modify '%s' under a reserved content root; ")
+						TEXT("use a project root like '/Game'."),
+						*BlueprintPackageName));
+			}
+
+			// bSilentMode = true: the compiler's own message pump would otherwise
+			// echo every diagnostic to the editor Output Log on each compile —
+			// noisy and slow in an agent recompile loop. The diagnostics still
+			// land in Results.Messages for structured extraction below.
+			FCompilerResultsLog Results;
+			Results.bSilentMode = true;
+			FKismetEditorUtilities::CompileBlueprint(Blueprint, EBlueprintCompileOptions::None, &Results);
+
+			// Walk the tokenized message log and map each entry to the agent-
+			// consumable shape. severity collapses the EMessageSeverity enum to
+			// the three tokens an agent switches on (error | warning | info).
+			// node/graph attribution is best-effort: only populated when the
+			// compiler attached a UObject token pointing at a UEdGraphNode /
+			// UEdGraph (a message with no graph context leaves both empty — that
+			// is the common case for type/property-level diagnostics).
+			TArray<TSharedPtr<FJsonValue>> Messages;
+			for (const TSharedRef<FTokenizedMessage>& Msg : Results.Messages)
+			{
+				const TSharedRef<FJsonObject> Entry = MakeShared<FJsonObject>();
+				const EMessageSeverity::Type Sev = Msg->GetSeverity();
+				Entry->SetStringField(TEXT("severity"),
+					Sev == EMessageSeverity::Error ? TEXT("error") :
+					Sev == EMessageSeverity::Warning ? TEXT("warning") : TEXT("info"));
+				Entry->SetStringField(TEXT("message"), Msg->ToText().ToString());
+
+				FString NodeName;
+				FString GraphName;
+				for (const TSharedRef<IMessageToken>& Token : Msg->GetMessageTokens())
+				{
+					if (Token->GetType() != EMessageToken::Object)
+					{
+						continue;
+					}
+					const FUObjectToken& ObjToken = static_cast<const FUObjectToken&>(Token.Get());
+					const UObject* Obj = ObjToken.GetObject().Get();
+					if (!Obj)
+					{
+						continue;
+					}
+					if (NodeName.IsEmpty() && Obj->IsA(UEdGraphNode::StaticClass()))
+					{
+						NodeName = Obj->GetName();
+					}
+					else if (GraphName.IsEmpty() && Obj->IsA(UEdGraph::StaticClass()))
+					{
+						GraphName = Obj->GetName();
+					}
+				}
+				Entry->SetStringField(TEXT("node"), NodeName);
+				Entry->SetStringField(TEXT("graph"), GraphName);
+				Messages.Add(MakeShared<FJsonValueObject>(Entry));
+			}
+
+			// succeeded reflects the compiler's error count, NOT the dispatch.
+			// An ok:true envelope with succeeded:false is exactly the "compile
+			// failed — here are the diagnostics" contract the AI loop relies on.
+			const bool bSucceeded = (Results.NumErrors == 0);
+			const TSharedRef<FJsonObject> Out = MakeShared<FJsonObject>();
+			Out->SetBoolField(TEXT("succeeded"), bSucceeded);
+			Out->SetNumberField(TEXT("numErrors"), Results.NumErrors);
+			Out->SetNumberField(TEXT("numWarnings"), Results.NumWarnings);
+			Out->SetArrayField(TEXT("messages"), Messages);
+
+			UE_LOG(
+				LogUnrealOpenMcp, Log,
+				TEXT("[Unreal Open MCP] blueprint_compile: '%s' %s (%d error(s), %d warning(s))."),
+				*Blueprint->GetName(),
+				bSucceeded ? TEXT("succeeded") : TEXT("failed"),
+				Results.NumErrors, Results.NumWarnings);
+
+			return FUnrealOpenMcpToolDispatchResult::Ok(
+				WriteJson(MakeShared<FJsonValueObject>(Out)));
+		}, FUnrealOpenMcpToolMetadata::Mutating());
+
 	UE_LOG(
 		LogUnrealOpenMcp, Log,
-		TEXT("[Unreal Open MCP] blueprint tools registered: unreal_open_mcp_blueprint_create, unreal_open_mcp_blueprint_get, unreal_open_mcp_blueprint_add_component, unreal_open_mcp_blueprint_remove_component, unreal_open_mcp_blueprint_add_variable, unreal_open_mcp_blueprint_modify_variable, unreal_open_mcp_blueprint_set_default, unreal_open_mcp_blueprint_add_function, unreal_open_mcp_blueprint_add_event"));
+		TEXT("[Unreal Open MCP] blueprint tools registered: unreal_open_mcp_blueprint_create, unreal_open_mcp_blueprint_get, unreal_open_mcp_blueprint_add_component, unreal_open_mcp_blueprint_remove_component, unreal_open_mcp_blueprint_add_variable, unreal_open_mcp_blueprint_modify_variable, unreal_open_mcp_blueprint_set_default, unreal_open_mcp_blueprint_add_function, unreal_open_mcp_blueprint_add_event, unreal_open_mcp_blueprint_compile"));
 }

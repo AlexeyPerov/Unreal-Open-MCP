@@ -1,10 +1,11 @@
 // unreal_open_mcp_blueprint_create / blueprint_get / blueprint_add_component /
 // blueprint_remove_component / blueprint_add_variable /
 // blueprint_modify_variable / blueprint_set_default / blueprint_add_function /
-// blueprint_add_event Automation specs (P6.1 + P6.2 + P6.3 + P6.4).
+// blueprint_add_event / blueprint_compile Automation specs
+// (P6.1 + P6.2 + P6.3 + P6.4 + P6.5).
 //
 // Pins the Blueprint tool family end-to-end at the handler level. The cases
-// mirror the P6.1 + P6.2 + P6.3 + P6.4 plan acceptance criteria + test lists:
+// mirror the P6.1 + P6.2 + P6.3 + P6.4 + P6.5 plan acceptance criteria + test lists:
 //   - create: happy path (new Blueprint from the default Actor parent under
 //     /Game; result echoes name + path + parentClass); package-path AND
 //     object-path forms both accepted and normalised; explicit parent
@@ -62,8 +63,14 @@
 //     enabled event rejected (event_already_exists); a ghost event (the fresh
 //     Actor event graph is pre-seeded with a DISABLED ReceiveTick ghost) is
 //     ENABLED by add-event (does not false-succeed as no-op); missing_parameter.
+//   - compile: clean Blueprint succeeds (succeeded:true + numErrors:0 on an
+//     ok:true envelope); a freshly-created (never-compiled) Blueprint acquires
+//     a GeneratedClass after compile (the add-variable → compile → set_default
+//     loop); a missing Blueprint rejected (blueprint_not_found at ok:false);
+//     missing_parameter for absent path; the ok-vs-succeeded contract is pinned
+//     — a normal compile is always ok:true regardless of the succeeded flag.
 //   - mutation classification: create/add/remove/add_variable/modify_variable/
-//     set_default/add_function/add_event mutating, get read-only.
+//     set_default/add_function/add_event/compile mutating, get read-only.
 //
 // The suite owns its scratch tree under /Game/__McpP61Blueprint — teardown
 // removes the whole subtree so the automation project does not accumulate test
@@ -577,7 +584,7 @@ void FUnrealOpenMcpBlueprintToolsSpec::Define()
 	{
 		// Pin the mutating/read-only classification so a later refactor cannot
 		// accidentally re-classify a tool and break the gate contract.
-		It("create/add/remove/add_variable/modify_variable/set_default/add_function/add_event are mutating; get is read-only", [this]()
+		It("create/add/remove/add_variable/modify_variable/set_default/add_function/add_event/compile are mutating; get is read-only", [this]()
 		{
 			FUnrealOpenMcpToolRegistry Registry;
 			FUnrealOpenMcpBlueprintTools::Register(Registry);
@@ -604,6 +611,7 @@ void FUnrealOpenMcpBlueprintToolsSpec::Define()
 			CheckMutating(TEXT("unreal_open_mcp_blueprint_set_default"), true);
 			CheckMutating(TEXT("unreal_open_mcp_blueprint_add_function"), true);
 			CheckMutating(TEXT("unreal_open_mcp_blueprint_add_event"), true);
+			CheckMutating(TEXT("unreal_open_mcp_blueprint_compile"), true);
 		});
 	});
 
@@ -2002,6 +2010,121 @@ void FUnrealOpenMcpBlueprintToolsSpec::Define()
 				}));
 			TestFalse(TEXT("ok false"), R.bOk);
 			TestEqual(TEXT("code"), R.Code, FString(TEXT("blueprint_not_found")));
+		});
+	});
+
+	Describe("unreal_open_mcp_blueprint_compile", [this]()
+	{
+		// Happy path — a freshly-created Blueprint compiles cleanly: succeeded
+		// is true, numErrors is 0, and the envelope stays ok:true. This also
+		// pins the core contract that a normal compile is ALWAYS ok:true
+		// regardless of the succeeded flag — a failed compile rides through as
+		// data, not as a dispatch error.
+		It("compiles a clean Blueprint and returns succeeded:true on an ok:true envelope", [this]()
+		{
+			FUnrealOpenMcpToolRegistry Registry;
+			FUnrealOpenMcpBlueprintTools::Register(Registry);
+
+			const FString Dest = FString::Printf(TEXT("%s/BP_Compile"), BlueprintScratchRoot);
+			if (!TestTrue(TEXT("create ok"), Invoke(Registry, TEXT("unreal_open_mcp_blueprint_create"),
+				MakeBody({ { TEXT("path"), Quote(Dest) } })).bOk)) return;
+
+			const FUnrealOpenMcpToolDispatchResult R = Invoke(
+				Registry,
+				TEXT("unreal_open_mcp_blueprint_compile"),
+				MakeBody({ { TEXT("path"), Quote(Dest) } }));
+			// The dispatch itself succeeded — ok stays true even when a compile
+			// fails. This is the contract the AI loop relies on.
+			if (!TestTrue(TEXT("ok"), R.bOk)) return;
+
+			const TSharedPtr<FJsonObject> Json = ParseJson(R.Output);
+			if (!TestNotNull(TEXT("result json"), Json.Get())) return;
+			TestTrue(TEXT("succeeded"), Json->GetBoolField(TEXT("succeeded")));
+			TestEqual(TEXT("numErrors"), Json->GetNumberField(TEXT("numErrors")), 0);
+			// numWarnings + messages[] are always present (warnings may be 0,
+			// messages may be empty — but the fields exist).
+			TestTrue(TEXT("numWarnings present"), Json->HasField(TEXT("numWarnings")));
+			TestTrue(TEXT("messages present"), Json->HasField(TEXT("messages")));
+		});
+
+		// The add-variable → compile → set_default loop: a member variable
+		// added via blueprint_add_variable is NOT a property on the generated
+		// class until a compile lands it. This case pins that compile actually
+		// produces a GeneratedClass carrying the new member — the round-trip
+		// the set_default handler's property_not_found message points agents
+		// at. A freshly-created Blueprint may have a null GeneratedClass until
+		// the first compile, so this also guards that compile populates it.
+		It("lands an added member variable on the GeneratedClass (add → compile loop)", [this]()
+		{
+			FUnrealOpenMcpToolRegistry Registry;
+			FUnrealOpenMcpBlueprintTools::Register(Registry);
+
+			const FString Dest = FString::Printf(TEXT("%s/BP_CompileVar"), BlueprintScratchRoot);
+			if (!TestTrue(TEXT("create ok"), Invoke(Registry, TEXT("unreal_open_mcp_blueprint_create"),
+				MakeBody({ { TEXT("path"), Quote(Dest) } })).bOk)) return;
+			if (!TestTrue(TEXT("add_variable ok"), Invoke(Registry, TEXT("unreal_open_mcp_blueprint_add_variable"),
+				MakeBody({
+					{ TEXT("path"), Quote(Dest) },
+					{ TEXT("name"), Quote(TEXT("Speed")) },
+					{ TEXT("type"), Quote(TEXT("int")) },
+				})).bOk)) return;
+
+			const FUnrealOpenMcpToolDispatchResult R = Invoke(
+				Registry,
+				TEXT("unreal_open_mcp_blueprint_compile"),
+				MakeBody({ { TEXT("path"), Quote(Dest) } }));
+			if (!TestTrue(TEXT("ok"), R.bOk)) return;
+
+			const TSharedPtr<FJsonObject> Json = ParseJson(R.Output);
+			if (!TestNotNull(TEXT("result json"), Json.Get())) return;
+			TestTrue(TEXT("succeeded"), Json->GetBoolField(TEXT("succeeded")));
+
+			// The compile must have produced a GeneratedClass carrying the new
+			// member as a real property — that is the round-trip set_default
+			// relies on. Resolve the Blueprint directly (the handler-level test
+			// can reach the editor object) and check the generated class.
+			UBlueprint* Blueprint = FUnrealOpenMcpBlueprintHelpers::ResolveBlueprint(Dest);
+			if (!TestNotNull(TEXT("resolve blueprint"), Blueprint)) return;
+			if (!TestNotNull(TEXT("generated class"), Blueprint->GeneratedClass)) return;
+			const bool bHasSpeed = (Blueprint->GeneratedClass->FindPropertyByName(FName(TEXT("Speed"))) != nullptr);
+			TestTrue(TEXT("Speed landed on generated class"), bHasSpeed);
+		});
+
+		// Missing Blueprint — compile on an absent path is a TOOL-LEVEL error
+		// (ok:false / blueprint_not_found), NOT a succeeded:false data result.
+		It("returns blueprint_not_found for a missing Blueprint (ok:false)", [this]()
+		{
+			FUnrealOpenMcpToolRegistry Registry;
+			FUnrealOpenMcpBlueprintTools::Register(Registry);
+
+			const FUnrealOpenMcpToolDispatchResult R = Invoke(
+				Registry,
+				TEXT("unreal_open_mcp_blueprint_compile"),
+				MakeBody({ { TEXT("path"), Quote(TEXT("/Game/__DoesNotExist/BP_Nope")) } }));
+			TestFalse(TEXT("ok false"), R.bOk);
+			TestEqual(TEXT("code"), R.Code, FString(TEXT("blueprint_not_found")));
+		});
+
+		// Missing path parameter.
+		It("returns missing_parameter for an absent path", [this]()
+		{
+			FUnrealOpenMcpToolRegistry Registry;
+			FUnrealOpenMcpBlueprintTools::Register(Registry);
+
+			TestEqual(TEXT("missing path"),
+				Invoke(Registry, TEXT("unreal_open_mcp_blueprint_compile"), TEXT("{}")).Code,
+				FString(TEXT("missing_parameter")));
+		});
+
+		// Malformed body.
+		It("returns invalid_parameter for a malformed body", [this]()
+		{
+			FUnrealOpenMcpToolRegistry Registry;
+			FUnrealOpenMcpBlueprintTools::Register(Registry);
+
+			TestEqual(TEXT("invalid body"),
+				Invoke(Registry, TEXT("unreal_open_mcp_blueprint_compile"), TEXT("not json")).Code,
+				FString(TEXT("invalid_parameter")));
 		});
 	});
 }

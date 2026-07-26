@@ -156,6 +156,18 @@ import { blueprintSetDefault } from "./blueprint-set-default.js";
 // wiring) is OUT OF SCOPE — both tools create stubs only.
 import { blueprintAddFunction } from "./blueprint-add-function.js";
 import { blueprintAddEvent } from "./blueprint-add-event.js";
+// P6.5 — Blueprint compile (blueprint_compile). Mutating (default gate Enforce;
+// paths_hint required). Compiles a Blueprint via
+// FKismetEditorUtilities::CompileBlueprint with a silent FCompilerResultsLog
+// and returns a STRUCTURED error/warning list — the AI feedback loop. A FAILED
+// compile is a NORMAL, expected result (NOT a transport failure): the envelope
+// stays ok:true and the result carries succeeded:false + a populated
+// messages[] so an agent reads the diagnostics, fixes via the structure-edit
+// tools, and recompiles. Only tool-level errors (missing path / missing asset /
+// reserved root / malformed body) map to ok:false. This is the spine of the
+// structure-edit loop — a member variable / function stub / event added via
+// the P6.2–P6.4 tools only lands on the generated class once compile runs.
+import { blueprintCompile } from "./blueprint-compile.js";
 
 // Tool registry. P1.7 registers the first real tool — `unreal_open_mcp_ping` —
 // which the MCP server routes to the bridge's `GET /ping`. Each subsequent tool
@@ -293,4 +305,5 @@ export const ALL_TOOLS: Tool[] = [
   blueprintSetDefault,
   blueprintAddFunction,
   blueprintAddEvent,
+  blueprintCompile,
 ];

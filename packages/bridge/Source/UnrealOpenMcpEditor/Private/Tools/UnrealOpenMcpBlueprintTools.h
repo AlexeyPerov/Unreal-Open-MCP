@@ -87,10 +87,21 @@
 //     an ENABLED existing node is a real duplicate (reject). Body authoring is
 //     OUT OF SCOPE. MarkBlueprintAsStructurallyModified follows so a later
 //     compile wires the override.
+//   - `unreal_open_mcp_blueprint_compile` — compile a Blueprint via
+//     FKismetEditorUtilities::CompileBlueprint with a silent FCompilerResultsLog
+//     and return a STRUCTURED error/warning list. Each message carries
+//     `severity` (error|warning|info), `message` text, and best-effort
+//     `node`/`graph` attribution extracted from the compiler's UObject tokens.
+//     This is the AI feedback loop: a FAILED compile is a NORMAL, expected
+//     result, NOT a transport failure — the envelope stays `ok:true` and the
+//     result object carries `succeeded:false` + the populated `messages[]` so
+//     an agent reads the diagnostics, fixes via the structure-edit tools, and
+//     recompiles. (Tool-level errors like a missing path or a missing asset are
+//     still `ok:false`.)
 //
 // create / add_component / remove_component / add_variable / modify_variable /
-// set_default / add_function / add_event are MUTATING and register with
-// `FUnrealOpenMcpToolMetadata::Mutating()` so the dispatcher wraps them in
+// set_default / add_function / add_event / compile are MUTATING and register
+// with `FUnrealOpenMcpToolMetadata::Mutating()` so the dispatcher wraps them in
 // `GatePolicy.Execute` (the mandatory `paths_hint` is enforced by the
 // dispatcher BEFORE the handler runs). get is read-only (gate Off).
 //
@@ -137,6 +148,7 @@ struct FEdGraphPinType;
  *   - `unreal_open_mcp_blueprint_set_default`      (mutating; gate Enforce; paths_hint required)
  *   - `unreal_open_mcp_blueprint_add_function`     (mutating; gate Enforce; paths_hint required)
  *   - `unreal_open_mcp_blueprint_add_event`        (mutating; gate Enforce; paths_hint required)
+ *   - `unreal_open_mcp_blueprint_compile`          (mutating; gate Enforce; paths_hint required)
  */
 namespace FUnrealOpenMcpBlueprintTools
 {

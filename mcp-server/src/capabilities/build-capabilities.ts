@@ -159,6 +159,11 @@ const TOOL_CATEGORY: Record<string, string> = {
   // parent event node. Body authoring is out of scope (stub-only).
   unreal_open_mcp_blueprint_add_function: "blueprint",
   unreal_open_mcp_blueprint_add_event: "blueprint",
+  // P6.5 — Blueprint compile. Mutating (route live, default gate Enforce,
+  // paths_hint required) — compiles a Blueprint and returns a structured
+  // error/warning list. A failed compile is a normal result (ok:true +
+  // succeeded:false), not a transport failure.
+  unreal_open_mcp_blueprint_compile: "blueprint",
 };
 
 function categoryFor(toolName: string): string {

@@ -176,6 +176,14 @@ import { blueprintCompile } from "./blueprint-compile.js";
 // GeneratedClass (not_compiled -> compile first) and an AActor-derived class
 // (not_actor_blueprint). Optional `location` ({x,y,z}) + `name` (actor label).
 import { blueprintSpawn } from "./blueprint-spawn.js";
+// P7.1 — Source read/list family. Two read-only tools that inspect project C++
+// under <Project>/Source/ via the shared bridge jail helpers
+// (GetProjectSourceRoot / ResolveJailedPath). source_read returns numbered
+// lines + truncation metadata; source_list returns a scoped inventory with an
+// extension allow-list. Both JAILED to Source/ — escapes never read. The jail
+// spine is the dependency every later P7 sub-plan (CRUD / compile) builds on.
+import { sourceRead } from "./source-read.js";
+import { sourceList } from "./source-list.js";
 
 // Tool registry. P1.7 registers the first real tool — `unreal_open_mcp_ping` —
 // which the MCP server routes to the bridge's `GET /ping`. Each subsequent tool
@@ -315,4 +323,6 @@ export const ALL_TOOLS: Tool[] = [
   blueprintAddEvent,
   blueprintCompile,
   blueprintSpawn,
+  sourceRead,
+  sourceList,
 ];

@@ -91,6 +91,10 @@
 // validation, BlueprintRef JSON, pin-type reverse map) are the spine every
 // later P6 sub-plan builds on.
 #include "Tools/UnrealOpenMcpBlueprintTools.h"
+// P7.1 — Source read/list family. Two read-only tools that inspect project
+// C++ under <Project>/Source/ via the shared jail helpers
+// (GetProjectSourceRoot / ResolveJailedPath). No gate path — read-only.
+#include "Tools/UnrealOpenMcpSourceTools.h"
 
 #include "HAL/PlatformProcess.h"
 #include "Misc/EngineVersion.h"
@@ -397,6 +401,14 @@ private:
 				// collision probe + MarkAsGarbage cleanup on failure. get is
 				// read-only — scoped graph summary for LLM inspection.
 				FUnrealOpenMcpBlueprintTools::Register(*ToolRegistry);
+
+				// P7.1 — Source read/list family (source_read / source_list).
+				// Two read-only tools that inspect project C++ under
+				// <Project>/Source/ via the shared jail helpers
+				// (GetProjectSourceRoot / ResolveJailedPath). The jail spine is
+				// the dependency every later P7 sub-plan (CRUD / compile) builds
+				// on. Read-only — no gate path.
+				FUnrealOpenMcpSourceTools::Register(*ToolRegistry);
 		}
 
 	// Owned. Constructed in StartupModule, torn down in ShutdownModule. The

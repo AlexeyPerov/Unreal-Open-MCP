@@ -169,6 +169,11 @@ const TOOL_CATEGORY: Record<string, string> = {
   // GeneratedClass into the current editor level via UWorld::SpawnActor
   // (headless-safe). Closes the create -> edit -> compile -> spawn loop.
   unreal_open_mcp_blueprint_spawn: "blueprint",
+  // P7.1 — Source read/list family. Two read-only tools that inspect project
+  // C++ under <Project>/Source/ via the shared bridge jail helpers. Both JAILED
+  // to Source/ (escapes never read); no gate path (read-only).
+  unreal_open_mcp_source_read: "source",
+  unreal_open_mcp_source_list: "source",
 };
 
 function categoryFor(toolName: string): string {

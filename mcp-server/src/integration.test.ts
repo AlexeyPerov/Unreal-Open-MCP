@@ -1086,3 +1086,356 @@ test("P6.6 integration: tools/call blueprint_spawn surfaces the tool error envel
     await bridge.close();
   }
 });
+
+// ===========================================================================
+// P7.4 — Phase 7 parity smoke (source compile-loop: update + compile)
+// ===========================================================================
+//
+// Phase 7 shipped the Source family; P7.4 is the mandatory phase-gate before
+// Phase 8 and closes the C++ edit -> compile loop. The P7.4 cases pin the two
+// load-bearing source tools (source_update + source_compile) through the full
+// MCP <-> bridge path and add the CRITICAL compile-failure data-path
+// assertion the P7.3 contract rides on: a success:false compile is a NORMAL
+// result (ok:true envelope, MCP isError:false), NOT a transport error — the
+// same contract P6.6 pinned for Blueprint compiles, now asserted at the MCP
+// boundary for the C++ loop.
+//
+// These cases mirror the P6.6 structure exactly, swapping in the Source-
+// family tools. source_update is the C++ edit step (mutating, gate Enforce,
+// jailed to <Project>/Source/); source_compile is the AI feedback loop
+// (mutating, gate Enforce, returns a structured UBT/Live-Coding diagnostic
+// report with success SPLIT from compile_clean — a loaded editor holds its
+// module DLL so success:false + compile_clean:true is expected). The
+// compile-failure case is P7.3's load-bearing contract asserted at the MCP
+// layer for the first time; the tool-error case pins the P7.1 Source/ jail
+// rejection (path_escapes_jail).
+
+/**
+ * Canonical source_update result body the bridge emits — the write identity
+ * the agent chains from ({path, mode, bytes_written, lines_written}). The
+ * stub returns this inside {ok:true,result:<body>}; the MCP `bodyOf` helper
+ * sees the INNER object after LiveClient.postTool unwraps the envelope.
+ */
+const SOURCE_UPDATE_OK = {
+  path: "MyGame/McpSmoke.cpp",
+  mode: "full",
+  bytes_written: 42,
+  lines_written: 3,
+};
+
+/**
+ * Canonical source_compile CLEAN result body — a UBT report with success:true
+ * + compile_clean:true + error_count:0 + empty diagnostics on an ok:true
+ * envelope. The method:'ubt' tag distinguishes the deterministic build path
+ * from Live Coding (method:'live_coding').
+ */
+const SOURCE_COMPILE_CLEAN = {
+  method: "ubt",
+  target: "MyGameEditor",
+  configuration: "Development",
+  platform: "Win64",
+  return_code: 0,
+  success: true,
+  compile_clean: true,
+  error_count: 0,
+  warning_count: 0,
+  diagnostics: [],
+};
+
+/**
+ * Canonical source_compile FAILED result body — success:false +
+ * compile_clean:false + a populated diagnostics[] on an ok:true envelope.
+ * This is the P7.3 contract: a failed compile is a NORMAL result, NOT a
+ * transport failure, so MCP isError MUST stay false and the diagnostics ride
+ * through as data (the same contract P6.6 pinned for Blueprint compiles).
+ */
+const SOURCE_COMPILE_FAILED = {
+  method: "ubt",
+  target: "MyGameEditor",
+  configuration: "Development",
+  platform: "Win64",
+  return_code: 1,
+  success: false,
+  compile_clean: false,
+  error_count: 1,
+  warning_count: 0,
+  diagnostics: [
+    {
+      file: "MyGame/McpSmoke.cpp",
+      line: 7,
+      severity: "error",
+      message: "expected a ';'",
+    },
+  ],
+};
+
+/**
+ * Bridge handler that serves GET /ping (healthy) AND POST
+ * /tools/unreal_open_mcp_source_update with the canonical ok:true envelope.
+ * Used by the P7.4 update round-trip.
+ */
+async function sourceUpdateHandler(
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<void> {
+  if (req.method === "GET" && req.url === "/ping") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(HEALTHY_PING));
+    return;
+  }
+  if (
+    req.method === "POST" &&
+    req.url === "/tools/unreal_open_mcp_source_update"
+  ) {
+    await readBody(req);
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: true, result: SOURCE_UPDATE_OK }));
+    return;
+  }
+  res.writeHead(404, { "Content-Type": "application/json" });
+  res.end(
+    JSON.stringify({
+      error: { code: "not_found", message: `${req.method} ${req.url}` },
+    }),
+  );
+}
+
+// --- P7.4 healthy: source_update round-trip unwraps the result body --------
+
+test("P7.4 integration: tools/call source_update returns the unwrapped result body on 200", async () => {
+  const bridge = await startHandlerStub(sourceUpdateHandler);
+  try {
+    const { client, cleanup } = await setupClient(bridge.port);
+    try {
+      const result = await client.callTool({
+        name: "unreal_open_mcp_source_update",
+        arguments: {
+          path: "MyGame/McpSmoke.cpp",
+          content: "// mcp smoke\nint32 main() { return 0; }\n",
+          paths_hint: ["MyGame/McpSmoke.cpp"],
+        },
+      });
+      // Success envelope -> isError:false and the INNER result object (not the
+      // {ok,result} wrapper) survives the MCP round-trip verbatim — the parity
+      // pin on the update identity field set ({path, mode, bytes_written,
+      // lines_written}).
+      assert.equal(result.isError, false);
+      assert.deepEqual(bodyOf(result), SOURCE_UPDATE_OK);
+    } finally {
+      await cleanup();
+    }
+  } finally {
+    await bridge.close();
+  }
+});
+
+// --- P7.4 healthy: source_compile clean round-trip -------------------------
+
+test("P7.4 integration: tools/call source_compile returns the clean UBT report body on 200", async () => {
+  const bridge = await startHandlerStub(async (req, res) => {
+    if (req.method === "GET" && req.url === "/ping") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(HEALTHY_PING));
+      return;
+    }
+    if (
+      req.method === "POST" &&
+      req.url === "/tools/unreal_open_mcp_source_compile"
+    ) {
+      await readBody(req);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: true, result: SOURCE_COMPILE_CLEAN }));
+      return;
+    }
+    res.writeHead(404, { "Content-Type": "application/json" });
+    res.end(
+      JSON.stringify({
+        error: { code: "not_found", message: `${req.method} ${req.url}` },
+      }),
+    );
+  });
+  try {
+    const { client, cleanup } = await setupClient(bridge.port);
+    try {
+      const result = await client.callTool({
+        name: "unreal_open_mcp_source_compile",
+        arguments: {
+          use_live_coding: false,
+          paths_hint: ["MyGame/McpSmoke.cpp"],
+        },
+      });
+      assert.equal(result.isError, false);
+      assert.deepEqual(bodyOf(result), SOURCE_COMPILE_CLEAN);
+    } finally {
+      await cleanup();
+    }
+  } finally {
+    await bridge.close();
+  }
+});
+
+// --- P7.4 compile-failure data path: success:false stays isError:false -----
+//
+// The P7.3 contract: a FAILED C++ compile is a NORMAL, expected result, NOT a
+// transport failure. The bridge keeps the envelope ok:true and carries
+// success:false + compile_clean:false + the populated diagnostics[] so an
+// agent reads the diagnostics and recompiles. At the MCP layer that means
+// isError MUST stay false — the diagnostics are data, not an error. This case
+// pins that invariant at the MCP boundary for the first time (P7.3 pinned it
+// at the bridge handler / ParseDiagnostics level only).
+
+test("P7.4 integration: tools/call source_compile with success:false stays isError:false (compile failure is data, not a transport error)", async () => {
+  const bridge = await startHandlerStub(async (req, res) => {
+    if (req.method === "GET" && req.url === "/ping") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(HEALTHY_PING));
+      return;
+    }
+    if (
+      req.method === "POST" &&
+      req.url === "/tools/unreal_open_mcp_source_compile"
+    ) {
+      await readBody(req);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: true, result: SOURCE_COMPILE_FAILED }));
+      return;
+    }
+    res.writeHead(404, { "Content-Type": "application/json" });
+    res.end(
+      JSON.stringify({
+        error: { code: "not_found", message: `${req.method} ${req.url}` },
+      }),
+    );
+  });
+  try {
+    const { client, cleanup } = await setupClient(bridge.port);
+    try {
+      const result = await client.callTool({
+        name: "unreal_open_mcp_source_compile",
+        arguments: {
+          use_live_coding: false,
+          paths_hint: ["MyGame/McpSmoke.cpp"],
+        },
+      });
+      // CRITICAL P7.3 invariant at the MCP boundary: a failed compile is
+      // data, not an error. isError stays false and the diagnostics ride
+      // through on the ok:true result object.
+      assert.equal(
+        result.isError,
+        false,
+        "success:false compile must surface as isError:false (data, not transport error)",
+      );
+      const body = bodyOf(result) as typeof SOURCE_COMPILE_FAILED;
+      assert.equal(body.success, false);
+      assert.equal(body.compile_clean, false);
+      assert.equal(body.error_count, 1);
+      assert.ok(
+        Array.isArray(body.diagnostics) && body.diagnostics.length === 1,
+      );
+      assert.equal(body.diagnostics[0].severity, "error");
+      assert.equal(body.diagnostics[0].file, "MyGame/McpSmoke.cpp");
+      assert.equal(typeof body.diagnostics[0].line, "number");
+      assert.equal(typeof body.diagnostics[0].message, "string");
+    } finally {
+      await cleanup();
+    }
+  } finally {
+    await bridge.close();
+  }
+});
+
+// --- P7.4 bridge-down: source_update inherits bridge_offline ----------------
+
+test("P7.4 integration: bridge-down tools/call source_update surfaces bridge_offline with the lock hint", async () => {
+  // Port 1 — nothing listening. The source_update path inherits P1's
+  // bridge_offline classification with the instance-lock hint, exactly like
+  // the actor_find / asset_find / blueprint_spawn paths.
+  const { client, cleanup } = await setupClient(1);
+  setLiveRouter(new LiveClient(1, undefined, "/tmp/MyGame"));
+  try {
+    const result = await client.callTool({
+      name: "unreal_open_mcp_source_update",
+      arguments: {
+        path: "MyGame/McpSmoke.cpp",
+        content: "// mcp smoke\n",
+        paths_hint: ["MyGame/McpSmoke.cpp"],
+      },
+    });
+    assert.equal(result.isError, true);
+    const body = bodyOf(result) as { error: { code: string; message: string } };
+    assert.equal(body.error.code, "bridge_offline");
+    assert.match(
+      body.error.message,
+      /\.unreal-open-mcp\/instances\//,
+      "offline hint must name the instance lock dir",
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+// --- P7.4 tool error: {ok,false,error} surfaces as a structured MCP error ----
+
+test("P7.4 integration: tools/call source_update surfaces the tool error envelope on ok:false (path_escapes_jail)", async () => {
+  // The bridge ran the handler and it returned a structured failure — here a
+  // Source/ jail escape (an agent passed ../ or an absolute path outside the
+  // project's Source/). The {ok:false,error:{code,message}} envelope must
+  // surface as an MCP error (isError:true) carrying the tool-specific
+  // path_escapes_jail code so an agent can branch on the cause (rewrite the
+  // path inside Source/) instead of retrying blindly.
+  const bridge = await startHandlerStub(async (req, res) => {
+    if (
+      req.method === "POST" &&
+      req.url === "/tools/unreal_open_mcp_source_update"
+    ) {
+      await readBody(req);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          ok: false,
+          error: {
+            code: "path_escapes_jail",
+            message:
+              "Path '../Engine/Source/Runtime/Core/Private/Core.cpp' escapes the project Source/ jail.",
+          },
+        }),
+      );
+      return;
+    }
+    res.writeHead(404, { "Content-Type": "application/json" });
+    res.end(
+      JSON.stringify({
+        error: { code: "not_found", message: `${req.method} ${req.url}` },
+      }),
+    );
+  });
+  try {
+    const { client, cleanup } = await setupClient(bridge.port);
+    try {
+      const result = await client.callTool({
+        name: "unreal_open_mcp_source_update",
+        arguments: {
+          path: "../Engine/Source/Runtime/Core/Private/Core.cpp",
+          content: "// should be rejected\n",
+          paths_hint: ["../Engine/Source/Runtime/Core/Private/Core.cpp"],
+        },
+      });
+      assert.equal(result.isError, true);
+      const body = bodyOf(result) as {
+        error: { code: string; message: string };
+      };
+      // The tool-specific error code rides through — an agent can branch on
+      // path_escapes_jail (rewrite the path inside Source/) rather than seeing
+      // an opaque transport error.
+      assert.equal(body.error.code, "path_escapes_jail");
+      assert.equal(
+        body.error.message,
+        "Path '../Engine/Source/Runtime/Core/Private/Core.cpp' escapes the project Source/ jail.",
+      );
+    } finally {
+      await cleanup();
+    }
+  } finally {
+    await bridge.close();
+  }
+});

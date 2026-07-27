@@ -142,7 +142,7 @@ Failure classification is the load-bearing contract — an agent (or a human rea
 Two layers guard the MCP ↔ bridge route. Use both when changing transport, discovery, or tool routing:
 
 1. **In-process integration tests** — `mcp-server/src/integration.test.ts` (`npm test`). Wires a real MCP SDK `Client` to `createServer()` over an in-memory transport, with the live router pointed at a `LiveClient` aimed at a loopback HTTP stub.
-2. **Scripted stdio smoke** — `mcp-server/scripts/*-parity-smoke.mjs` (`npm run smoke:p1` / `smoke:p2` / `smoke:p4` / `smoke:p6`). Spawns the built `dist/index.js` and drives `initialize → tools/list → tools/call …` over stdio. This catches packaging, transport, and instance-discovery wiring drift the in-process suite cannot see. Pass `--port <n> --project <path>` to run the healthy case against a live Unreal Editor (bridge-down, tool-error, and compile-failed cases require the stub harness and are skipped in `--port` mode).
+2. **Scripted stdio smoke** — `mcp-server/scripts/*-parity-smoke.mjs` (`npm run smoke:p1` / `smoke:p2` / `smoke:p4` / `smoke:p6` / `smoke:p7`). Spawns the built `dist/index.js` and drives `initialize → tools/list → tools/call …` over stdio. This catches packaging, transport, and instance-discovery wiring drift the in-process suite cannot see. Pass `--port <n> --project <path>` to run the healthy case against a live Unreal Editor (bridge-down, tool-error, and compile-failed cases require the stub harness and are skipped in `--port` mode).
 
 ### Ping route
 
@@ -220,6 +220,33 @@ stdio MCP client  →  unreal_open_mcp_blueprint_spawn  →  POST /tools/unreal_
 | `not_compiled` ignored by an agent | tool-description regression (`blueprint-spawn.ts` must point at `blueprint_compile`) |
 | `spawn_failed` under `-nullrhi` | bridge spawn handler used the viewport-aware editor subsystem instead of `UWorld::SpawnActor` (headless-safe path) |
 | Live-editor spawn null after compile | bridge spawn handler resolved a stale `GeneratedClass`; re-run `blueprint_compile` |
+
+### Source compile-loop route (`source_update` + `source_compile`)
+
+```
+stdio MCP client  →  unreal_open_mcp_source_update  →  POST /tools/unreal_open_mcp_source_update
+                  →  {ok, result, error} envelope  →  unwrapped result body
+                  →  unreal_open_mcp_source_compile  →  POST /tools/unreal_open_mcp_source_compile
+                  →  structured UBT / Live-Coding diagnostic report
+```
+
+`source_update` + `source_compile` close the C++ edit loop and are the smoke default for the Source family because they exercise the full mutate → gate → compile path. Both are mutators, so the tools/call args carry a `paths_hint` (Source-relative). Five cases are pinned: healthy update (the INNER `{path, mode, bytes_written, lines_written}` write identity survives the round-trip verbatim), healthy compile (the clean UBT report `{method:'ubt', success:true, compile_clean:true, error_count:0, diagnostics:[]}` survives verbatim), bridge-down (`bridge_offline` with the instance-lock hint), tool-error (`path_escapes_jail` — the P7.1 Source/ jail rejection, the structured code an agent branches on to rewrite the path inside `Source/`), and **compile-failed = data** — `source_compile` returns `success:false` + `compile_clean:false` on an `ok:true` envelope, so MCP `isError` stays `false` and the `diagnostics[]` ride through as data (the same contract `blueprint_compile` rides on, pinned at the MCP boundary for the C++ loop). Stdio smoke: `mcp-server/scripts/p7-parity-smoke.mjs`. Transport failure codes match the typed-tool table; tool-specific codes for `source_update` include `path_escapes_jail` / `file_not_found` / `invalid_line_range` / `write_failed` / `missing_parameter` / `invalid_parameter`, and for `source_compile` include `invalid_parameter` / `ubt_not_found` / `ubt_launch_failed`.
+
+`success` (process return 0) is SPLIT from `compile_clean` (zero compiler errors): a loaded editor holds its module DLL, so a UBT relink fails to write it (`success:false`) even when the compile stage was clean (`compile_clean:true`). Compiler errors are emitted before the link stage, so they are unaffected by the lock and the AI loop keys off them. Treat `success:false` + `compile_clean:true` as the known/expected locked-DLL case, NOT a code bug.
+
+When the smoke (or a real compile) fails, the code / symptom points at the owner area:
+
+| Code / symptom | Likely cause | Owner area |
+|---|---|---|
+| `bridge_offline` | Editor down / wrong port / stale instance lock | Instance discovery + lock (same owner as the `/ping` path) |
+| `path_escapes_jail` | Agent passed `../` or an absolute path outside the project `Source/` | Source/ jail resolver (`ResolveJailedPath`) |
+| `module_not_found` | Wrong module name / Blueprint-only project (no `Source/`) | source-list / create-class handler |
+| `ubt_not_found` / `ubt_launch_failed` | Engine path wrong / host platform UBT layout | `source_compile` UBT launcher |
+| `isError:true` on a `success:false` compile | envelope contract regression (a failed compile is data, not a transport error) | `live-client` / bridge compile handler |
+| `success:false` + `compile_clean:true` | Compiler clean but UBT relink failed (editor holds the module DLL) | expected — `source_compile` docs |
+| `success:false` + populated `diagnostics[]` | Real C++ errors — fix via `source_update` and recompile | the C++ edit loop |
+| Live Coding `InProgress` / empty `diagnostics` | LC coarse path (Windows-only) did not surface diagnostics | force `use_live_coding:false` for a deterministic UBT run |
+| `paths_hint_required` | Mutator called without Source-relative hints | gate policy + source tool docs |
 
 ## Versioning
 

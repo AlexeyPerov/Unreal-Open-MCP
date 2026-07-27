@@ -296,6 +296,7 @@ test("integration: tools/list advertises unreal_open_mcp_ping", async () => {
       "unreal_open_mcp_source_create_class",
       "unreal_open_mcp_source_update",
       "unreal_open_mcp_source_delete",
+      "unreal_open_mcp_source_compile",
     ]);
   } finally {
     await cleanup();

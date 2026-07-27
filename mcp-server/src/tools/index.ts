@@ -197,6 +197,23 @@ import { sourceList } from "./source-list.js";
 import { sourceCreateClass } from "./source-create-class.js";
 import { sourceUpdate } from "./source-update.js";
 import { sourceDelete } from "./source-delete.js";
+// P7.3 — Source compile (source_compile). Mutating (default gate Enforce;
+// paths_hint required). The AI feedback loop for C++: prefers Live Coding
+// (interactive editor + LC live + Windows host) to patch the running module
+// DLL in place, otherwise invokes UnrealBuildTool on the project's Editor
+// target and parses MSVC + clang stdout/stderr into a structured
+// {file,line,severity,message}[] report via the bridge's ParseDiagnostics
+// (exported so the Automation spec drives it with canned fixtures). success
+// (return_code==0) is SPLIT from compile_clean (zero compiler errors) — a
+// loaded editor holds its module DLL, so a UBT relink fails (success:false)
+// even when the compile stage was clean (compile_clean:true); key off
+// compile_clean + diagnostics. A FAILED compile is a NORMAL result (ok:true +
+// success:false + compile_clean:false + populated diagnostics[]) — NOT a
+// transport failure, mirroring P6.5 blueprint_compile's failed-compile-as-data
+// contract. Only tool-level errors (UBT missing, invalid identifier token, UBT
+// launch failure, malformed body) map to ok:false. Closes the C++ edit loop
+// (edit -> compile -> read diagnostics -> fix -> recompile).
+import { sourceCompile } from "./source-compile.js";
 
 // Tool registry. P1.7 registers the first real tool — `unreal_open_mcp_ping` —
 // which the MCP server routes to the bridge's `GET /ping`. Each subsequent tool
@@ -341,4 +358,5 @@ export const ALL_TOOLS: Tool[] = [
   sourceCreateClass,
   sourceUpdate,
   sourceDelete,
+  sourceCompile,
 ];

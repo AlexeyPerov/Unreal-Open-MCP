@@ -5,13 +5,16 @@ import { sourceList } from "./source-list.js";
 import { sourceCreateClass } from "./source-create-class.js";
 import { sourceUpdate } from "./source-update.js";
 import { sourceDelete } from "./source-delete.js";
+import { sourceCompile } from "./source-compile.js";
 import { ALL_TOOLS } from "./index.js";
 
-// P7.1 + P7.2 acceptance: the source read/list family is read-only (no
+// P7.1 + P7.2 + P7.3 acceptance: the source read/list family is read-only (no
 // paths_hint / gate), while the create/update/delete family is mutating
-// (paths_hint required + gate enforce/warn/off). The catalog surface advertised
-// via tools/list must expose all five under the unreal_open_mcp_ prefix and
-// document the jail + structured error codes each tool surfaces.
+// (paths_hint required + gate enforce/warn/off), and source_compile is the
+// mutating AI-feedback-loop tool that closes the C++ edit loop. The catalog
+// surface advertised via tools/list must expose all six under the
+// unreal_open_mcp_ prefix and document the jail + structured error codes each
+// tool surfaces.
 
 // Shared schema shape helpers.
 type ToolSchema = {
@@ -177,4 +180,50 @@ test("source_delete is registered + mutating + destructive (paths_hint required 
   assert.match(desc, /invalid_parameter/);
   // The not-undoable warning — a destructive tool must say so.
   assert.match(desc, /not undoable|NOT undoable/i);
+});
+
+test("source_compile is registered + mutating (paths_hint required + gate) + documents the AI loop", () => {
+  assert.equal(sourceCompile.name, "unreal_open_mcp_source_compile");
+  assert.ok(
+    ALL_TOOLS.some((t) => t.name === "unreal_open_mcp_source_compile"),
+    "registered",
+  );
+  const schema = sourceCompile.inputSchema as unknown as ToolSchema;
+  assert.equal(schema.type, "object");
+  mutatingGateProps(schema);
+  // path is NOT required for compile — only paths_hint is (no per-file target).
+  assert.ok(!schema.properties.path, "no path arg on compile");
+  assert.ok(schema.properties.target, "target arg");
+  assert.ok(schema.properties.configuration, "configuration arg");
+  assert.ok(schema.properties.platform, "platform arg");
+  assert.ok(schema.properties.use_live_coding, "use_live_coding arg");
+  assert.equal(schema.properties.use_live_coding?.type, "boolean");
+  assert.equal(schema.properties.use_live_coding?.default, true);
+  assert.equal(schema.properties.configuration?.default, "Development");
+  assert.equal(schema.additionalProperties, false);
+  const desc = sourceCompile.description ?? "";
+  assert.match(desc, /mutating/i);
+  // Live Coding vs UBT — the dual path is documented.
+  assert.match(desc, /Live Coding/i);
+  assert.match(desc, /UnrealBuildTool|UBT/i);
+  // The failed-compile-as-data contract — the spine of the AI loop.
+  assert.match(desc, /ok:true/i);
+  assert.match(desc, /success:false/i);
+  assert.match(desc, /compile_clean/i);
+  // Structured error codes for the tool-level failures.
+  assert.match(desc, /ubt_not_found/);
+  assert.match(desc, /ubt_launch_failed/);
+  assert.match(desc, /invalid_parameter/);
+  // The result shape + diagnostics array.
+  assert.match(desc, /diagnostics\[\]/i);
+  assert.match(desc, /return_code/);
+  assert.match(desc, /error_count/);
+  assert.match(desc, /duration_seconds/);
+  assert.match(desc, /output_tail/);
+  // Anti-injection guard for target/platform/configuration is documented.
+  assert.match(desc, /identifier/i);
+  // The split success / compile_clean contract — the AI loop keys off
+  // compile_clean, NOT success (locked-DLL relink failure case).
+  assert.match(desc, /SPLIT/i);
+  assert.match(desc, /key off compile_clean/i);
 });

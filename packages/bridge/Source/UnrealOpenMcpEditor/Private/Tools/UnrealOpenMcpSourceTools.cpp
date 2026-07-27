@@ -8,10 +8,30 @@
 #include "HAL/FileManager.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
+// P7.3 — diagnostic parser uses FRegexPattern / FRegexMatcher (the
+// Internationalization module's regex, available without an extra Build.cs dep
+// because it is pulled in transitively by Core/Engine). MSVC + clang lines.
+#include "Internationalization/Regex.h"
+// P7.3 — UBT launch (FPlatformProcess::ExecProcess + GetBinariesSubdirectory)
+// and timing (FPlatformTime::Seconds).
+#include "HAL/PlatformProcess.h"
+#include "HAL/PlatformTime.h"
 
 #include "Dom/JsonObject.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
+
+// P7.3 — Live Coding is an interactive-only fast path that patches the running
+// editor's module DLL in place (the only way to apply C++ changes without a
+// full relink while the editor holds the DLL). The module is gated behind a
+// compile-time define so a host without the LiveCoding module still builds the
+// bridge — the source_compile handler falls through to the UBT path when LC is
+// absent at compile time OR unavailable at runtime. Mirrors the Unreal-MCP
+// behavior reference's WITH_UNREAL_MCP_LIVE_CODING guard pattern.
+#if WITH_UNREAL_MCP_LIVE_CODING
+#include "ILiveCodingModule.h"
+#include "Modules/ModuleManager.h"
+#endif
 
 namespace FUnrealOpenMcpSourceTools
 {
@@ -102,6 +122,66 @@ namespace FUnrealOpenMcpSourceTools
 
 		Out.bOk = true;
 		return Out;
+	}
+
+	// ---------------------------------------------------------------------------
+	// P7.3 — compiler-diagnostic parser
+	// ---------------------------------------------------------------------------
+
+	void ParseDiagnostics(const FString& BuildOutput, TArray<FSourceDiagnostic>& OutDiagnostics)
+	{
+		OutDiagnostics.Reset();
+
+		TArray<FString> Lines;
+		BuildOutput.ParseIntoArrayLines(Lines, /*InCullEmpty*/ false);
+
+		// MSVC:  C:\path\File.cpp(42): error C2065: 'Foo': undeclared identifier
+		//        File.cpp(42,5): warning C4101: ...   (newer toolchains may add a column)
+		//        File.cpp(1): fatal error C1083: ...   (a missing/typo'd #include — the optional
+		//        "fatal " prefix is consumed and the severity normalized to "error")
+		const FRegexPattern MsvcPattern(TEXT("^\\s*(.+?)\\((\\d+)(?:,\\d+)?\\)\\s*:\\s*(?:fatal\\s+)?(error|warning)\\s+(.+?)\\s*$"));
+		// clang: File.cpp:42:5: error: ...   (also "File.cpp:1:10: fatal error: 'X.h' file not found")
+		const FRegexPattern ClangPattern(TEXT("^\\s*(.+?):(\\d+):(?:\\d+:)?\\s*(?:fatal\\s+)?(error|warning):\\s*(.+?)\\s*$"));
+
+		TSet<FString> Seen;
+		auto AddMatch = [&OutDiagnostics, &Seen](const FString& File, const FString& LineStr, const FString& Sev, const FString& Msg)
+		{
+			FSourceDiagnostic D;
+			D.File = File;
+			D.File.TrimStartAndEndInline();
+			D.Line = FCString::Atoi(*LineStr);
+			D.Severity = Sev.ToLower();
+			D.Message = Msg;
+			D.Message.TrimStartAndEndInline();
+			// Dedupe key — a UBT run often emits the same diagnostic on stdout
+			// AND stderr, and the same error from a header surfaces once per
+			// including cpp. Collapse exact (file,line,severity,message) dupes.
+			const FString Key = FString::Printf(TEXT("%s|%d|%s|%s"), *D.File, D.Line, *D.Severity, *D.Message);
+			if (!Seen.Contains(Key))
+			{
+				Seen.Add(Key);
+				OutDiagnostics.Add(MoveTemp(D));
+			}
+		};
+
+		for (const FString& Line : Lines)
+		{
+			if (Line.IsEmpty())
+			{
+				continue;
+			}
+			FRegexMatcher Msvc(MsvcPattern, Line);
+			if (Msvc.FindNext())
+			{
+				AddMatch(Msvc.GetCaptureGroup(1), Msvc.GetCaptureGroup(2), Msvc.GetCaptureGroup(3), Msvc.GetCaptureGroup(4));
+				continue;
+			}
+			FRegexMatcher Clang(ClangPattern, Line);
+			if (Clang.FindNext())
+			{
+				AddMatch(Clang.GetCaptureGroup(1), Clang.GetCaptureGroup(2), Clang.GetCaptureGroup(3), Clang.GetCaptureGroup(4));
+			}
+		}
 	}
 
 	// ---------------------------------------------------------------------------
@@ -938,6 +1018,267 @@ namespace FUnrealOpenMcpSourceTools
 				TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
 				Result->SetStringField(TEXT("path"), Jailed.RelPath);
 				Result->SetBoolField(TEXT("deleted"), true);
+				return FUnrealOpenMcpToolDispatchResult::Ok(
+					WriteJson(MakeShared<FJsonValueObject>(Result)));
+			},
+			FUnrealOpenMcpToolMetadata::Mutating());
+
+		// =========================================================================
+		// unreal_open_mcp_source_compile — compile the project's C++ and return a
+		// STRUCTURED diagnostic report (the AI feedback loop).
+		// =========================================================================
+		//
+		// Args: `target` (default `<Project>Editor`), `configuration` (default
+		// `Development`), `platform` (default the host binaries subdir —
+		// `FPlatformProcess::GetBinariesSubdirectory()`), `use_live_coding`
+		// (default true). Mutating: gate Enforce, `paths_hint` required (the
+		// dispatcher enforces the hint BEFORE this handler runs).
+		//
+		// Two paths:
+		//   1. Live Coding (interactive editor + LC session live + use_live_coding
+		//      true + WITH_UNREAL_MCP_LIVE_CODING compile-time guard). Patches the
+		//      running module DLL in place — no relink. Returns a COARSE result
+		//      enum (Success / NoChanges / Failure / ...) with NO per-diagnostic
+		//      rows. On Failure or NotStarted, falls through to UBT so the agent
+		//      still gets a structured report.
+		//   2. UBT (the fallback + forced path). Resolves
+		//      UnrealBuildTool.exe / RunUBT.sh, validates target/platform/
+		//      configuration as identifier-only tokens (no arg injection), runs
+		//      ExecProcess with `-project=<uproject> -WaitMutex`, parses the
+		//      combined stdout+stderr with ParseDiagnostics, returns the full
+		//      {diagnostics[], counts, return_code, ...} report.
+		//
+		// A FAILED compile is a NORMAL, expected result, NOT a transport failure.
+		// The envelope stays ok:true and the result carries success:false +
+		// compile_clean:false + a populated diagnostics[] so an agent reads the
+		// rows, fixes via source_update / source_create_class, and recompiles.
+		// Only TOOL-LEVEL errors (UBT binary missing, invalid identifier, launch
+		// failure, malformed body) map to ok:false. This mirrors P6.5
+		// blueprint_compile's failed-compile-as-data contract.
+		//
+		// success (return_code == 0) vs compile_clean (zero compiler errors) is
+		// split on purpose: a loaded editor holds its module DLL, so a UBT relink
+		// fails to write it (return_code != 0, success:false). But compiler errors
+		// are emitted BEFORE the link stage, so a clean compile is
+		// compile_clean:true even when success:false. The AI loop keys off
+		// compile_clean + diagnostics.
+		//
+		// Result (UBT): { method:"ubt", target, configuration, platform,
+		//   return_code, success, compile_clean, error_count, warning_count,
+		//   duration_seconds, diagnostics:[{file,line,severity,message}],
+		//   output_tail }. Result (LC): { method:"live_coding", result, success,
+		//   compile_clean, error_count, warning_count, diagnostics:[] }.
+		// Structured errors: invalid_parameter, ubt_not_found, ubt_launch_failed.
+		Registry.Register(
+			TEXT("unreal_open_mcp_source_compile"),
+			[](const FString& Body) -> FUnrealOpenMcpToolDispatchResult
+			{
+				TSharedPtr<FJsonObject> Args = ParseBody(Body);
+				if (!Args.IsValid())
+				{
+					return FUnrealOpenMcpToolDispatchResult::Fail(
+						TEXT("invalid_parameter"),
+						TEXT("Request body was not a valid JSON object."));
+				}
+
+				const bool bUseLiveCoding = Args->HasTypedField<EJson::Bool>(TEXT("use_live_coding"))
+					? Args->GetBoolField(TEXT("use_live_coding")) : true;
+
+				const FString ProjectName = FApp::GetProjectName();
+				FString TargetName = Args->HasTypedField<EJson::String>(TEXT("target"))
+					? Args->GetStringField(TEXT("target")) : FString();
+				if (TargetName.IsEmpty())
+				{
+					TargetName = ProjectName + TEXT("Editor");
+				}
+
+#if WITH_UNREAL_MCP_LIVE_CODING
+				// Live Coding patches the RUNNING editor in place — the only way to
+				// apply C++ changes without relinking the locked module DLL. Only
+				// viable interactively (the console must be up); headless /
+				// unattended runs (Automation, -game) fall through to UBT.
+				if (bUseLiveCoding && !FApp::IsUnattended())
+				{
+					ILiveCodingModule* LiveCoding = FModuleManager::GetModulePtr<ILiveCodingModule>(FName(LIVE_CODING_MODULE_NAME));
+					if (LiveCoding
+						&& LiveCoding->IsEnabledForSession()
+						&& LiveCoding->HasStarted()
+						&& !LiveCoding->IsCompiling())
+					{
+						ELiveCodingCompileResult Result = ELiveCodingCompileResult::NotStarted;
+						const bool bStarted = LiveCoding->Compile(ELiveCodingCompileFlags::WaitForCompletion, &Result);
+						const bool bLcSuccess = bStarted
+							&& (Result == ELiveCodingCompileResult::Success
+								|| Result == ELiveCodingCompileResult::NoChanges);
+
+						const TCHAR* ResultText = TEXT("Unknown");
+						switch (Result)
+						{
+							case ELiveCodingCompileResult::Success:           ResultText = TEXT("Success"); break;
+							case ELiveCodingCompileResult::NoChanges:         ResultText = TEXT("NoChanges"); break;
+							case ELiveCodingCompileResult::InProgress:        ResultText = TEXT("InProgress"); break;
+							case ELiveCodingCompileResult::CompileStillActive: ResultText = TEXT("CompileStillActive"); break;
+							case ELiveCodingCompileResult::NotStarted:        ResultText = TEXT("NotStarted"); break;
+							case ELiveCodingCompileResult::Failure:           ResultText = TEXT("Failure"); break;
+							case ELiveCodingCompileResult::Cancelled:         ResultText = TEXT("Cancelled"); break;
+						}
+
+						TSharedRef<FJsonObject> LcResult = MakeShared<FJsonObject>();
+						LcResult->SetStringField(TEXT("method"), TEXT("live_coding"));
+						LcResult->SetStringField(TEXT("result"), ResultText);
+						LcResult->SetBoolField(TEXT("success"), bLcSuccess);
+						LcResult->SetBoolField(TEXT("compile_clean"), bLcSuccess);
+						// Live Coding surfaces a coarse enum, not per-diagnostic
+						// rows; on a non-success result we report a single coarse
+						// error_count so an agent's "any errors?" branch still
+						// fires. The UBT path carries the full report.
+						LcResult->SetNumberField(TEXT("error_count"), bLcSuccess ? 0 : 1);
+						LcResult->SetNumberField(TEXT("warning_count"), 0);
+						LcResult->SetArrayField(TEXT("diagnostics"), {});
+						// Fall through to UBT on a hard Failure OR when Compile()
+						// never started (bStarted == false, leaving Result at its
+						// NotStarted init): in both cases the coarse enum carries
+						// no actionable diagnostics, and the agent needs the full
+						// {file,line,severity,message} report to self-correct.
+						if (bStarted && Result != ELiveCodingCompileResult::Failure)
+						{
+							return FUnrealOpenMcpToolDispatchResult::Ok(
+								WriteJson(MakeShared<FJsonValueObject>(LcResult)));
+						}
+					}
+				}
+#endif
+
+				// UBT path ----------------------------------------------------------------
+				FString Platform = Args->HasTypedField<EJson::String>(TEXT("platform"))
+					? Args->GetStringField(TEXT("platform")) : FString();
+				if (Platform.IsEmpty())
+				{
+					Platform = FPlatformProcess::GetBinariesSubdirectory();
+				}
+				FString Configuration = Args->HasTypedField<EJson::String>(TEXT("configuration"))
+					? Args->GetStringField(TEXT("configuration")) : FString();
+				if (Configuration.IsEmpty())
+				{
+					Configuration = TEXT("Development");
+				}
+
+				// target / platform / configuration are pasted verbatim into the UBT
+				// command line, so each must be a single identifier-like token (no
+				// whitespace, quotes, or dash-prefixed flags) — else a value like
+				// "MyGameEditor Win64 Development -Clean" would inject arbitrary UBT
+				// arguments (e.g. -Clean wipes Binaries/Intermediate). Mirrors the
+				// IsValidIdentifier used for generated class / module names. All
+				// real targets / platforms / configs are bare identifiers.
+				if (!IsValidIdentifier(TargetName))
+				{
+					return FUnrealOpenMcpToolDispatchResult::Fail(
+						TEXT("invalid_parameter"),
+						FString::Printf(TEXT("'%s' is not a valid build target name (identifier-only; no whitespace / flags)."), *TargetName));
+				}
+				if (!IsValidIdentifier(Platform))
+				{
+					return FUnrealOpenMcpToolDispatchResult::Fail(
+						TEXT("invalid_parameter"),
+						FString::Printf(TEXT("'%s' is not a valid build platform (identifier-only; no whitespace / flags)."), *Platform));
+				}
+				if (!IsValidIdentifier(Configuration))
+				{
+					return FUnrealOpenMcpToolDispatchResult::Fail(
+						TEXT("invalid_parameter"),
+						FString::Printf(TEXT("'%s' is not a valid build configuration (identifier-only; no whitespace / flags)."), *Configuration));
+				}
+
+				FString UProject;
+				if (FPaths::IsProjectFilePathSet())
+				{
+					UProject = FPaths::ConvertRelativePathToFull(FPaths::GetProjectFilePath());
+				}
+				else
+				{
+					UProject = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir() / (ProjectName + TEXT(".uproject")));
+				}
+
+#if PLATFORM_WINDOWS
+				const FString Ubt = FPaths::ConvertRelativePathToFull(
+					FPaths::EngineDir() / TEXT("Binaries/DotNET/UnrealBuildTool/UnrealBuildTool.exe"));
+#else
+				const FString Ubt = FPaths::ConvertRelativePathToFull(
+					FPaths::EngineDir() / TEXT("Build/BatchFiles/RunUBT.sh"));
+#endif
+				if (!FPaths::FileExists(Ubt))
+				{
+					return FUnrealOpenMcpToolDispatchResult::Fail(
+						TEXT("ubt_not_found"),
+						FString::Printf(TEXT("UnrealBuildTool not found at '%s'."), *Ubt));
+				}
+
+				const FString Params = FString::Printf(TEXT("%s %s %s -project=\"%s\" -WaitMutex"),
+					*TargetName, *Platform, *Configuration, *UProject);
+
+				int32 ReturnCode = -1;
+				FString StdOut;
+				FString StdErr;
+				const double Start = FPlatformTime::Seconds();
+				const bool bLaunched = FPlatformProcess::ExecProcess(*Ubt, *Params, &ReturnCode, &StdOut, &StdErr);
+				const double Elapsed = FPlatformTime::Seconds() - Start;
+				if (!bLaunched)
+				{
+					return FUnrealOpenMcpToolDispatchResult::Fail(
+						TEXT("ubt_launch_failed"),
+						FString::Printf(TEXT("Failed to launch UnrealBuildTool '%s'."), *Ubt));
+				}
+
+				const FString Combined = StdOut + TEXT("\n") + StdErr;
+				TArray<FSourceDiagnostic> Diagnostics;
+				ParseDiagnostics(Combined, Diagnostics);
+
+				int32 ErrorCount = 0;
+				int32 WarningCount = 0;
+				TArray<TSharedPtr<FJsonValue>> DiagJson;
+				DiagJson.Reserve(Diagnostics.Num());
+				for (const FSourceDiagnostic& Diag : Diagnostics)
+				{
+					if (Diag.Severity == TEXT("error"))
+					{
+						++ErrorCount;
+					}
+					else if (Diag.Severity == TEXT("warning"))
+					{
+						++WarningCount;
+					}
+					TSharedRef<FJsonObject> Entry = MakeShared<FJsonObject>();
+					Entry->SetStringField(TEXT("file"), Diag.File);
+					Entry->SetNumberField(TEXT("line"), Diag.Line);
+					Entry->SetStringField(TEXT("severity"), Diag.Severity);
+					Entry->SetStringField(TEXT("message"), Diag.Message);
+					DiagJson.Add(MakeShared<FJsonValueObject>(Entry));
+				}
+
+				// success (process return 0) is split from compile_clean (zero
+				// compiler errors): the editor holds the module DLL, so a relink
+				// fails (success:false) even when the compile stage was clean
+				// (compile_clean:true). Diagnostics are emitted before link.
+				const bool bSuccess = (ReturnCode == 0);
+				const bool bCompileClean = (ErrorCount == 0);
+
+				TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+				Result->SetStringField(TEXT("method"), TEXT("ubt"));
+				Result->SetStringField(TEXT("target"), TargetName);
+				Result->SetStringField(TEXT("configuration"), Configuration);
+				Result->SetStringField(TEXT("platform"), Platform);
+				Result->SetNumberField(TEXT("return_code"), ReturnCode);
+				Result->SetBoolField(TEXT("success"), bSuccess);
+				Result->SetBoolField(TEXT("compile_clean"), bCompileClean);
+				Result->SetNumberField(TEXT("error_count"), ErrorCount);
+				Result->SetNumberField(TEXT("warning_count"), WarningCount);
+				Result->SetNumberField(TEXT("duration_seconds"), Elapsed);
+				Result->SetArrayField(TEXT("diagnostics"), DiagJson);
+				// A bounded tail of the raw output aids debugging when no
+				// diagnostic matched (e.g. a link failure, or a UBT configuration
+				// error) without flooding the response. 4000 chars mirrors the
+				// Unreal-MCP behavior reference.
+				Result->SetStringField(TEXT("output_tail"), Combined.Right(4000));
 				return FUnrealOpenMcpToolDispatchResult::Ok(
 					WriteJson(MakeShared<FJsonValueObject>(Result)));
 			},

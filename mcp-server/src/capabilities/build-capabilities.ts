@@ -179,10 +179,14 @@ const TOOL_CATEGORY: Record<string, string> = {
   // under <Project>/Source/ via the P7.1 jail helpers. create_class scaffolds a
   // header + cpp from parent-kind templates; update is full-file replace or
   // line-range splice; delete removes a single file. All three JAILED to
-  // Source/ (escapes never write); no compile here (P7.3 lands it).
+  // Source/ (escapes never write); no compile here — that is source_compile.
+  // P7.3 — source_compile: the AI feedback loop for C++ (Live Coding prefer +
+  // UBT fallback, structured {file,line,severity,message} diagnostics, failed-
+  // compile-as-data on an ok:true envelope). Mutating, gate Enforce.
   unreal_open_mcp_source_create_class: "source",
   unreal_open_mcp_source_update: "source",
   unreal_open_mcp_source_delete: "source",
+  unreal_open_mcp_source_compile: "source",
 };
 
 function categoryFor(toolName: string): string {

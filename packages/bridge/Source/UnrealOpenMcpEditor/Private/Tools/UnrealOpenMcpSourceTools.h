@@ -1,4 +1,4 @@
-// Source tool family for the bridge tool surface (P7.1 + P7.2).
+// Source tool family for the bridge tool surface (P7.1 + P7.2 + P7.3).
 //
 // P7.1 — two read-only tools that give an agent a first-class, JAILED way to
 // inspect project C++ under <Project>/Source/:
@@ -13,7 +13,7 @@
 // (that lands in P8).
 //
 // P7.2 — three JAILED mutating tools that scaffold / edit / remove source files
-// so the compile loop has something to mutate (the actual compile lands in P7.3):
+// so the compile loop has something to mutate:
 //   - `unreal_open_mcp_source_create_class` — scaffold a header + cpp from
 //     parent-kind templates (UObject / Actor / ActorComponent / None) into an
 //     existing module folder. Derives the U/A/F prefix, emits the MODULE_API
@@ -28,10 +28,23 @@
 // enforces `paths_hint` BEFORE the handler runs, so the handlers themselves do
 // not read it). Writes only touch the project `Source/` jail.
 //
-// The jail helpers (GetProjectSourceRoot, ResolveJailedPath) are exported here
-// (separate from the Register entry point) so the Automation specs in the
-// sibling UnrealOpenMcpEditorTests module can exercise them directly, fast and
-// deterministically, with an injectable temp JailRoot and no live editor.
+// P7.3 — `unreal_open_mcp_source_compile`, the AI feedback loop for C++. It
+// prefers Live Coding when the editor is interactive + Live Coding is live,
+// otherwise invokes UnrealBuildTool on the project's Editor target and parses
+// MSVC + clang stdout/stderr into a STRUCTURED `{file,line,severity,message}`
+// report. `success` (process return 0) is reported SEPARATELY from
+// `compile_clean` (zero compiler errors): a loaded editor holds its module DLL,
+// so a UBT relink fails to write it — but compiler errors are emitted BEFORE
+// the link stage, so they are unaffected by the lock and the AI loop keys off
+// them. A failed compile is a NORMAL result (`ok:true` + result fields), NOT a
+// transport failure. Mutating (gate Enforce, `paths_hint` required).
+//
+// The jail helpers (GetProjectSourceRoot, ResolveJailedPath) and the diagnostic
+// parser (FSourceDiagnostic, ParseDiagnostics) are exported here (separate from
+// the Register entry point) so the Automation specs in the sibling
+// UnrealOpenMcpEditorTests module can exercise them directly, fast and
+// deterministically, with an injectable temp JailRoot / canned build output and
+// no live editor / no UBT invocation.
 //
 // Adapted from Unity Open MCP's script-read (line slice + max_lines + project-
 // root refusal) at adapt fidelity: the file read shape is Unity's, the jail is
@@ -49,11 +62,13 @@
 class FUnrealOpenMcpToolRegistry;
 
 /**
- * The C++ source tool family (P7.1 read/list + P7.2 create/update/delete).
+ * The C++ source tool family (P7.1 read/list + P7.2 create/update/delete +
+ * P7.3 compile).
  *
  * Read-only inspection + inventory of project source files under
  * <Project>/Source/, plus JAILED mutating CRUD so an agent can scaffold and
- * edit C++ for the compile loop. No compile in P7.2 — that lands in P7.3.
+ * edit C++ for the compile loop, plus the compile tool itself that closes the
+ * AI feedback loop with a structured diagnostic report.
  */
 namespace FUnrealOpenMcpSourceTools
 {
@@ -86,12 +101,51 @@ namespace FUnrealOpenMcpSourceTools
 	UNREALOPENMCPEDITOR_API FJailedPath ResolveJailedPath(const FString& JailRoot, const FString& InPath);
 
 	/**
+	 * A single parsed compiler diagnostic row from UBT stdout/stderr. The fields
+	 * map 1:1 to the JSON `diagnostics[]` entries `source_compile` returns.
+	 * Exported so the Automation spec can drive the parser directly with canned
+	 * MSVC / clang fixtures — no UBT invocation, no live editor.
+	 */
+	struct UNREALOPENMCPEDITOR_API FSourceDiagnostic
+	{
+		/** Source file path as emitted by the compiler (verbatim — backslashes
+		 *  on MSVC, forward slashes on clang). Not jail-normalized. */
+		FString File;
+		/** 1-based line number (0 if unparsed). */
+		int32 Line = 0;
+		/** Lower-case "error" or "warning" (a `fatal error` is normalized to
+		 *  "error" so the AI loop keys off severity without a third bucket). */
+		FString Severity;
+		/** Compiler message text (trimmed). Carries the diagnostic code, e.g.
+		 *  "C2065: 'Foo': undeclared identifier". */
+		FString Message;
+	};
+
+	/**
+	 * Parse MSVC + clang diagnostic lines out of a UBT build output blob into
+	 * @p OutDiagnostics. Recognizes:
+	 *   - MSVC  `file(line): error Cxxxx: msg`
+	 *          `file(line,col): warning Cxxxx: msg`
+	 *          `file(line): fatal error Cxxxx: msg` (severity normalized to
+	 *           "error")
+	 *   - clang `file:line:col: error: msg`
+	 *          `file:line:col: fatal error: msg` (severity normalized to
+	 *           "error")
+	 * Deduplicates by (file|line|severity|message). Bare `LINK : fatal` rows
+	 * are NOT emitted (they are link-stage, not compiler-stage, and the locked-
+	 * DLL relink failure is already modeled by `success:false` + `compile_clean:
+	 * true`). Exported for deterministic Automation fixtures.
+	 */
+	UNREALOPENMCPEDITOR_API void ParseDiagnostics(const FString& BuildOutput, TArray<FSourceDiagnostic>& OutDiagnostics);
+
+	/**
 	 * Register the source family with @p Registry. Registers:
 	 *   `unreal_open_mcp_source_read` (read-only),
 	 *   `unreal_open_mcp_source_list` (read-only),
 	 *   `unreal_open_mcp_source_create_class` (mutating; gate Enforce),
 	 *   `unreal_open_mcp_source_update` (mutating; gate Enforce),
-	 *   `unreal_open_mcp_source_delete` (mutating; gate Enforce).
+	 *   `unreal_open_mcp_source_delete` (mutating; gate Enforce),
+	 *   `unreal_open_mcp_source_compile` (mutating; gate Enforce).
 	 * First-registration-wins: a duplicate name is ignored by the registry.
 	 */
 	void Register(FUnrealOpenMcpToolRegistry& Registry);

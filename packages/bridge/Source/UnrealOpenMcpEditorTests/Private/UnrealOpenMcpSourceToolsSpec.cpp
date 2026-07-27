@@ -1,6 +1,7 @@
 // unreal_open_mcp_source_read / _list (P7.1) + _create_class / _update /
-// _delete (P7.2) Automation specs, plus the ResolveJailedPath /
-// GetProjectSourceRoot jail unit contract.
+// _delete (P7.2) + _compile (P7.3) Automation specs, plus the
+// ResolveJailedPath / GetProjectSourceRoot jail unit contract and the
+// ParseDiagnostics compiler-output parser contract.
 //
 // The jail is the security-critical surface of the source family, so it gets a
 // dedicated fast + deterministic group that drives ResolveJailedPath directly
@@ -10,12 +11,31 @@
 // read/list round-trip real bytes without touching the host project tree. The
 // temp tree is removed in AfterEach so the working directory stays clean.
 //
-// Cases mirror the P7.1 + P7.2 plan verification tables:
+// ParseDiagnostics is the AI-feedback-loop-critical surface of source_compile,
+// so it gets its own fast + deterministic group that drives the parser directly
+// with CANNED MSVC + clang build-output blobs — no UBT invocation, no live
+// editor, no flakiness. The fixtures pin: MSVC + clang error/warning rows,
+// 'fatal error' normalization to 'error', the LINK-only exclusion (link-stage
+// failures are NOT compiler diagnostics), the duplicate collapse, and the
+// clean-output zero case.
+//
+// source_compile itself is NOT end-to-end tested here (it shells out to UBT,
+// which is a manual / project-with-real-UBT path) — only its ARG-VALIDATION
+// guards fire deterministically without a build (invalid target / platform /
+// configuration reject with invalid_parameter before any process launch). The
+// success/compile_clean envelope contract is pinned on the TS side
+// (source-tools.test.ts) because the bridge envelope mapping is what matters
+// for an agent; the C++ handler returns ok:true with success:false on a real
+// failed compile, which a TS integration test asserts.
+//
+// Cases mirror the P7.1 + P7.2 + P7.3 plan verification tables:
 //   - jail            — accept in-jail (relative + absolute-inside); reject
 //                       empty, `..` (single + deep), absolute-outside, ADS `:`.
-//   - registration    — all five tools present under the unreal_open_mcp_
+//   - registration    — all six tools present under the unreal_open_mcp_
 //                       prefix; the two read tools are read-only (gate Off),
-//                       the three mutators are mutating (gate Enforce).
+//                       the four mutators are mutating (gate Enforce).
+//   - diagnostics     — MSVC + clang parsing; 'fatal error' normalization;
+//                       LINK-only exclusion; duplicate collapse; clean output.
 //   - source_read     — result shape; missing_parameter; path_escapes_jail;
 //                       file_not_found; invalid_parameter.
 //   - source_list     — result shape; module_not_found; path_escapes_jail;
@@ -27,13 +47,9 @@
 //                       invalid_line_range; jail escape.
 //   - source_delete   — removes a file; refuses a directory; missing file;
 //                       jail escape.
-//
-// The create/update/delete handlers resolve against the PROJECT Source/ root
-// (GetProjectSourceRoot), NOT the injectable temp root, so the deterministic
-// cases exercise the GUARDS (identifier / parent / jail / existence) which fire
-// before any disk write. The full round-trip cases (write → verify on disk)
-// target the project Source/ tree — they create a uniquely-named module + class
-// so they are repeatable, and they clean up in AfterEach.
+//   - source_compile  — invalid target / platform / configuration reject with
+//                       invalid_parameter (no arg injection); malformed body
+//                       rejects; the handler is registered + mutating.
 #if WITH_DEV_AUTOMATION_TESTS
 
 #include "CoreMinimal.h"
@@ -209,7 +225,7 @@ void FUnrealOpenMcpSourceToolsSpec::Define()
 
 	Describe("registration", [this]()
 	{
-		It("registers all five source tools under the unreal_open_mcp_ prefix", [this]()
+		It("registers all six source tools under the unreal_open_mcp_ prefix", [this]()
 		{
 			FUnrealOpenMcpToolRegistry Registry;
 			FUnrealOpenMcpSourceTools::Register(Registry);
@@ -223,10 +239,12 @@ void FUnrealOpenMcpSourceToolsSpec::Define()
 				Registry.Contains(TEXT("unreal_open_mcp_source_update")));
 			TestTrue(TEXT("has source_delete"),
 				Registry.Contains(TEXT("unreal_open_mcp_source_delete")));
-			TestEqual(TEXT("exactly five tools"), Registry.Num(), 5);
+			TestTrue(TEXT("has source_compile"),
+				Registry.Contains(TEXT("unreal_open_mcp_source_compile")));
+			TestEqual(TEXT("exactly six tools"), Registry.Num(), 6);
 		});
 
-		It("classifies the two read tools read-only and the three mutators mutating (gate Enforce)", [this]()
+		It("classifies the two read tools read-only and the four mutators mutating (gate Enforce)", [this]()
 		{
 			FUnrealOpenMcpToolRegistry Registry;
 			FUnrealOpenMcpSourceTools::Register(Registry);
@@ -241,19 +259,116 @@ void FUnrealOpenMcpSourceToolsSpec::Define()
 			TestEqual(TEXT("list gate Off"),
 				ListMeta.DefaultGate, EUnrealOpenMcpGateMode::Off);
 
-			FUnrealOpenMcpToolMetadata CreateMeta, UpdateMeta, DeleteMeta;
+			FUnrealOpenMcpToolMetadata CreateMeta, UpdateMeta, DeleteMeta, CompileMeta;
 			Registry.TryGetMetadata(TEXT("unreal_open_mcp_source_create_class"), CreateMeta);
 			Registry.TryGetMetadata(TEXT("unreal_open_mcp_source_update"), UpdateMeta);
 			Registry.TryGetMetadata(TEXT("unreal_open_mcp_source_delete"), DeleteMeta);
+			Registry.TryGetMetadata(TEXT("unreal_open_mcp_source_compile"), CompileMeta);
 			TestTrue(TEXT("create mutating"), CreateMeta.bIsMutating);
 			TestTrue(TEXT("update mutating"), UpdateMeta.bIsMutating);
 			TestTrue(TEXT("delete mutating"), DeleteMeta.bIsMutating);
+			TestTrue(TEXT("compile mutating"), CompileMeta.bIsMutating);
 			TestEqual(TEXT("create gate Enforce"),
 				CreateMeta.DefaultGate, EUnrealOpenMcpGateMode::Enforce);
 			TestEqual(TEXT("update gate Enforce"),
 				UpdateMeta.DefaultGate, EUnrealOpenMcpGateMode::Enforce);
 			TestEqual(TEXT("delete gate Enforce"),
 				DeleteMeta.DefaultGate, EUnrealOpenMcpGateMode::Enforce);
+			TestEqual(TEXT("compile gate Enforce"),
+				CompileMeta.DefaultGate, EUnrealOpenMcpGateMode::Enforce);
+		});
+	});
+
+	Describe("ParseDiagnostics — compiler-output parser contract", [this]()
+	{
+		It("parses MSVC errors + warnings and EXCLUDES link failures", [this]()
+		{
+			// A LINK : fatal LNK row is link-stage, NOT a compiler diagnostic —
+			// the locked-DLL relink failure is already modeled by success:false +
+			// compile_clean:true, so it must NOT surface as a compiler row.
+			const FString Output =
+				TEXT("Building MyGameEditor...\n")
+				TEXT("C:\\proj\\Source\\MyGame\\MyActor.cpp(12): error C2065: 'Foo': undeclared identifier\n")
+				TEXT("C:\\proj\\Source\\MyGame\\MyActor.cpp(8): warning C4101: 'x': unreferenced local variable\n")
+				TEXT("LINK : fatal error LNK1104: cannot open file 'UnrealEditor-MyGame.dll'\n");
+
+			TArray<FUnrealOpenMcpSourceTools::FSourceDiagnostic> Diags;
+			FUnrealOpenMcpSourceTools::ParseDiagnostics(Output, Diags);
+
+			TestEqual(TEXT("two compiler diagnostics (LNK excluded)"), Diags.Num(), 2);
+			if (Diags.Num() == 2)
+			{
+				TestEqual(TEXT("error file"), Diags[0].File, FString(TEXT("C:\\proj\\Source\\MyGame\\MyActor.cpp")));
+				TestEqual(TEXT("error line"), Diags[0].Line, 12);
+				TestEqual(TEXT("error severity"), Diags[0].Severity, FString(TEXT("error")));
+				TestTrue(TEXT("error message carries code"), Diags[0].Message.Contains(TEXT("C2065")));
+				TestEqual(TEXT("warning severity"), Diags[1].Severity, FString(TEXT("warning")));
+				TestEqual(TEXT("warning line"), Diags[1].Line, 8);
+			}
+		});
+
+		It("parses clang-style diagnostics", [this]()
+		{
+			const FString Output = TEXT("/proj/Source/MyGame/MyActor.cpp:5:9: error: use of undeclared identifier 'Foo'\n");
+			TArray<FUnrealOpenMcpSourceTools::FSourceDiagnostic> Diags;
+			FUnrealOpenMcpSourceTools::ParseDiagnostics(Output, Diags);
+			TestEqual(TEXT("one diagnostic"), Diags.Num(), 1);
+			if (Diags.Num() == 1)
+			{
+				TestEqual(TEXT("file"), Diags[0].File, FString(TEXT("/proj/Source/MyGame/MyActor.cpp")));
+				TestEqual(TEXT("line"), Diags[0].Line, 5);
+				TestEqual(TEXT("severity"), Diags[0].Severity, FString(TEXT("error")));
+			}
+		});
+
+		It("parses MSVC + clang 'fatal error' compiler diagnostics and normalizes severity to 'error'", [this]()
+		{
+			// A missing/typo'd #include (C1083) is one of the most common AI-edit
+			// failures; both toolchains emit it as a file(line)-attributed "fatal
+			// error" that must surface as a normal error row (severity normalized
+			// so the AI loop keys off error/warning without a third bucket).
+			const FString Output =
+				TEXT("C:\\proj\\Source\\MyGame\\MyActor.cpp(1): fatal error C1083: Cannot open include file: 'X.h': No such file or directory\n")
+				TEXT("/proj/Source/MyGame/Other.cpp:10:10: fatal error: 'Y.h' file not found\n")
+				TEXT("LINK : fatal error LNK1104: cannot open file 'UnrealEditor-MyGame.dll'\n");
+
+			TArray<FUnrealOpenMcpSourceTools::FSourceDiagnostic> Diags;
+			FUnrealOpenMcpSourceTools::ParseDiagnostics(Output, Diags);
+
+			// The two compiler-stage fatals are reported; the LNK link-stage
+			// fatal is still excluded.
+			TestEqual(TEXT("two fatal compiler diagnostics (LNK excluded)"), Diags.Num(), 2);
+			if (Diags.Num() == 2)
+			{
+				TestEqual(TEXT("msvc fatal file"), Diags[0].File, FString(TEXT("C:\\proj\\Source\\MyGame\\MyActor.cpp")));
+				TestEqual(TEXT("msvc fatal line"), Diags[0].Line, 1);
+				TestEqual(TEXT("msvc fatal severity normalized to error"), Diags[0].Severity, FString(TEXT("error")));
+				TestTrue(TEXT("msvc fatal message carries code"), Diags[0].Message.Contains(TEXT("C1083")));
+				TestEqual(TEXT("clang fatal file"), Diags[1].File, FString(TEXT("/proj/Source/MyGame/Other.cpp")));
+				TestEqual(TEXT("clang fatal line"), Diags[1].Line, 10);
+				TestEqual(TEXT("clang fatal severity normalized to error"), Diags[1].Severity, FString(TEXT("error")));
+			}
+		});
+
+		It("collapses exact-duplicate diagnostics", [this]()
+		{
+			// UBT often emits the same diagnostic on stdout AND stderr, and the
+			// same header error surfaces once per including cpp — collapse exact
+			// (file,line,severity,message) dupes so the count is honest.
+			const FString Output =
+				TEXT("C:\\proj\\Source\\MyGame\\MyActor.cpp(12): error C2065: 'Foo': undeclared identifier\n")
+				TEXT("C:\\proj\\Source\\MyGame\\MyActor.cpp(12): error C2065: 'Foo': undeclared identifier\n");
+			TArray<FUnrealOpenMcpSourceTools::FSourceDiagnostic> Diags;
+			FUnrealOpenMcpSourceTools::ParseDiagnostics(Output, Diags);
+			TestEqual(TEXT("duplicate collapsed to one"), Diags.Num(), 1);
+		});
+
+		It("returns no diagnostics for clean output", [this]()
+		{
+			const FString Output = TEXT("Building MyGameEditor...\nTarget is up to date\n");
+			TArray<FUnrealOpenMcpSourceTools::FSourceDiagnostic> Diags;
+			FUnrealOpenMcpSourceTools::ParseDiagnostics(Output, Diags);
+			TestEqual(TEXT("no diagnostics"), Diags.Num(), 0);
 		});
 	});
 
@@ -736,6 +851,104 @@ void FUnrealOpenMcpSourceToolsSpec::Define()
 			const FUnrealOpenMcpToolDispatchResult Result = Handler(TEXT("{not json"));
 			TestFalse(TEXT("ok false"), Result.bOk);
 			TestEqual(TEXT("code"), Result.Code, FString(TEXT("invalid_parameter")));
+		});
+	});
+
+	Describe("unreal_open_mcp_source_compile — arg-validation guards", [this]()
+	{
+		// source_compile shells out to UBT (or Live Coding), which is a
+		// manual / project-with-real-UBT path — NOT end-to-end tested here.
+		// The deterministic surface is the ARG-VALIDATION guards that fire
+		// BEFORE any process launch: invalid target / platform / configuration
+		// (the anti-injection identifier check), and a malformed body. The
+		// success/compile_clean envelope contract is pinned on the TS side
+		// (source-tools.test.ts) because the bridge envelope mapping is what
+		// matters for an agent.
+
+		It("handler is registered + mutating (gate Enforce)", [this]()
+		{
+			FUnrealOpenMcpToolRegistry Registry;
+			FUnrealOpenMcpSourceTools::Register(Registry);
+			FUnrealOpenMcpToolHandler Handler;
+			TestTrue(TEXT("handler registered"),
+				Registry.TryGet(TEXT("unreal_open_mcp_source_compile"), Handler));
+			FUnrealOpenMcpToolMetadata Meta;
+			Registry.TryGetMetadata(TEXT("unreal_open_mcp_source_compile"), Meta);
+			TestTrue(TEXT("mutating"), Meta.bIsMutating);
+			TestEqual(TEXT("gate Enforce"),
+				Meta.DefaultGate, EUnrealOpenMcpGateMode::Enforce);
+		});
+
+		It("rejects a malformed JSON body with invalid_parameter", [this]()
+		{
+			FUnrealOpenMcpToolHandler Handler;
+			GetSourceHandler(TEXT("unreal_open_mcp_source_compile"), Handler);
+			const FUnrealOpenMcpToolDispatchResult Result = Handler(TEXT("{not json"));
+			TestFalse(TEXT("ok false"), Result.bOk);
+			TestEqual(TEXT("code"), Result.Code, FString(TEXT("invalid_parameter")));
+		});
+
+		It("rejects a non-identifier target with invalid_parameter (no arg injection)", [this]()
+		{
+			FUnrealOpenMcpToolHandler Handler;
+			GetSourceHandler(TEXT("unreal_open_mcp_source_compile"), Handler);
+			// A target with a trailing -Clean flag would inject a UBT argument
+			// that wipes Binaries/Intermediate — the identifier check rejects it
+			// before ExecProcess ever runs. Deterministic: no process launch.
+			const FUnrealOpenMcpToolDispatchResult Result = Handler(
+				TEXT("{\"target\":\"MyGameEditor -Clean\",\"use_live_coding\":false}"));
+			TestFalse(TEXT("ok false"), Result.bOk);
+			TestEqual(TEXT("code"), Result.Code, FString(TEXT("invalid_parameter")));
+			TestTrue(TEXT("names target"),
+				Result.Message.Contains(TEXT("target")));
+		});
+
+		It("rejects a non-identifier platform with invalid_parameter", [this]()
+		{
+			FUnrealOpenMcpToolHandler Handler;
+			GetSourceHandler(TEXT("unreal_open_mcp_source_compile"), Handler);
+			const FUnrealOpenMcpToolDispatchResult Result = Handler(
+				TEXT("{\"target\":\"MyGameEditor\",\"platform\":\"Win64 -Clean\",\"use_live_coding\":false}"));
+			TestFalse(TEXT("ok false"), Result.bOk);
+			TestEqual(TEXT("code"), Result.Code, FString(TEXT("invalid_parameter")));
+			TestTrue(TEXT("names platform"),
+				Result.Message.Contains(TEXT("platform")));
+		});
+
+		It("rejects a non-identifier configuration with invalid_parameter", [this]()
+		{
+			FUnrealOpenMcpToolHandler Handler;
+			GetSourceHandler(TEXT("unreal_open_mcp_source_compile"), Handler);
+			const FUnrealOpenMcpToolDispatchResult Result = Handler(
+				TEXT("{\"target\":\"MyGameEditor\",\"configuration\":\"Development -Clean\",\"use_live_coding\":false}"));
+			TestFalse(TEXT("ok false"), Result.bOk);
+			TestEqual(TEXT("code"), Result.Code, FString(TEXT("invalid_parameter")));
+			TestTrue(TEXT("names configuration"),
+				Result.Message.Contains(TEXT("configuration")));
+		});
+
+		It("accepts identifier-only target/platform/configuration past the guard (UBT path)", [this]()
+		{
+			// Identifiers pass the guard; the handler then resolves the UBT
+			// binary. On a host without UBT at the resolved path it returns
+			// ubt_not_found — that is the deterministic happy-path-for-the-
+			// guard endpoint in a test env (no real UBT invocation). Assert
+			// the dispatch is NOT invalid_parameter (the guard passed) and is
+			// from the documented compile-error set.
+			FUnrealOpenMcpToolHandler Handler;
+			GetSourceHandler(TEXT("unreal_open_mcp_source_compile"), Handler);
+			const FUnrealOpenMcpToolDispatchResult Result = Handler(
+				TEXT("{\"target\":\"MyGameEditor\",\"platform\":\"Win64\",\"configuration\":\"Development\",\"use_live_coding\":false}"));
+			// Either UBT was found + ran (real project — success OR a real
+			// failed compile, both ok:true), OR UBT was missing (ubt_not_found),
+			// OR UBT launch failed (ubt_launch_failed). Never invalid_parameter
+			// (the guard passed) and never a crash.
+			const bool bDocumented = Result.bOk
+				|| Result.Code == TEXT("ubt_not_found")
+				|| Result.Code == TEXT("ubt_launch_failed");
+			TestTrue(TEXT("documented outcome (guard passed)"), bDocumented);
+			TestFalse(TEXT("not invalid_parameter (guard passed)"),
+				Result.Code == TEXT("invalid_parameter"));
 		});
 	});
 }

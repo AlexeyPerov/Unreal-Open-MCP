@@ -124,6 +124,23 @@ public class UnrealOpenMcpEditor : ModuleRules
 			"Kismet",
 			});
 
+		// P7.3 — source_compile prefers Live Coding to patch a running editor
+		// when interactive (the only way to apply C++ changes without relinking
+		// the locked module DLL). The LiveCoding module is Windows-only
+		// (Engine/Source/Developer/Windows/LiveCoding); gate the dependency +
+		// the WITH_UNREAL_MCP_LIVE_CODING define so non-Windows builds (and the
+		// UBT fallback path) compile cleanly without it. When the guard is 0,
+		// the source_compile handler unconditionally takes the UBT path.
+		if (Target.Platform == UnrealBuildTool.UnrealTargetPlatform.Win64)
+		{
+			PrivateDependencyModuleNames.Add("LiveCoding");
+			PublicDefinitions.Add("WITH_UNREAL_MCP_LIVE_CODING=1");
+		}
+		else
+		{
+			PublicDefinitions.Add("WITH_UNREAL_MCP_LIVE_CODING=0");
+		}
+
 		// The per-session bearer token must come from the OS cryptographic RNG
 		// (FUnrealOpenMcpBridgeAuthToken::Generate). On Windows that is
 		// BCryptGenRandom, which needs bcrypt.lib. Mac/Linux read /dev/urandom
@@ -138,7 +155,10 @@ public class UnrealOpenMcpEditor : ModuleRules
 		// MaterialEditor for the material tools. P4.4 (asset_import) needs no
 		// new module — IAssetTools::ImportAssetTasks + UAssetImportTask come
 		// from AssetTools + UnrealEd (already deps), and FGCObjectScopeGuard
-		// from CoreUObject. The dependency surface stays minimal so the
+		// from CoreUObject. P7.3 adds the LiveCoding module on Windows only
+		// (source_compile's interactive fast path — non-Windows hosts fall back
+		// to UBT, and the WITH_UNREAL_MCP_LIVE_CODING guard compiles the LC
+		// branch out cleanly). The dependency surface stays minimal so the
 		// Editor/Runtime boundary guard (P1.8) stays green and later phases
 		// add deps as they add features.
 	}

@@ -117,7 +117,8 @@ test("blueprint_add_variable description documents mutation + variable error cod
   assert.match(desc, /mutating/i);
   assert.match(desc, /paths_hint/);
   assert.match(desc, /gate/);
-  // The P6.3 structured-error contract — every guard an agent can hit.
+  // The structured-error contract — every guard an agent can hit.
+  assert.match(desc, /invalid_name/);
   assert.match(desc, /name_collision/);
   assert.match(desc, /invalid_type/);
   assert.match(desc, /add_failed/);
@@ -185,9 +186,10 @@ test("blueprint_modify_variable description documents validate-before-mutate + e
   assert.match(desc, /gate/);
   // The validate-before-mutate ordering — the critical P6.3 invariant.
   assert.match(desc, /validate-before-mutate/i);
-  // The P6.3 structured-error contract.
+  // The structured-error contract.
   assert.match(desc, /variable_not_found/);
   assert.match(desc, /missing_parameter/);
+  assert.match(desc, /invalid_name/);
   assert.match(desc, /name_collision/);
   assert.match(desc, /invalid_type/);
   // Result shape { variable }.
@@ -244,6 +246,7 @@ test("blueprint_set_default description documents compile-first + CDO error code
   assert.match(desc, /blueprint_compile/);
   // The P6.3 structured-error contract.
   assert.match(desc, /no_generated_class/);
+  assert.match(desc, /no_cdo/);
   assert.match(desc, /property_not_found/);
   assert.match(desc, /import_failed/);
   // Affects new instances only — the CDO contract.

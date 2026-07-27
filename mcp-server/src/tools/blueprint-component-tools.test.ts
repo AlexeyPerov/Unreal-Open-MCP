@@ -94,10 +94,11 @@ test("blueprint_add_component description documents mutation + SCS error codes",
   assert.match(desc, /mutating/i);
   assert.match(desc, /paths_hint/);
   assert.match(desc, /gate/);
-  // The P6.2 structured-error contract — every guard an agent can hit.
+  // The structured-error contract — every guard an agent can hit.
   assert.match(desc, /no_scs/);
   assert.match(desc, /invalid_component_class/);
   assert.match(desc, /abstract_component/);
+  assert.match(desc, /invalid_name/);
   assert.match(desc, /name_collision/);
   assert.match(desc, /parent_not_found/);
   assert.match(desc, /invalid_attachment/);

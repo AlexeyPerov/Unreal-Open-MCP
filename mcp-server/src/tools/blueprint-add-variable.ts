@@ -6,7 +6,7 @@ import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 // already uses). `path` is the Blueprint asset object path (package-path form
 // also accepted — resolved in-memory first, then loaded). `name` is the new
 // member variable name. `type` is a pin-type token: a primitive
-// (bool/int/int64/byte/float/string/name/text), a math struct
+// (bool/int/int64/byte/float/double/string/name/text), a math struct
 // (vector/vector2d/rotator/transform/color), or a resolvable object/struct
 // path. Optional `is_array` wraps the type in an array container. Optional
 // `default_value` is stored on the variable descriptor in UE text format and

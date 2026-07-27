@@ -24,10 +24,12 @@ import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 // package, so it runs the full gate path (checkpoint -> compile -> validate ->
 // delta); `paths_hint` MUST list the Blueprint package path (e.g.
 // ['/Game/Mcp/BP_Thing']) — there is no whole-project fallback, set
-// gate:"off" to bypass. Under gate Enforce, a failed compile may also surface
-// verify `compile_errors` in the `gate` block — that is desirable (same
-// package, same diagnostics); pass gate:"warn" or gate:"off" for a tight
-// recompile loop that always returns the `result`.
+// gate:"off" to bypass. The gate's post-mutation validate pass runs the
+// standard package-scoped rules (e.g. missing_blueprint_parent /
+// broken_soft_references) — Blueprint compile diagnostics are NOT a verify
+// rule (they ride through as the messages[] array above). For a tight
+// recompile loop that always returns the result, pass gate:"warn" or
+// gate:"off".
 //
 // Fidelity: greenfield. No Unity Blueprint / Kismet twin (loose analogy only:
 // Unity's compile_check / read_compile_errors WORKFLOW — different engine, no
@@ -100,12 +102,13 @@ export const blueprintCompile: Tool = {
         default: "enforce",
         description:
           "Gate mode — enforce (default) runs checkpoint -> compile -> " +
-          "validate -> delta and hard-fails on new Errors (a failed compile " +
-          "may also surface verify compile_errors in the gate block — " +
-          "desirable); warn commits the compile but surfaces new Errors as " +
-          "warnings; off skips the gate entirely (paths_hint optional). For " +
-          "a tight recompile loop that always returns the result, pass " +
-          "gate:\"warn\" or gate:\"off\".",
+          "validate -> delta and hard-fails on new Errors surfaced by the " +
+          "package-scoped verify rules (Blueprint compile diagnostics are " +
+          "NOT a verify rule — they ride through as the messages[] array on " +
+          "an ok:true envelope); warn commits the compile but surfaces new " +
+          "Errors as warnings; off skips the gate entirely (paths_hint " +
+          "optional). For a tight recompile loop that always returns the " +
+          "result, pass gate:\"warn\" or gate:\"off\".",
       },
     },
     additionalProperties: false,

@@ -55,8 +55,10 @@ export const blueprintSetDefault: Tool = {
     "Blueprint at path), no_generated_class (Blueprint has no GeneratedClass " +
     "— compile first), property_not_found (property absent on the generated " +
     "class — if you just added it via blueprint_add_variable, run " +
-    "blueprint_compile first), import_failed (the value could not be parsed " +
-    "for the property's type), invalid_parameter (malformed body).",
+    "blueprint_compile first), no_cdo (GeneratedClass resolved but its Class " +
+    "Default Object did not — rare; class not fully loaded), import_failed " +
+    "(the value could not be parsed for the property's type), " +
+    "invalid_parameter (malformed body).",
   inputSchema: {
     type: "object",
     required: ["path", "property", "value", "paths_hint"],

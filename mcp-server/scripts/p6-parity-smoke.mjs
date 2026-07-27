@@ -1,36 +1,31 @@
 #!/usr/bin/env node
-// p6-parity-smoke.mjs — Phase 6 exit-gate parity smoke (compile-loop).
+// p6-parity-smoke.mjs — Blueprint-family compile-loop parity smoke.
 //
 // Canonical route: stdio MCP  →  unreal_open_mcp_blueprint_spawn  →  bridge
 // POST /tools/unreal_open_mcp_blueprint_spawn  →  {ok,result,error} envelope.
 //
-// This is the MANDATORY gate before Phase 7 begins (roadmap Phase 6 exit gate).
-// Phase 6 shipped the Blueprint family (P6.1 create/get, P6.2 components,
-// P6.3 variables, P6.4 functions/events, P6.5 compile, P6.6 spawn). This smoke
-// closes the create -> edit -> compile -> spawn loop and proves the two
-// compile-loop tools survive the built dist/index.js artifact over stdio —
-// packaging, transport, and instance-discovery wiring the in-process
-// integration suite (integration.test.ts P6.6 cases) cannot see.
+// E2E smoke for the Blueprint compile loop. Proves the two load-bearing
+// compile-loop tools (blueprint_spawn + blueprint_compile) survive the built
+// dist/index.js artifact over stdio — packaging, transport, and instance-
+// discovery wiring the in-process integration suite cannot see.
 //
-// Four cases are pinned — the four the P6.6 acceptance criteria call out as
-// load-bearing:
+// Four cases are pinned:
 //   1. HEALTHY SPAWN — stub serves GET /ping + POST
 //      /tools/unreal_open_mcp_blueprint_spawn with {ok:true,result:<body>};
 //      assert tools/list advertises blueprint_spawn, tools/call returns
 //      isError:false, and the INNER result body (not the envelope) survives
 //      the round-trip verbatim.
 //   2. BRIDGE DOWN — no stub, port pinned to a dead port; assert tools/call
-//      surfaces bridge_offline (the blueprint path inherits P1's failure
-//      classification).
+//      surfaces bridge_offline (the Blueprint path inherits the standard
+//      transport-failure classification).
 //   3. TOOL ERROR — stub returns {ok:false,error:{code,message}}; assert
 //      tools/call surfaces isError:true with the tool-specific error code so
 //      an agent can branch on not_compiled vs a transport error.
-//   4. COMPILE FAILED = DATA (P6.5 contract) — stub returns
+//   4. COMPILE FAILED = DATA — stub returns
 //      {ok:true,result:{succeeded:false, numErrors:1, messages:[...]}}; assert
 //      tools/call returns isError:false (a failed compile is a NORMAL result,
-//      NOT a transport failure — the diagnostics ride through as data). This is
-//      the load-bearing P6.5 invariant asserted at the stdio layer for the
-//      first time.
+//      NOT a transport failure — the diagnostics ride through as data). This
+//      pins the "succeeded:false is data" contract at the stdio layer.
 //
 // Exit code: 0 on green, 1 on any failure. Each step prints ✓/✗ with a short
 // detail line; the first failure's raw output is dumped to stderr. Stubs bind
@@ -41,11 +36,11 @@
 // the live bridge the same way. See docs/architecture.md (E2E smoke
 // verification) for the failure-signature table.
 //
-// Adapted from this repo's scripts/p4-parity-smoke.mjs (adapt fidelity, P6.6).
+// Adapted from this repo's scripts/p4-parity-smoke.mjs (adapt fidelity).
 // Intentional delta: the tool under test is the mutating blueprint_spawn
 // (loop-closer) rather than the read-only asset_find, the canonical body is
 // the spawn identity { actor, name, class, path, location }, AND this smoke
-// adds the compile-failure data-path case (case 4) that pins the P6.5
+// adds the compile-failure data-path case (case 4) that pins the
 // "succeeded:false is data" contract at the stdio layer.
 
 import { spawn } from "node:child_process";
@@ -640,7 +635,7 @@ async function caseCompileFailedData(opts) {
 async function main() {
   const opts = parseArgs(process.argv.slice(2));
 
-  console.log("unreal-open-mcp — Phase 6 parity smoke (blueprint compile-loop)");
+  console.log("unreal-open-mcp — Blueprint compile-loop parity smoke");
   console.log(`  server:  ${SERVER_ENTRY}`);
   console.log(`  project: ${opts.project}`);
 

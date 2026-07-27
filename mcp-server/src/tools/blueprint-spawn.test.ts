@@ -33,6 +33,7 @@ test("blueprint_spawn schema exposes path + paths_hint (required) + gate + optio
         items?: { type?: string };
         default?: string;
         properties?: Record<string, unknown>;
+        additionalProperties?: boolean;
       }
     >;
     additionalProperties: boolean;
@@ -54,12 +55,19 @@ test("blueprint_spawn schema exposes path + paths_hint (required) + gate + optio
   assert.ok(schema.properties.gate, "blueprint_spawn must expose gate");
   assert.deepEqual(schema.properties.gate.enum, ["enforce", "warn", "off"]);
   assert.equal(schema.properties.gate.default, "enforce");
-  // Optional location ({x,y,z}) + name (actor label).
+  // Optional location ({x,y,z}) + name (actor label). The nested location
+  // object must also reject unknown keys (additionalProperties:false) so a
+  // client cannot smuggle a bogus axis.
   assert.ok(schema.properties.location, "blueprint_spawn must expose location");
   assert.equal(schema.properties.location.type, "object");
   assert.ok(schema.properties.location.properties?.x, "location has x");
   assert.ok(schema.properties.location.properties?.y, "location has y");
   assert.ok(schema.properties.location.properties?.z, "location has z");
+  assert.equal(
+    schema.properties.location.additionalProperties,
+    false,
+    "location must reject unknown axes (additionalProperties:false)",
+  );
   assert.ok(schema.properties.name, "blueprint_spawn must expose name");
   assert.equal(schema.additionalProperties, false);
 });
@@ -96,11 +104,11 @@ test("blueprint_spawn description documents the compile-first + non-Actor + no-w
 
 test("blueprint_spawn description documents the result shape + the full error code list", () => {
   const desc = blueprintSpawn.description ?? "";
-  // Result shape — the spawn identity an agent chains from.
-  assert.match(desc, /actor/);
-  assert.match(desc, /class/);
-  assert.match(desc, /path/);
-  assert.match(desc, /location/);
+  // Result shape — the spawn identity an agent chains from. Pin the literal
+  // result-shape token rather than bare prose words (the description mentions
+  // 'actor'/'class'/'path' generically many times) so a regression that drops
+  // the documented DTO fails this assertion.
+  assert.match(desc, /\{ actor \(label\), name, class, path, location:\{x,y,z\} \}/);
   // The full structured error code list — every guard an agent can hit.
   assert.match(desc, /missing_parameter/);
   assert.match(desc, /blueprint_not_found/);

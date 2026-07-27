@@ -298,7 +298,15 @@ namespace
 			Set(UEdGraphSchema_K2::PC_Int64, NAME_None, nullptr);
 		else if (Lower == TEXT("byte"))
 			Set(UEdGraphSchema_K2::PC_Byte, NAME_None, nullptr);
-		else if (Lower == TEXT("float") || Lower == TEXT("double") || Lower == TEXT("number") || Lower == TEXT("real"))
+		// UE5 splits real types across two PC_Real subcategories: PC_Float
+		// (single-precision float) and PC_Double (double-precision). Mapping
+		// both to PC_Double silently widened every `float` member variable to
+		// double. `float`/`single` → PC_Float; `double`/`number`/`real` →
+		// PC_Double so the round-trip with PinTypeToString (which mirrors the
+		// subcategory) stays symmetric.
+		else if (Lower == TEXT("float") || Lower == TEXT("single"))
+			Set(UEdGraphSchema_K2::PC_Real, UEdGraphSchema_K2::PC_Float, nullptr);
+		else if (Lower == TEXT("double") || Lower == TEXT("number") || Lower == TEXT("real"))
 			Set(UEdGraphSchema_K2::PC_Real, UEdGraphSchema_K2::PC_Double, nullptr);
 		else if (Lower == TEXT("string"))
 			Set(UEdGraphSchema_K2::PC_String, NAME_None, nullptr);
@@ -366,7 +374,10 @@ FString FUnrealOpenMcpBlueprintHelpers::PinTypeToString(const FEdGraphPinType& P
 	else if (Cat == UEdGraphSchema_K2::PC_Int) Base = TEXT("int");
 	else if (Cat == UEdGraphSchema_K2::PC_Int64) Base = TEXT("int64");
 	else if (Cat == UEdGraphSchema_K2::PC_Byte) Base = TEXT("byte");
-	else if (Cat == UEdGraphSchema_K2::PC_Real) Base = TEXT("float"); // float/double both map to PC_Real
+	// PC_Real carries the precision in PinSubCategory: PC_Float → single,
+	// PC_Double → double. Round-trip with MakePinType's forward map.
+	else if (Cat == UEdGraphSchema_K2::PC_Real)
+		Base = (PinType.PinSubCategory == UEdGraphSchema_K2::PC_Double) ? TEXT("double") : TEXT("float");
 	else if (Cat == UEdGraphSchema_K2::PC_String) Base = TEXT("string");
 	else if (Cat == UEdGraphSchema_K2::PC_Name) Base = TEXT("name");
 	else if (Cat == UEdGraphSchema_K2::PC_Text) Base = TEXT("text");
@@ -876,17 +887,21 @@ void FUnrealOpenMcpBlueprintTools::Register(FUnrealOpenMcpToolRegistry& Registry
 					TEXT("parent_not_found"),
 					FString::Printf(TEXT("parent component '%s' not found."), *ParentName));
 			}
+			// The SCS root is a scene-graph node and MUST be a USceneComponent;
+			// AddNode on a non-scene root either asserts at compile or is silently
+			// swapped for the DefaultSceneRoot. Reject a non-scene component up
+			// front even when no parent is supplied (root path).
+			if (!CompClass->IsChildOf(USceneComponent::StaticClass()))
+			{
+				return FUnrealOpenMcpToolDispatchResult::Fail(
+					TEXT("invalid_attachment"),
+					FString::Printf(TEXT("'%s' is not a USceneComponent, so it cannot live on the Simple Construction Script (only scene components attach in the component hierarchy)."), *CompClass->GetName()));
+			}
 			// Attachment is a scene-graph operation: both the new component and
 			// its parent must be USceneComponents, otherwise AddChildNode
 			// produces an invalid (non-attachable) hierarchy.
 			if (ParentNode)
 			{
-				if (!CompClass->IsChildOf(USceneComponent::StaticClass()))
-				{
-					return FUnrealOpenMcpToolDispatchResult::Fail(
-						TEXT("invalid_attachment"),
-						FString::Printf(TEXT("'%s' is not a USceneComponent, so it cannot be attached under a parent component."), *CompClass->GetName()));
-				}
 				if (!ParentNode->ComponentClass || !ParentNode->ComponentClass->IsChildOf(USceneComponent::StaticClass()))
 				{
 					return FUnrealOpenMcpToolDispatchResult::Fail(
@@ -1371,8 +1386,13 @@ void FUnrealOpenMcpBlueprintTools::Register(FUnrealOpenMcpToolRegistry& Registry
 	// on such a property reports property_not_found with a message that points at
 	// blueprint_compile.
 	//
-	// Structured errors:
+		// Structured errors:
 	//   - no_generated_class — Blueprint has no GeneratedClass (compile first)
+	//   - no_cdo             — GeneratedClass resolved but its CDO did not
+	//                          (rare; class not fully loaded). Distinct from
+	//                          no_generated_class so an agent can tell a
+	//                          missing-compile case from a CDO-resolution
+	//                          failure.
 	//   - property_not_found — property absent on the generated class
 	//   - import_failed      — ImportText_Direct could not parse the value
 	//
@@ -1435,8 +1455,8 @@ void FUnrealOpenMcpBlueprintTools::Register(FUnrealOpenMcpToolRegistry& Registry
 			if (!CDO)
 			{
 				return FUnrealOpenMcpToolDispatchResult::Fail(
-					TEXT("no_generated_class"),
-					TEXT("Could not resolve the Class Default Object."));
+					TEXT("no_cdo"),
+					TEXT("Could not resolve the Class Default Object for the generated class."));
 			}
 
 			const FString PropName = Args->HasTypedField<EJson::String>(TEXT("property"))

@@ -90,6 +90,7 @@ export const blueprintSpawn: Tool = {
           y: { type: "number" },
           z: { type: "number" },
         },
+        additionalProperties: false,
       },
       name: {
         type: "string",

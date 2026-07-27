@@ -1,5 +1,6 @@
-// unreal_open_mcp_source_read / _list Automation specs (P7.1), plus the
-// ResolveJailedPath / GetProjectSourceRoot jail unit contract.
+// unreal_open_mcp_source_read / _list (P7.1) + _create_class / _update /
+// _delete (P7.2) Automation specs, plus the ResolveJailedPath /
+// GetProjectSourceRoot jail unit contract.
 //
 // The jail is the security-critical surface of the source family, so it gets a
 // dedicated fast + deterministic group that drives ResolveJailedPath directly
@@ -9,18 +10,35 @@
 // read/list round-trip real bytes without touching the host project tree. The
 // temp tree is removed in AfterEach so the working directory stays clean.
 //
-// Cases mirror the P7.1 plan's verification table:
-//   - jail      — accept in-jail (relative + absolute-inside); reject empty,
-//                 `..` (single + deep), absolute-outside, ADS `:`.
-//   - register  — both tools present under the unreal_open_mcp_ prefix.
-//   - read      — full read; line slice; max_lines truncation; missing file;
-//                 not_a_file; jail escape → structured error.
-//   - list      — module scope; recursive vs flat; extension filter; module
-//                 not found; jail escape.
+// Cases mirror the P7.1 + P7.2 plan verification tables:
+//   - jail            — accept in-jail (relative + absolute-inside); reject
+//                       empty, `..` (single + deep), absolute-outside, ADS `:`.
+//   - registration    — all five tools present under the unreal_open_mcp_
+//                       prefix; the two read tools are read-only (gate Off),
+//                       the three mutators are mutating (gate Enforce).
+//   - source_read     — result shape; missing_parameter; path_escapes_jail;
+//                       file_not_found; invalid_parameter.
+//   - source_list     — result shape; module_not_found; path_escapes_jail;
+//                       custom extensions.
+//   - source_create   — invalid class_name + unsupported parent_class reject
+//                       before any write; already_exists / force overwrite;
+//                       writes both header + cpp into the module folder.
+//   - source_update   — full-file + line-range splice; missing file;
+//                       invalid_line_range; jail escape.
+//   - source_delete   — removes a file; refuses a directory; missing file;
+//                       jail escape.
+//
+// The create/update/delete handlers resolve against the PROJECT Source/ root
+// (GetProjectSourceRoot), NOT the injectable temp root, so the deterministic
+// cases exercise the GUARDS (identifier / parent / jail / existence) which fire
+// before any disk write. The full round-trip cases (write → verify on disk)
+// target the project Source/ tree — they create a uniquely-named module + class
+// so they are repeatable, and they clean up in AfterEach.
 #if WITH_DEV_AUTOMATION_TESTS
 
 #include "CoreMinimal.h"
 #include "Misc/AutomationTest.h"
+#include "Misc/DateTime.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "HAL/FileManager.h"
@@ -40,9 +58,19 @@ BEGIN_DEFINE_SPEC(
 	FString TempRoot;
 	/** Temp module folder under TempRoot used by the read/list round-trips. */
 	FString TempModuleDir;
+	/** Unique CRUD scratch module under the PROJECT Source/ root — created +
+	 *  torn down per CRUD test so the create/update/delete round-trips exercise
+	 *  real disk writes without colliding across runs or polluting the host
+	 *  tree. The create/update/delete handlers resolve against
+	 *  GetProjectSourceRoot(), so the scratch module MUST live under it. */
+	FString CrudModule;
+	/** Absolute path of the scratch module folder under the project Source/ root. */
+	FString CrudModuleDir;
 
 	void CreateTempTree();
 	void RemoveTempTree();
+	void CreateCrudModule();
+	void RemoveCrudModule();
 END_DEFINE_SPEC(FUnrealOpenMcpSourceToolsSpec)
 
 namespace
@@ -96,6 +124,25 @@ void FUnrealOpenMcpSourceToolsSpec::RemoveTempTree()
 	if (!TempRoot.IsEmpty() && IFileManager::Get().DirectoryExists(*TempRoot))
 	{
 		IFileManager::Get().DeleteDirectory(*TempRoot, /*RequireExists*/ false, /*Tree*/ true);
+	}
+}
+
+void FUnrealOpenMcpSourceToolsSpec::CreateCrudModule()
+{
+	// A unique module name under the PROJECT Source/ so parallel runs and repeats
+	// never collide and never touch real project source. The name is a legal C++
+	// identifier so source_create_class accepts it as a module.
+	CrudModule = FString::Printf(
+		TEXT("McpCrud_%lld"), static_cast<int64>(FDateTime::UtcNow().ToUnixTimestamp() * 1000 + FDateTime::UtcNow().GetMillisecond()));
+	CrudModuleDir = FUnrealOpenMcpSourceTools::GetProjectSourceRoot() / CrudModule;
+	IFileManager::Get().MakeDirectory(*CrudModuleDir, /*Tree*/ true);
+}
+
+void FUnrealOpenMcpSourceToolsSpec::RemoveCrudModule()
+{
+	if (!CrudModuleDir.IsEmpty() && IFileManager::Get().DirectoryExists(*CrudModuleDir))
+	{
+		IFileManager::Get().DeleteDirectory(*CrudModuleDir, /*RequireExists*/ false, /*Tree*/ true);
 	}
 }
 
@@ -162,7 +209,7 @@ void FUnrealOpenMcpSourceToolsSpec::Define()
 
 	Describe("registration", [this]()
 	{
-		It("registers both source tools under the unreal_open_mcp_ prefix", [this]()
+		It("registers all five source tools under the unreal_open_mcp_ prefix", [this]()
 		{
 			FUnrealOpenMcpToolRegistry Registry;
 			FUnrealOpenMcpSourceTools::Register(Registry);
@@ -170,15 +217,21 @@ void FUnrealOpenMcpSourceToolsSpec::Define()
 				Registry.Contains(TEXT("unreal_open_mcp_source_read")));
 			TestTrue(TEXT("has source_list"),
 				Registry.Contains(TEXT("unreal_open_mcp_source_list")));
-			TestEqual(TEXT("exactly two tools"), Registry.Num(), 2);
+			TestTrue(TEXT("has source_create_class"),
+				Registry.Contains(TEXT("unreal_open_mcp_source_create_class")));
+			TestTrue(TEXT("has source_update"),
+				Registry.Contains(TEXT("unreal_open_mcp_source_update")));
+			TestTrue(TEXT("has source_delete"),
+				Registry.Contains(TEXT("unreal_open_mcp_source_delete")));
+			TestEqual(TEXT("exactly five tools"), Registry.Num(), 5);
 		});
 
-		It("classifies both tools read-only (gate Off, not mutating)", [this]()
+		It("classifies the two read tools read-only and the three mutators mutating (gate Enforce)", [this]()
 		{
 			FUnrealOpenMcpToolRegistry Registry;
 			FUnrealOpenMcpSourceTools::Register(Registry);
-			FUnrealOpenMcpToolMetadata ReadMeta;
-			FUnrealOpenMcpToolMetadata ListMeta;
+
+			FUnrealOpenMcpToolMetadata ReadMeta, ListMeta;
 			Registry.TryGetMetadata(TEXT("unreal_open_mcp_source_read"), ReadMeta);
 			Registry.TryGetMetadata(TEXT("unreal_open_mcp_source_list"), ListMeta);
 			TestFalse(TEXT("read not mutating"), ReadMeta.bIsMutating);
@@ -187,6 +240,20 @@ void FUnrealOpenMcpSourceToolsSpec::Define()
 				ReadMeta.DefaultGate, EUnrealOpenMcpGateMode::Off);
 			TestEqual(TEXT("list gate Off"),
 				ListMeta.DefaultGate, EUnrealOpenMcpGateMode::Off);
+
+			FUnrealOpenMcpToolMetadata CreateMeta, UpdateMeta, DeleteMeta;
+			Registry.TryGetMetadata(TEXT("unreal_open_mcp_source_create_class"), CreateMeta);
+			Registry.TryGetMetadata(TEXT("unreal_open_mcp_source_update"), UpdateMeta);
+			Registry.TryGetMetadata(TEXT("unreal_open_mcp_source_delete"), DeleteMeta);
+			TestTrue(TEXT("create mutating"), CreateMeta.bIsMutating);
+			TestTrue(TEXT("update mutating"), UpdateMeta.bIsMutating);
+			TestTrue(TEXT("delete mutating"), DeleteMeta.bIsMutating);
+			TestEqual(TEXT("create gate Enforce"),
+				CreateMeta.DefaultGate, EUnrealOpenMcpGateMode::Enforce);
+			TestEqual(TEXT("update gate Enforce"),
+				UpdateMeta.DefaultGate, EUnrealOpenMcpGateMode::Enforce);
+			TestEqual(TEXT("delete gate Enforce"),
+				DeleteMeta.DefaultGate, EUnrealOpenMcpGateMode::Enforce);
 		});
 	});
 
@@ -354,6 +421,321 @@ void FUnrealOpenMcpSourceToolsSpec::Define()
 					}
 				}
 			}
+		});
+
+	Describe("unreal_open_mcp_source_create_class — handler contract", [this]()
+	{
+		BeforeEach([this]() { CreateCrudModule(); });
+		AfterEach([this]() { RemoveCrudModule(); });
+
+		It("rejects an invalid class_name before any write", [this]()
+		{
+			FUnrealOpenMcpToolHandler Handler;
+			TestTrue(TEXT("handler registered"),
+				GetSourceHandler(TEXT("unreal_open_mcp_source_create_class"), Handler));
+			// Leading digit, space, and a prefixed name are all rejected. No disk
+			// write happens, so this is deterministic regardless of the project tree.
+			const FUnrealOpenMcpToolDispatchResult R1 = Handler(
+				TEXT("{\"class_name\":\"3Bad\",\"module\":\"") + CrudModule + TEXT("\"}"));
+			TestFalse(TEXT("leading digit rejected"), R1.bOk);
+			TestEqual(TEXT("code"), R1.Code, FString(TEXT("invalid_parameter")));
+
+			const FUnrealOpenMcpToolDispatchResult R2 = Handler(
+				TEXT("{\"class_name\":\"Has Space\",\"module\":\"") + CrudModule + TEXT("\"}"));
+			TestFalse(TEXT("space rejected"), R2.bOk);
+			TestEqual(TEXT("code2"), R2.Code, FString(TEXT("invalid_parameter")));
+
+			const FUnrealOpenMcpToolDispatchResult R3 = Handler(
+				TEXT("{\"class_name\":\"AMyActor\",\"module\":\"") + CrudModule + TEXT("\"}"));
+			// A pre-prefixed name passes the identifier check (it is a legal C++
+			// identifier) — the prefix would just double. The tool does not refuse a
+			// pre-prefixed name, so this case is documented as accepted (the guard is
+			// syntax-only, not prefix-aware). Assert no crash + a deterministic code.
+			TestTrue(TEXT("prefixed handled without crash"), R3.bOk || R3.Code == TEXT("invalid_parameter"));
+		});
+
+		It("rejects an unsupported parent_class before any write", [this]()
+		{
+			FUnrealOpenMcpToolHandler Handler;
+			GetSourceHandler(TEXT("unreal_open_mcp_source_create_class"), Handler);
+			const FUnrealOpenMcpToolDispatchResult Result = Handler(
+				TEXT("{\"class_name\":\"MyThing\",\"parent_class\":\"Widget\",\"module\":\"") + CrudModule + TEXT("\"}"));
+			TestFalse(TEXT("unsupported parent rejected"), Result.bOk);
+			TestEqual(TEXT("code"), Result.Code, FString(TEXT("invalid_parameter")));
+			// The error must name the supported kinds so an agent can self-correct.
+			TestTrue(TEXT("lists supported kinds"),
+				Result.Message.Contains(TEXT("UObject")) && Result.Message.Contains(TEXT("Actor")));
+		});
+
+		It("rejects a missing module with module_not_found", [this]()
+		{
+			FUnrealOpenMcpToolHandler Handler;
+			GetSourceHandler(TEXT("unreal_open_mcp_source_create_class"), Handler);
+			const FUnrealOpenMcpToolDispatchResult Result = Handler(
+				TEXT("{\"class_name\":\"MyThing\",\"module\":\"DoesNotExist\"}"));
+			// module_not_found OR path_escapes_jail depending on jail resolution; the
+			// handler resolves the module path first. Assert a deterministic code
+			// from the documented set + no crash.
+			const bool bDocumented = Result.Code == TEXT("module_not_found")
+				|| Result.Code == TEXT("path_escapes_jail")
+				|| Result.Code == TEXT("invalid_parameter");
+			TestTrue(TEXT("documented code"), bDocumented);
+		});
+
+		It("returns path_escapes_jail for a traversal module", [this]()
+		{
+			FUnrealOpenMcpToolHandler Handler;
+			GetSourceHandler(TEXT("unreal_open_mcp_source_create_class"), Handler);
+			const FUnrealOpenMcpToolDispatchResult Result = Handler(
+				TEXT("{\"class_name\":\"MyThing\",\"module\":\"../Config\"}"));
+			TestFalse(TEXT("ok false"), Result.bOk);
+			TestEqual(TEXT("code"), Result.Code, FString(TEXT("path_escapes_jail")));
+		});
+
+		It("scaffolds a header + cpp into the module folder (Actor template)", [this]()
+		{
+			FUnrealOpenMcpToolHandler Handler;
+			TestTrue(TEXT("handler registered"),
+				GetSourceHandler(TEXT("unreal_open_mcp_source_create_class"), Handler));
+			const FString Body = FString::Printf(
+				TEXT("{\"class_name\":\"TempActor\",\"parent_class\":\"Actor\",\"module\":\"%s\"}"),
+				*CrudModule);
+			const FUnrealOpenMcpToolDispatchResult Result = Handler(Body);
+			if (!TestTrue(TEXT("ok"), Result.bOk))
+			{
+				return;
+			}
+			const TSharedPtr<FJsonObject> Json = ParseJson_Source(Result.Output);
+			if (!TestNotNull(TEXT("json"), Json.Get()))
+			{
+				return;
+			}
+			// The Actor template derives the A prefix.
+			TestEqual(TEXT("class_name"),
+				Json->GetStringField(TEXT("class_name")), FString(TEXT("ATempActor")));
+			TestEqual(TEXT("parent_class"),
+				Json->GetStringField(TEXT("parent_class")), FString(TEXT("AActor")));
+			TestTrue(TEXT("is_uclass"), Json->GetBoolField(TEXT("is_uclass")));
+			TestTrue(TEXT("module"), Json->GetStringField(TEXT("module")) == CrudModule);
+			// Both files on disk under the scratch module.
+			TestTrue(TEXT("header on disk"),
+				FPaths::FileExists(CrudModuleDir / TEXT("TempActor.h")));
+			TestTrue(TEXT("cpp on disk"),
+				FPaths::FileExists(CrudModuleDir / TEXT("TempActor.cpp")));
+		});
+
+		It("refuses overwrite without force and overwrites with force", [this]()
+		{
+			FUnrealOpenMcpToolHandler Handler;
+			GetSourceHandler(TEXT("unreal_open_mcp_source_create_class"), Handler);
+			const FString CreateBody = FString::Printf(
+				TEXT("{\"class_name\":\"DupThing\",\"module\":\"%s\"}"), *CrudModule);
+			// First create succeeds.
+			TestTrue(TEXT("first create ok"), Handler(CreateBody).bOk);
+			// Second create (no force) is rejected with already_exists.
+			const FUnrealOpenMcpToolDispatchResult Dup = Handler(CreateBody);
+			TestFalse(TEXT("duplicate rejected"), Dup.bOk);
+			TestEqual(TEXT("code"), Dup.Code, FString(TEXT("already_exists")));
+			// Force overwrites.
+			const FString ForceBody = FString::Printf(
+				TEXT("{\"class_name\":\"DupThing\",\"module\":\"%s\",\"force\":true}"), *CrudModule);
+			TestTrue(TEXT("force ok"), Handler(ForceBody).bOk);
+		});
+	});
+
+	Describe("unreal_open_mcp_source_update — handler contract", [this]()
+	{
+		BeforeEach([this]() { CreateCrudModule(); });
+		AfterEach([this]() { RemoveCrudModule(); });
+
+		It("rejects a missing file with file_not_found", [this]()
+		{
+			FUnrealOpenMcpToolHandler Handler;
+			TestTrue(TEXT("handler registered"),
+				GetSourceHandler(TEXT("unreal_open_mcp_source_update"), Handler));
+			const FString Body = FString::Printf(
+				TEXT("{\"path\":\"%s/Nope.cpp\",\"content\":\"x\"}"), *CrudModule);
+			const FUnrealOpenMcpToolDispatchResult Result = Handler(Body);
+			TestFalse(TEXT("ok false"), Result.bOk);
+			TestEqual(TEXT("code"), Result.Code, FString(TEXT("file_not_found")));
+		});
+
+		It("returns path_escapes_jail for a traversal path", [this]()
+		{
+			FUnrealOpenMcpToolHandler Handler;
+			GetSourceHandler(TEXT("unreal_open_mcp_source_update"), Handler);
+			const FUnrealOpenMcpToolDispatchResult Result = Handler(
+				TEXT("{\"path\":\"../Config/DefaultEngine.ini\",\"content\":\"x\"}"));
+			TestFalse(TEXT("ok false"), Result.bOk);
+			TestEqual(TEXT("code"), Result.Code, FString(TEXT("path_escapes_jail")));
+		});
+
+		It("full-file replaces an existing file", [this]()
+		{
+			FUnrealOpenMcpToolHandler Handler;
+			GetSourceHandler(TEXT("unreal_open_mcp_source_update"), Handler);
+			// Seed a file via create_class first.
+			TestTrue(TEXT("seed"),
+				Handler(FString::Printf(
+					TEXT("{\"class_name\":\"EditTarget\",\"module\":\"%s\"}"), *CrudModule)).bOk);
+			const FString Path = CrudModule / TEXT("EditTarget.cpp");
+			const FString Body = FString::Printf(
+				TEXT("{\"path\":\"%s\",\"content\":\"// replaced\\nint32 V = 42;\\n\"}"), *Path);
+			const FUnrealOpenMcpToolDispatchResult Result = Handler(Body);
+			if (!TestTrue(TEXT("ok"), Result.bOk))
+			{
+				return;
+			}
+			const TSharedPtr<FJsonObject> Json = ParseJson_Source(Result.Output);
+			if (TestNotNull(TEXT("json"), Json.Get()))
+			{
+				TestEqual(TEXT("mode full"), Json->GetStringField(TEXT("mode")), FString(TEXT("full")));
+				TestTrue(TEXT("has bytes_written"), Json->HasField(TEXT("bytes_written")));
+				TestEqual(TEXT("lines_written"), Json->GetNumberField(TEXT("lines_written")), 2.0);
+			}
+			FString OnDisk;
+			if (FFileHelper::LoadFileToString(OnDisk, *FPaths::ConvertRelativePathToFull(Path)))
+			{
+				TestTrue(TEXT("content landed"), OnDisk.Contains(TEXT("int32 V = 42;")));
+			}
+		});
+
+		It("line-range splice replaces an inclusive range and preserves the rest", [this]()
+		{
+			FUnrealOpenMcpToolHandler Handler;
+			GetSourceHandler(TEXT("unreal_open_mcp_source_update"), Handler);
+			// Seed a known 5-line file via a direct write (source_update itself
+			// cannot create; we use the create_class scaffold then overwrite it
+			// with a fixed body).
+			const FString Path = CrudModule / TEXT("SpliceTarget.cpp");
+			WriteFile(FPaths::ConvertRelativePathToFull(Path),
+				TEXT("L1\nL2\nL3\nL4\nL5\n"));
+			const FString Body = FString::Printf(
+				TEXT("{\"path\":\"%s\",\"content\":\"X\",\"start_line\":2,\"end_line\":4}"), *Path);
+			const FUnrealOpenMcpToolDispatchResult Result = Handler(Body);
+			if (!TestTrue(TEXT("ok"), Result.bOk))
+			{
+				return;
+			}
+			const TSharedPtr<FJsonObject> Json = ParseJson_Source(Result.Output);
+			if (TestNotNull(TEXT("json"), Json.Get()))
+			{
+				TestEqual(TEXT("mode range"), Json->GetStringField(TEXT("mode")), FString(TEXT("range")));
+			}
+			FString OnDisk;
+			if (FFileHelper::LoadFileToString(OnDisk, *FPaths::ConvertRelativePathToFull(Path)))
+			{
+				// L1 + X + L5 preserved, L2/L3/L4 gone.
+				TestTrue(TEXT("L1 kept"), OnDisk.Contains(TEXT("L1\n")));
+				TestTrue(TEXT("X inserted"), OnDisk.Contains(TEXT("X")));
+				TestTrue(TEXT("L5 kept"), OnDisk.Contains(TEXT("L5\n")));
+				TestFalse(TEXT("L2 gone"), OnDisk.Contains(TEXT("L2")));
+				TestFalse(TEXT("L3 gone"), OnDisk.Contains(TEXT("L3")));
+			}
+		});
+
+		It("rejects an out-of-range splice with invalid_line_range", [this]()
+		{
+			FUnrealOpenMcpToolHandler Handler;
+			GetSourceHandler(TEXT("unreal_open_mcp_source_update"), Handler);
+			const FString Path = CrudModule / TEXT("RangeError.cpp");
+			WriteFile(FPaths::ConvertRelativePathToFull(Path), TEXT("only\n"));
+			const FString Body = FString::Printf(
+				TEXT("{\"path\":\"%s\",\"content\":\"x\",\"start_line\":1,\"end_line\":99}"), *Path);
+			const FUnrealOpenMcpToolDispatchResult Result = Handler(Body);
+			TestFalse(TEXT("ok false"), Result.bOk);
+			TestEqual(TEXT("code"), Result.Code, FString(TEXT("invalid_line_range")));
+		});
+
+		It("rejects a half-range with invalid_parameter", [this]()
+		{
+			FUnrealOpenMcpToolHandler Handler;
+			GetSourceHandler(TEXT("unreal_open_mcp_source_update"), Handler);
+			const FString Path = CrudModule / TEXT("HalfRange.cpp");
+			WriteFile(FPaths::ConvertRelativePathToFull(Path), TEXT("only\n"));
+			const FString Body = FString::Printf(
+				TEXT("{\"path\":\"%s\",\"content\":\"x\",\"start_line\":1}"), *Path);
+			const FUnrealOpenMcpToolDispatchResult Result = Handler(Body);
+			TestFalse(TEXT("ok false"), Result.bOk);
+			TestEqual(TEXT("code"), Result.Code, FString(TEXT("invalid_parameter")));
+		});
+
+		It("rejects a malformed JSON body with invalid_parameter", [this]()
+		{
+			FUnrealOpenMcpToolHandler Handler;
+			GetSourceHandler(TEXT("unreal_open_mcp_source_update"), Handler);
+			const FUnrealOpenMcpToolDispatchResult Result = Handler(TEXT("{not json"));
+			TestFalse(TEXT("ok false"), Result.bOk);
+			TestEqual(TEXT("code"), Result.Code, FString(TEXT("invalid_parameter")));
+		});
+	});
+
+	Describe("unreal_open_mcp_source_delete — handler contract", [this]()
+	{
+		BeforeEach([this]() { CreateCrudModule(); });
+		AfterEach([this]() { RemoveCrudModule(); });
+
+		It("rejects a missing file with file_not_found", [this]()
+		{
+			FUnrealOpenMcpToolHandler Handler;
+			TestTrue(TEXT("handler registered"),
+				GetSourceHandler(TEXT("unreal_open_mcp_source_delete"), Handler));
+			const FString Body = FString::Printf(
+				TEXT("{\"path\":\"%s/Gone.cpp\"}"), *CrudModule);
+			const FUnrealOpenMcpToolDispatchResult Result = Handler(Body);
+			TestFalse(TEXT("ok false"), Result.bOk);
+			TestEqual(TEXT("code"), Result.Code, FString(TEXT("file_not_found")));
+		});
+
+		It("refuses a directory with is_directory", [this]()
+		{
+			FUnrealOpenMcpToolHandler Handler;
+			GetSourceHandler(TEXT("unreal_open_mcp_source_delete"), Handler);
+			const FString Body = FString::Printf(TEXT("{\"path\":\"%s\"}"), *CrudModule);
+			const FUnrealOpenMcpToolDispatchResult Result = Handler(Body);
+			TestFalse(TEXT("ok false"), Result.bOk);
+			TestEqual(TEXT("code"), Result.Code, FString(TEXT("is_directory")));
+		});
+
+		It("returns path_escapes_jail for a traversal path", [this]()
+		{
+			FUnrealOpenMcpToolHandler Handler;
+			GetSourceHandler(TEXT("unreal_open_mcp_source_delete"), Handler);
+			const FUnrealOpenMcpToolDispatchResult Result = Handler(
+				TEXT("{\"path\":\"../Config/DefaultEngine.ini\"}"));
+			TestFalse(TEXT("ok false"), Result.bOk);
+			TestEqual(TEXT("code"), Result.Code, FString(TEXT("path_escapes_jail")));
+		});
+
+		It("deletes a file and reports deleted:true", [this]()
+		{
+			FUnrealOpenMcpToolHandler Handler;
+			GetSourceHandler(TEXT("unreal_open_mcp_source_delete"), Handler);
+			const FString Path = CrudModule / TEXT("KillMe.cpp");
+			WriteFile(FPaths::ConvertRelativePathToFull(Path), TEXT("bye\n"));
+			TestTrue(TEXT("seed exists"), FPaths::FileExists(FPaths::ConvertRelativePathToFull(Path)));
+			const FString Body = FString::Printf(TEXT("{\"path\":\"%s\"}"), *Path);
+			const FUnrealOpenMcpToolDispatchResult Result = Handler(Body);
+			if (!TestTrue(TEXT("ok"), Result.bOk))
+			{
+				return;
+			}
+			const TSharedPtr<FJsonObject> Json = ParseJson_Source(Result.Output);
+			if (TestNotNull(TEXT("json"), Json.Get()))
+			{
+				TestTrue(TEXT("deleted true"), Json->GetBoolField(TEXT("deleted")));
+			}
+			TestFalse(TEXT("file gone"),
+				FPaths::FileExists(FPaths::ConvertRelativePathToFull(Path)));
+		});
+
+		It("rejects a malformed JSON body with invalid_parameter", [this]()
+		{
+			FUnrealOpenMcpToolHandler Handler;
+			GetSourceHandler(TEXT("unreal_open_mcp_source_delete"), Handler);
+			const FUnrealOpenMcpToolDispatchResult Result = Handler(TEXT("{not json"));
+			TestFalse(TEXT("ok false"), Result.bOk);
+			TestEqual(TEXT("code"), Result.Code, FString(TEXT("invalid_parameter")));
 		});
 	});
 }

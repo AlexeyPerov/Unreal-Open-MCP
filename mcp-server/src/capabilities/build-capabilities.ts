@@ -174,6 +174,15 @@ const TOOL_CATEGORY: Record<string, string> = {
   // to Source/ (escapes never read); no gate path (read-only).
   unreal_open_mcp_source_read: "source",
   unreal_open_mcp_source_list: "source",
+  // P7.2 — Source CRUD mutators. Three mutating tools (route live, default gate
+  // Enforce, paths_hint required) that scaffold / edit / remove source files
+  // under <Project>/Source/ via the P7.1 jail helpers. create_class scaffolds a
+  // header + cpp from parent-kind templates; update is full-file replace or
+  // line-range splice; delete removes a single file. All three JAILED to
+  // Source/ (escapes never write); no compile here (P7.3 lands it).
+  unreal_open_mcp_source_create_class: "source",
+  unreal_open_mcp_source_update: "source",
+  unreal_open_mcp_source_delete: "source",
 };
 
 function categoryFor(toolName: string): string {

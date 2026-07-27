@@ -184,6 +184,19 @@ import { blueprintSpawn } from "./blueprint-spawn.js";
 // spine is the dependency every later P7 sub-plan (CRUD / compile) builds on.
 import { sourceRead } from "./source-read.js";
 import { sourceList } from "./source-list.js";
+// P7.2 — Source CRUD mutators. Three mutating tools (default gate Enforce;
+// paths_hint required) that scaffold / edit / remove source files under
+// <Project>/Source/ via the P7.1 jail helpers. source_create_class scaffolds a
+// header + cpp from parent-kind templates (UObject / Actor / ActorComponent /
+// None) into an existing module folder, derives the U/A/F prefix, emits the
+// MODULE_API macro, refuses overwrite unless force, rolls back the header if
+// the cpp write fails. source_update is full-file replace or a 1-based inclusive
+// line-range splice on an existing file (preserves detected EOL when splicing).
+// source_delete removes a single file (refuses directories). All three JAILED
+// to Source/ — escapes never write. No compile here (P7.3 lands it).
+import { sourceCreateClass } from "./source-create-class.js";
+import { sourceUpdate } from "./source-update.js";
+import { sourceDelete } from "./source-delete.js";
 
 // Tool registry. P1.7 registers the first real tool — `unreal_open_mcp_ping` —
 // which the MCP server routes to the bridge's `GET /ping`. Each subsequent tool
@@ -325,4 +338,7 @@ export const ALL_TOOLS: Tool[] = [
   blueprintSpawn,
   sourceRead,
   sourceList,
+  sourceCreateClass,
+  sourceUpdate,
+  sourceDelete,
 ];

@@ -14,7 +14,7 @@ A desktop **Hub** app for guided setup is planned but deferred.
 - `mcp-server/` — MCP stdio server, tool registry, routing.
 - `packages/bridge/` — Unreal HTTP bridge and typed tool handlers (shipped as `Plugins/UnrealOpenMCP/`).
 - `packages/verify/` — validation rules and fixes used by gate flows (standalone; bridge depends on verify).
-- `cli/` — `unreal-open-mcp-cli` setup/ops CLI (`cli/src/index.ts` entry, `cli/src/cli.ts` dispatcher, `cli/src/args.ts` argv parser, `cli/src/help-text.ts` help/version formatters). Separate publishable package from the stdio MCP server (ADR-007).
+- `cli/` — `unreal-open-mcp-cli` setup/ops CLI (`cli/src/index.ts` entry, `cli/src/cli.ts` dispatcher, `cli/src/args.ts` argv parser, `cli/src/help-text.ts` help/version formatters, `cli/src/commands/install-plugin.ts` first implemented command, `cli/src/lib/install-plugin.ts` + `cli/src/lib/uproject.ts` + `cli/src/lib/plugin-source.ts` install internals). Separate publishable package from the stdio MCP server (ADR-007).
 - `skills/` — agent playbooks (`SKILL.md`).
 - `demo/` — minimal Unreal C++ demo project with fixtures.
 - `scripts/` — version sync and maintenance scripts.
@@ -87,7 +87,7 @@ The contract surface mirrors Unity Open MCP's `packages/verify/Editor/Core/` + `
 
 ## Plugin layout
 
-The bridge is authored under `packages/bridge/` and installed into an Unreal project as `Plugins/UnrealOpenMCP/`:
+The bridge is authored under `packages/bridge/` and installed into an Unreal project as `Plugins/UnrealOpenMCP/`. The `unreal-open-mcp-cli install-plugin` command performs that install (and the verify plugin's, into `Plugins/UnrealOpenMCPVerify/`), copying the source tree while excluding `Intermediate/` and `Binaries/` build artifacts, and idempotently enabling both plugins in the project's `.uproject`:
 
 ```
 packages/bridge/

@@ -244,13 +244,15 @@ test("runCli(unknown option) writes the error to stderr and exits 2", async () =
 });
 
 test("runCli(recognized-but-unimplemented command) exits 2 with a not-implemented message", async () => {
-  // P8.1: every known command is recognized but unimplemented.
-  const cmd = KNOWN_COMMANDS[0];
+  // P8.2: install-plugin is implemented; pick a command that is still
+  // recognized-but-unimplemented to exercise the not-implemented branch.
+  const cmd = KNOWN_COMMANDS.find((c) => !IMPLEMENTED_COMMANDS.includes(c));
+  assert.ok(cmd, "expected at least one recognized-but-unimplemented command");
   const out = await captureStream("stderr", () =>
-    runCli({ version: "0.0.0", argv: [cmd] }),
+    runCli({ version: "0.0.0", argv: [cmd!] }),
   );
   assert.match(out, new RegExp(`'${cmd}' is recognized but not implemented yet`));
-  const outcome = await runCli({ version: "0.0.0", argv: [cmd] });
+  const outcome = await runCli({ version: "0.0.0", argv: [cmd!] });
   assert.equal(outcome.handled, true);
   assert.equal(outcome.exitCode, 2);
 });
@@ -272,7 +274,35 @@ test("versionText formats as '<bin> <version>'", () => {
   assert.equal(versionText("5.5.5", "custom-bin"), "custom-bin 5.5.5");
 });
 
-test("IMPLEMENTED_COMMANDS is empty in P8.1 (no handlers yet)", () => {
-  // Guards against an accidental stub shipping before its module lands.
-  assert.deepEqual([...IMPLEMENTED_COMMANDS], []);
+test("IMPLEMENTED_COMMANDS lists install-plugin in P8.2", () => {
+  // Guards against an accidental stub shipping before its module lands, while
+  // acknowledging install-plugin now has a real handler.
+  assert.deepEqual([...IMPLEMENTED_COMMANDS], ["install-plugin"]);
+});
+
+// ---------------------------------------------------------------------------
+// install-plugin options (parsed globally, consumed by the command)
+// ---------------------------------------------------------------------------
+
+test("parseCliArgs: --plugin-source requires a value", () => {
+  assert.match(parse(["install-plugin", "--plugin-source"]).error ?? "", /--plugin-source/);
+});
+
+test("parseCliArgs: --plugin-source captures the value", () => {
+  assert.equal(
+    parse(["install-plugin", "--plugin-source", "/mono/root"]).pluginSource,
+    "/mono/root",
+  );
+});
+
+test("parseCliArgs: --symlink / --with-verify / --no-verify / --dry-run flags", () => {
+  assert.equal(parse(["install-plugin", "--symlink"]).symlink, true);
+  assert.equal(parse(["install-plugin", "--with-verify"]).withVerify, true);
+  assert.equal(parse(["install-plugin", "--no-verify"]).withVerify, false);
+  assert.equal(parse(["install-plugin", "--dry-run"]).dryRun, true);
+  // defaults
+  const p = parse(["install-plugin"]);
+  assert.equal(p.symlink, false);
+  assert.equal(p.withVerify, undefined);
+  assert.equal(p.dryRun, false);
 });

@@ -14,9 +14,10 @@
 // `import()` that runs only when that subcommand is dispatched — mirroring
 // Unity's lazy-load contract.
 //
-// P8.1: no command is implemented yet. A recognized-but-unimplemented command
-// returns a structured `command_not_implemented` message and exit code 2 so an
-// agent or script gets a clean signal (never a silent no-op or a hang).
+// P8.2: `install-plugin` is the first implemented command. Every other
+// recognized-but-unimplemented command returns a structured
+// `command_not_implemented` message and exit code 2 so an agent or script gets
+// a clean signal (never a silent no-op or a hang).
 
 import { parseCliArgs, IMPLEMENTED_COMMANDS } from "./args.js";
 import { helpText, versionText } from "./help-text.js";
@@ -78,14 +79,39 @@ export async function runCli(opts: CliRunOptions = {}): Promise<CliRunOutcome> {
     return { handled: true, exitCode: 0 };
   }
 
-  // Recognized command. P8.1 has no handlers yet; surface a clean not-implemented
-  // signal. P8.2+ replaces this branch with a dynamic import of the command
-  // module when IMPLEMENTED_COMMANDS includes the token.
+  // Recognized command. Unimplemented commands surface a clean not-implemented
+  // signal; implemented commands (IMPLEMENTED_COMMANDS) dynamically import their
+  // module so the `--version` / `--help` fast path never pulls in the heavier
+  // command graph (mirrors Unity Open MCP's lazy-load contract).
   if (!IMPLEMENTED_COMMANDS.includes(parsed.command)) {
     const msg = `'${parsed.command}' is recognized but not implemented yet in this build. ` +
       `Implemented: ${IMPLEMENTED_COMMANDS.length === 0 ? "(none yet)" : IMPLEMENTED_COMMANDS.join(", ")}.`;
     await writeAndDrain(process.stderr, `${binName}: ${msg}\n`);
     return { handled: true, exitCode: 2 };
+  }
+
+  // --- dispatch implemented commands -------------------------------------
+  // The first positional after the command token is the `[projectDir]` arg for
+  // the commands that accept it (install-plugin today).
+  const positionalProjectDir = parsed.positionals[0];
+
+  if (parsed.command === "install-plugin") {
+    const mod = await import("./commands/install-plugin.js");
+    const outcome = await mod.runInstallPluginCommand(
+      {
+        projectPath: parsed.projectPath,
+        pluginSource: parsed.pluginSource,
+        symlink: parsed.symlink,
+        withVerify: parsed.withVerify,
+        dryRun: parsed.dryRun,
+        json: parsed.json,
+        positionalProjectDir,
+      },
+      (s) => writeAndDrain(process.stdout, s),
+      (s) => writeAndDrain(process.stderr, s),
+      binName,
+    );
+    return { handled: true, exitCode: outcome.exitCode };
   }
 
   // Future command dispatch goes here. Kept as an unreachable guard so the

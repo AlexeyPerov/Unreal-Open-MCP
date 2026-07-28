@@ -25,6 +25,15 @@
 //   --port <n>      | -p <n>       override UNREAL_OPEN_MCP_BRIDGE_PORT
 //   --json                        emit JSON instead of human-readable output
 //   -v, --verbose                 verbose diagnostics (reserved; honored later)
+//
+// Per-command options (parsed here so the global parser can keep rejecting
+// genuinely unknown tokens; consumed by the matching command module):
+//   install-plugin:
+//     --plugin-source <dir>   monorepo root to source the plugins from
+//     --symlink               dev-mode symlink install (default: copy)
+//     --with-verify           install the verify plugin too (default)
+//     --no-verify             skip the verify plugin
+//     --dry-run               resolve + report, write nothing
 
 export type CliCommand =
   | "install-plugin"
@@ -42,10 +51,10 @@ export type CliCommand =
  * remainder surface a structured "not implemented yet" message so an agent or
  * script gets a clean signal instead of a silent no-op.
  *
- * P8.1: NONE are implemented — the array is empty. P8.2+ appends each command
- * as its module lands.
+ * P8.1: NONE are implemented. P8.2 appends `install-plugin` as its module
+ * lands; P8.3+ appends each later command.
  */
-export const IMPLEMENTED_COMMANDS: readonly string[] = [];
+export const IMPLEMENTED_COMMANDS: readonly string[] = ["install-plugin"];
 
 /** Every command the parser recognizes (and --help advertises). */
 export const KNOWN_COMMANDS: readonly string[] = [
@@ -67,6 +76,24 @@ export interface ParsedCli {
   projectPath: string | undefined;
   /** Resolved bridge port override (flag wins; else UNREAL_OPEN_MCP_BRIDGE_PORT env at call time). */
   port: number | undefined;
+  /**
+   * install-plugin: `--plugin-source <dir>` override (a monorepo root).
+   * Undefined when not passed.
+   */
+  pluginSource: string | undefined;
+  /**
+   * install-plugin: `--symlink` (dev-mode symlink install). False when not
+   * passed; never `undefined` so the command module can read it as a boolean.
+   */
+  symlink: boolean;
+  /**
+   * install-plugin: tri-state of `--with-verify` / `--no-verify`.
+   * `undefined` = not passed (command applies its own default of `true`);
+   * `true` / `false` = explicit.
+   */
+  withVerify: boolean | undefined;
+  /** install-plugin: `--dry-run` — resolve + report, write nothing. */
+  dryRun: boolean;
   /** Leftover positionals after the command token (forwarded to future command modules). */
   positionals: string[];
   /** Parse error message; when set, the dispatcher prints it and exits non-zero. */
@@ -82,6 +109,10 @@ export function emptyParsed(): ParsedCli {
     verbose: false,
     projectPath: undefined,
     port: undefined,
+    pluginSource: undefined,
+    symlink: false,
+    withVerify: undefined,
+    dryRun: false,
     positionals: [],
     error: undefined,
     unknown: [],
@@ -144,6 +175,39 @@ export function parseCliArgs(argv: string[]): ParsedCli {
       }
       parsed.port = n;
       i += 2;
+      continue;
+    }
+
+    // --- install-plugin options (parsed globally so unknown tokens are still
+    //     rejected; consumed only when the command is install-plugin). ---
+    if (tok === "--plugin-source") {
+      const v = args[i + 1];
+      if (!v || v.startsWith("-")) {
+        parsed.error = `${tok} requires a directory path.`;
+        return parsed;
+      }
+      parsed.pluginSource = v;
+      i += 2;
+      continue;
+    }
+    if (tok === "--symlink") {
+      parsed.symlink = true;
+      i++;
+      continue;
+    }
+    if (tok === "--with-verify") {
+      parsed.withVerify = true;
+      i++;
+      continue;
+    }
+    if (tok === "--no-verify") {
+      parsed.withVerify = false;
+      i++;
+      continue;
+    }
+    if (tok === "--dry-run") {
+      parsed.dryRun = true;
+      i++;
       continue;
     }
 

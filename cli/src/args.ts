@@ -40,6 +40,16 @@
 //     --list                  list supported agent ids and config paths
 //     --server-command <cmd>  override the MCP server command (default: npx)
 //     --dry-run               print the snippet instead of writing it
+//
+//   open:
+//     <projectDir>            project dir (also accepted positionally)
+//     --engine-root <dir>     explicit engine install root (source builds)
+//     --no-build              accepted for forward compat (MVP does not pre-build)
+//
+//   wait-for-ready:
+//     <projectDir>            project dir (also accepted positionally)
+//     --timeout <ms>          overall wait budget (default 120000)
+//     --interval <ms>         sleep between polls (default 2000)
 
 export type CliCommand =
   | "install-plugin"
@@ -63,6 +73,8 @@ export type CliCommand =
 export const IMPLEMENTED_COMMANDS: readonly string[] = [
   "install-plugin",
   "setup-mcp",
+  "open",
+  "wait-for-ready",
 ];
 
 /** Every command the parser recognizes (and --help advertises). */
@@ -114,6 +126,26 @@ export interface ParsedCli {
    * only when the command is setup-mcp.
    */
   serverCommand: string | undefined;
+  /**
+   * open: `--engine-root <dir>` — explicit engine install root (source-build
+   * escape hatch). Consumed only when the command is open.
+   */
+  engineRoot: string | undefined;
+  /**
+   * open: `--no-build` — accepted for forward compat (MVP does not pre-build
+   * via UBT before launch). Consumed only when the command is open.
+   */
+  noBuild: boolean;
+  /**
+   * wait-for-ready: `--timeout <ms>` — overall wait budget. Consumed only when
+   * the command is wait-for-ready.
+   */
+  timeout: number | undefined;
+  /**
+   * wait-for-ready: `--interval <ms>` — sleep between polls. Consumed only when
+   * the command is wait-for-ready.
+   */
+  interval: number | undefined;
   /** Leftover positionals after the command token (forwarded to future command modules). */
   positionals: string[];
   /** Parse error message; when set, the dispatcher prints it and exits non-zero. */
@@ -135,6 +167,10 @@ export function emptyParsed(): ParsedCli {
     dryRun: false,
     list: false,
     serverCommand: undefined,
+    engineRoot: undefined,
+    noBuild: false,
+    timeout: undefined,
+    interval: undefined,
     positionals: [],
     error: undefined,
     unknown: [],
@@ -251,6 +287,49 @@ export function parseCliArgs(argv: string[]): ParsedCli {
       continue;
     }
 
+    // --- open options (parsed globally so unknown tokens are still rejected;
+    //     consumed only when the command is open). ---
+    if (tok === "--engine-root") {
+      const v = args[i + 1];
+      if (!v || v.startsWith("-")) {
+        parsed.error = `${tok} requires a directory path.`;
+        return parsed;
+      }
+      parsed.engineRoot = v;
+      i += 2;
+      continue;
+    }
+    if (tok === "--no-build") {
+      parsed.noBuild = true;
+      i++;
+      continue;
+    }
+
+    // --- wait-for-ready options (parsed globally so unknown tokens are still
+    //     rejected; consumed only when the command is wait-for-ready). ---
+    if (tok === "--timeout") {
+      const v = args[i + 1];
+      const n = parsePositiveInt(v);
+      if (n === undefined) {
+        parsed.error = `${tok} requires a positive integer (milliseconds).`;
+        return parsed;
+      }
+      parsed.timeout = n;
+      i += 2;
+      continue;
+    }
+    if (tok === "--interval") {
+      const v = args[i + 1];
+      const n = parsePositiveInt(v);
+      if (n === undefined) {
+        parsed.error = `${tok} requires a positive integer (milliseconds).`;
+        return parsed;
+      }
+      parsed.interval = n;
+      i += 2;
+      continue;
+    }
+
     // --- positionals ---
     if (!tok.startsWith("-")) {
       if (!sawCommand) {
@@ -286,5 +365,18 @@ export function parsePort(v: string | undefined): number | undefined {
   if (v === undefined || v.startsWith("-")) return undefined;
   const n = Number(v);
   if (!Number.isInteger(n) || n < 1 || n > 65535) return undefined;
+  return n;
+}
+
+/**
+ * Parse a positive integer (milliseconds) for `--timeout` / `--interval`.
+ * Rejects anything that is not a positive integer (a leading `-` would
+ * otherwise parse as a flag value). Rejects 0 — a zero budget / interval is not
+ * meaningful for a poll loop.
+ */
+export function parsePositiveInt(v: string | undefined): number | undefined {
+  if (v === undefined || v.startsWith("-")) return undefined;
+  const n = Number(v);
+  if (!Number.isInteger(n) || n <= 0) return undefined;
   return n;
 }

@@ -274,10 +274,16 @@ test("versionText formats as '<bin> <version>'", () => {
   assert.equal(versionText("5.5.5", "custom-bin"), "custom-bin 5.5.5");
 });
 
-test("IMPLEMENTED_COMMANDS lists install-plugin + setup-mcp", () => {
+test("IMPLEMENTED_COMMANDS lists install-plugin + setup-mcp + open + wait-for-ready", () => {
   // Guards against an accidental stub shipping before its module lands, while
-  // acknowledging install-plugin and setup-mcp now have real handlers.
-  assert.deepEqual([...IMPLEMENTED_COMMANDS], ["install-plugin", "setup-mcp"]);
+  // acknowledging install-plugin, setup-mcp, open, and wait-for-ready now have
+  // real handlers.
+  assert.deepEqual([...IMPLEMENTED_COMMANDS], [
+    "install-plugin",
+    "setup-mcp",
+    "open",
+    "wait-for-ready",
+  ]);
 });
 
 // ---------------------------------------------------------------------------

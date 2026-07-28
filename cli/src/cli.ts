@@ -114,6 +114,25 @@ export async function runCli(opts: CliRunOptions = {}): Promise<CliRunOutcome> {
     return { handled: true, exitCode: outcome.exitCode };
   }
 
+  if (parsed.command === "setup-mcp") {
+    const mod = await import("./commands/setup-mcp.js");
+    const outcome = await mod.runSetupMcpCommand(
+      {
+        projectPath: parsed.projectPath,
+        port: parsed.port,
+        serverCommand: parsed.serverCommand,
+        dryRun: parsed.dryRun,
+        list: parsed.list,
+        json: parsed.json,
+        positionalAgent: positionalProjectDir,
+      },
+      (s) => writeAndDrain(process.stdout, s),
+      (s) => writeAndDrain(process.stderr, s),
+      binName,
+    );
+    return { handled: true, exitCode: outcome.exitCode };
+  }
+
   // Future command dispatch goes here. Kept as an unreachable guard so the
   // compiler agrees the function always returns.
   return { handled: false, exitCode: 0 };

@@ -274,10 +274,10 @@ test("versionText formats as '<bin> <version>'", () => {
   assert.equal(versionText("5.5.5", "custom-bin"), "custom-bin 5.5.5");
 });
 
-test("IMPLEMENTED_COMMANDS lists install-plugin in P8.2", () => {
+test("IMPLEMENTED_COMMANDS lists install-plugin + setup-mcp", () => {
   // Guards against an accidental stub shipping before its module lands, while
-  // acknowledging install-plugin now has a real handler.
-  assert.deepEqual([...IMPLEMENTED_COMMANDS], ["install-plugin"]);
+  // acknowledging install-plugin and setup-mcp now have real handlers.
+  assert.deepEqual([...IMPLEMENTED_COMMANDS], ["install-plugin", "setup-mcp"]);
 });
 
 // ---------------------------------------------------------------------------
@@ -305,4 +305,32 @@ test("parseCliArgs: --symlink / --with-verify / --no-verify / --dry-run flags", 
   assert.equal(p.symlink, false);
   assert.equal(p.withVerify, undefined);
   assert.equal(p.dryRun, false);
+});
+
+// ---------------------------------------------------------------------------
+// setup-mcp options (parsed globally, consumed by the command)
+// ---------------------------------------------------------------------------
+
+test("parseCliArgs: --list flag is captured", () => {
+  assert.equal(parse(["setup-mcp", "--list"]).list, true);
+  // defaults
+  assert.equal(parse(["setup-mcp"]).list, false);
+});
+
+test("parseCliArgs: --server-command captures the value", () => {
+  assert.equal(
+    parse(["setup-mcp", "cursor", "--server-command", "node"]).serverCommand,
+    "node",
+  );
+});
+
+test("parseCliArgs: --server-command requires a value", () => {
+  assert.match(parse(["setup-mcp", "--server-command"]).error ?? "", /--server-command/);
+  assert.match(parse(["setup-mcp", "--server-command", "--json"]).error ?? "", /--server-command/);
+});
+
+test("parseCliArgs: setup-mcp agent lands as a positional", () => {
+  const p = parse(["setup-mcp", "cursor"]);
+  assert.equal(p.command, "setup-mcp");
+  assert.deepEqual(p.positionals, ["cursor"]);
 });

@@ -48,7 +48,7 @@ export function helpText(binName: string = BIN_NAME): string {
     "",
     "Examples:",
     `  ${binName} install-plugin --project /path/to/MyProject`,
-    `  ${binName} setup-mcp --client cursor`,
+    `  ${binName} setup-mcp cursor --project /path/to/MyProject`,
     `  ${binName} open --project /path/to/MyProject`,
     `  ${binName} wait-for-ready`,
     `  ${binName} status --json`,

@@ -15,7 +15,7 @@ are rejected with a helpful message); command handlers land incrementally:
 | Command | Status |
 |---|---|
 | `install-plugin` | **implemented** |
-| `setup-mcp` | planned |
+| `setup-mcp` | **implemented** |
 | `open` | planned |
 | `wait-for-ready` | planned |
 | `status` | planned |
@@ -56,6 +56,45 @@ Behaviour notes:
   enabled plugin leaves the descriptor byte-identical and is a no-op success.
 - `--with-verify` is the default because the bridge plugin's `.uplugin`
   declares the verify plugin as an enabled dependency.
+
+With `--json`, success emits the result envelope on stdout; failure emits it on
+stderr (exit `2`).
+
+## setup-mcp
+
+Writes a **stdio** MCP client config snippet for a supported AI agent so it can
+spawn `unreal-open-mcp` against a project without hand-editing JSON. Stdio only
+— no HTTP, no cloud URL, no OAuth.
+
+```sh
+unreal-open-mcp-cli setup-mcp <agent> [projectDir]
+  [--project <dir>]        # project root (default: positional / UNREAL_PROJECT_PATH / cwd)
+  [--port <n>]             # also write UNREAL_OPEN_MCP_BRIDGE_PORT into the snippet
+  [--server-command <cmd>] # override the server command (default: npx -y unreal-open-mcp@<cli-version>)
+  [--dry-run]              # print the snippet instead of writing it
+  [--list]                 # list supported agent ids and their config paths
+```
+
+`<agent>` is one of the supported ids — run `setup-mcp --list` to see them all.
+The MVP roster covers Cursor, Claude Desktop, Claude Code, VS Code (Copilot),
+Gemini CLI, and Cline.
+
+The snippet always carries the absolute project root under
+`UNREAL_PROJECT_PATH`. The server command defaults to
+`npx -y unreal-open-mcp@<cli-version>` (the CLI and server version together);
+pass `--server-command node` for the monorepo-dev case (launches
+`mcp-server/dist/index.js`), or `--server-command unreal-open-mcp` for a global
+install.
+
+Behaviour notes:
+
+- A re-run **deep-merges** by server key — sibling MCP servers in the same
+  config file are preserved; only the `unreal-open-mcp` entry is replaced.
+- A malformed existing config is treated as a warning, not an error: the
+  command starts fresh under the agent's body key rather than clobbering the
+  user's hand-edited file.
+- The optional bridge port is written only when `--port` is passed — the
+  command never invents ports.
 
 With `--json`, success emits the result envelope on stdout; failure emits it on
 stderr (exit `2`).

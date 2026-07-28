@@ -34,6 +34,12 @@
 //     --with-verify           install the verify plugin too (default)
 //     --no-verify             skip the verify plugin
 //     --dry-run               resolve + report, write nothing
+//
+//   setup-mcp:
+//     <agent>                 agent id (cursor, claude-desktop, ...) — use --list
+//     --list                  list supported agent ids and config paths
+//     --server-command <cmd>  override the MCP server command (default: npx)
+//     --dry-run               print the snippet instead of writing it
 
 export type CliCommand =
   | "install-plugin"
@@ -54,7 +60,10 @@ export type CliCommand =
  * P8.1: NONE are implemented. P8.2 appends `install-plugin` as its module
  * lands; P8.3+ appends each later command.
  */
-export const IMPLEMENTED_COMMANDS: readonly string[] = ["install-plugin"];
+export const IMPLEMENTED_COMMANDS: readonly string[] = [
+  "install-plugin",
+  "setup-mcp",
+];
 
 /** Every command the parser recognizes (and --help advertises). */
 export const KNOWN_COMMANDS: readonly string[] = [
@@ -94,6 +103,17 @@ export interface ParsedCli {
   withVerify: boolean | undefined;
   /** install-plugin: `--dry-run` — resolve + report, write nothing. */
   dryRun: boolean;
+  /**
+   * setup-mcp: `--list` — list supported agent ids + config paths and exit.
+   * Consumed only when the command is setup-mcp.
+   */
+  list: boolean;
+  /**
+   * setup-mcp: `--server-command <cmd>` — override the MCP server command
+   * (default `npx`, args derived from the resolved server package). Consumed
+   * only when the command is setup-mcp.
+   */
+  serverCommand: string | undefined;
   /** Leftover positionals after the command token (forwarded to future command modules). */
   positionals: string[];
   /** Parse error message; when set, the dispatcher prints it and exits non-zero. */
@@ -113,6 +133,8 @@ export function emptyParsed(): ParsedCli {
     symlink: false,
     withVerify: undefined,
     dryRun: false,
+    list: false,
+    serverCommand: undefined,
     positionals: [],
     error: undefined,
     unknown: [],
@@ -208,6 +230,24 @@ export function parseCliArgs(argv: string[]): ParsedCli {
     if (tok === "--dry-run") {
       parsed.dryRun = true;
       i++;
+      continue;
+    }
+
+    // --- setup-mcp options (parsed globally so unknown tokens are still
+    //     rejected; consumed only when the command is setup-mcp). ---
+    if (tok === "--list") {
+      parsed.list = true;
+      i++;
+      continue;
+    }
+    if (tok === "--server-command") {
+      const v = args[i + 1];
+      if (!v || v.startsWith("-")) {
+        parsed.error = `${tok} requires a command string.`;
+        return parsed;
+      }
+      parsed.serverCommand = v;
+      i += 2;
       continue;
     }
 

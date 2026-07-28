@@ -14,6 +14,7 @@
 //   - mcp-server/package.json
 //   - packages/bridge/package.json
 //   - packages/verify/package.json
+//   - cli/package.json (unreal-open-mcp-cli — separate package, same version source)
 //   - packages/bridge/Source/.../Bridge/UnrealOpenMcpBridgeSession.h (BRIDGE_VERSION constant)
 //
 // Usage:
@@ -95,6 +96,15 @@ const TRIO_TARGETS = [
     file: "packages/verify/package.json",
     kind: "json",
     description: "verify module package.json",
+    replace: (b, v) => setJsonVersion(b, v),
+  },
+  // The CLI is a separate publishable package (ADR-007) but ships from the
+  // same checkout; keeping it on version.json avoids drift between the CLI
+  // and the MCP server / bridge / verify modules it sets up.
+  {
+    file: "cli/package.json",
+    kind: "json",
+    description: "CLI package.json (unreal-open-mcp-cli)",
     replace: (b, v) => setJsonVersion(b, v),
   },
   {

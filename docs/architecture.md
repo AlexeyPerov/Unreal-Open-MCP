@@ -14,7 +14,7 @@ A desktop **Hub** app for guided setup is planned but deferred.
 - `mcp-server/` — MCP stdio server, tool registry, routing.
 - `packages/bridge/` — Unreal HTTP bridge and typed tool handlers (shipped as `Plugins/UnrealOpenMCP/`).
 - `packages/verify/` — validation rules and fixes used by gate flows (standalone; bridge depends on verify).
-- `cli/` — `unreal-open-mcp-cli` command-line tooling.
+- `cli/` — `unreal-open-mcp-cli` setup/ops CLI (`cli/src/index.ts` entry, `cli/src/cli.ts` dispatcher, `cli/src/args.ts` argv parser, `cli/src/help-text.ts` help/version formatters). Separate publishable package from the stdio MCP server (ADR-007).
 - `skills/` — agent playbooks (`SKILL.md`).
 - `demo/` — minimal Unreal C++ demo project with fixtures.
 - `scripts/` — version sync and maintenance scripts.

@@ -5,6 +5,7 @@
 # - mcp-server: typecheck + test for the stdio MCP server package.
 # - e2e-smoke: end-to-end stdio smoke over the BUILT artifact against a loopback
 #   bridge stub (no editor required).
+# - cli: typecheck + test + build for the unreal-open-mcp-cli package.
 # - editor-boundary: Editor/Runtime module boundary guard (Runtime must never
 #   reference Editor — see scripts/check-editor-boundary.py).
 
@@ -123,6 +124,44 @@ jobs:
 
       - name: Smoke — asset_find MCP <-> bridge round-trip
         run: npm run smoke:p4
+
+  cli:
+    # Setup/ops CLI (unreal-open-mcp-cli) — separate package (ADR-007). The CLI
+    # has no runtime deps, so install is dev-only (typescript + @types/node).
+    name: CLI (typecheck + test)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cli
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: cli/package-lock.json
+
+      - name: Install dependencies
+        # No published lockfile yet for the new package; npm install generates
+        # one. Switch to `npm ci` once cli/package-lock.json is committed.
+        run: npm install
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: Smoke — --help / --version fast paths
+        run: |
+          node dist/index.js --help
+          node dist/index.js --version
 
   editor-boundary:
     name: Editor/Runtime boundary guard

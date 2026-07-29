@@ -192,6 +192,20 @@ function bodyOf(result: unknown): unknown {
   return JSON.parse(block.text as string);
 }
 
+/**
+ * Strip the `_source` / `_route` metadata the ToolRouter stamps onto every
+ * JSON result (P8.6), so a parity-pin `deepEqual` against the inner tool body
+ * is not polluted by the routing envelope. Use {@link bodyOf} when a test
+ * wants to inspect the metadata itself.
+ */
+function payloadOf(result: unknown): Record<string, unknown> {
+  const body = bodyOf(result) as Record<string, unknown>;
+  const { _source: _s, _route: _r, ...payload } = body;
+  void _s;
+  void _r;
+  return payload;
+}
+
 // --- tools/list advertises ping over the MCP wire ---------------------------
 
 test("integration: tools/list advertises unreal_open_mcp_ping", async () => {
@@ -317,7 +331,7 @@ test("integration: tools/call ping returns the bridge health body on 200", async
       assert.equal(result.isError, false);
       // The PingResponse body survives the MCP round-trip verbatim — this is
       // the parity pin on the field set (unrealVersion, status, port, ...).
-      assert.deepEqual(bodyOf(result), HEALTHY_PING);
+      assert.deepEqual(payloadOf(result), HEALTHY_PING);
     } finally {
       await cleanup();
     }
@@ -490,7 +504,7 @@ test("P2.8 integration: tools/call actor_find returns the unwrapped result body 
       // {ok,result} wrapper) survives the MCP round-trip verbatim. This is the
       // parity pin on the actor-find field set the bridge contract pins.
       assert.equal(result.isError, false);
-      assert.deepEqual(bodyOf(result), ACTOR_FIND_HIT);
+      assert.deepEqual(payloadOf(result), ACTOR_FIND_HIT);
     } finally {
       await cleanup();
     }
@@ -668,7 +682,7 @@ test("P4.5 integration: tools/call asset_find returns the unwrapped result body 
       // {ok,result} wrapper) survives the MCP round-trip verbatim — the parity
       // pin on the asset-find pagination + AssetSummary field set.
       assert.equal(result.isError, false);
-      assert.deepEqual(bodyOf(result), ASSET_FIND_HIT);
+      assert.deepEqual(payloadOf(result), ASSET_FIND_HIT);
     } finally {
       await cleanup();
     }
@@ -876,7 +890,7 @@ test("P6.6 integration: tools/call blueprint_spawn returns the unwrapped result 
       // pin on the spawn identity field set ({ actor, name, class, path,
       // location }).
       assert.equal(result.isError, false);
-      assert.deepEqual(bodyOf(result), BLUEPRINT_SPAWN_OK);
+      assert.deepEqual(payloadOf(result), BLUEPRINT_SPAWN_OK);
     } finally {
       await cleanup();
     }
@@ -985,7 +999,7 @@ test("P6.6 integration: tools/call blueprint_compile returns the clean result bo
         },
       });
       assert.equal(result.isError, false);
-      assert.deepEqual(bodyOf(result), BLUEPRINT_COMPILE_CLEAN);
+      assert.deepEqual(payloadOf(result), BLUEPRINT_COMPILE_CLEAN);
     } finally {
       await cleanup();
     }
@@ -1220,7 +1234,7 @@ test("P7.4 integration: tools/call source_update returns the unwrapped result bo
       // pin on the update identity field set ({path, mode, bytes_written,
       // lines_written}).
       assert.equal(result.isError, false);
-      assert.deepEqual(bodyOf(result), SOURCE_UPDATE_OK);
+      assert.deepEqual(payloadOf(result), SOURCE_UPDATE_OK);
     } finally {
       await cleanup();
     }
@@ -1265,7 +1279,7 @@ test("P7.4 integration: tools/call source_compile returns the clean UBT report b
         },
       });
       assert.equal(result.isError, false);
-      assert.deepEqual(bodyOf(result), SOURCE_COMPILE_CLEAN);
+      assert.deepEqual(payloadOf(result), SOURCE_COMPILE_CLEAN);
     } finally {
       await cleanup();
     }

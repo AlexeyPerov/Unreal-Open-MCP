@@ -22,12 +22,13 @@ A desktop **Hub** app for guided setup is planned but deferred.
 ## Runtime flow
 
 1. AI client calls an MCP tool.
-2. MCP server resolves the tool in the registry and dispatches it.
-3. Call goes to:
-   - the live bridge via `LiveClient` — `unreal_open_mcp_ping` routes to `GET /ping`; every other tool routes to `POST /tools/{name}` (the first typed tool, `unreal_open_mcp_actor_find`, shipped in P2.2), or
-   - offline/local readers (supported tools, planned), or
-   - local-only handlers (capabilities, manage_tools, planned).
-4. Response is a structured MCP `CallToolResult`; live errors are classified into `bridge_offline` / `bridge_timeout` / `bridge_http_error` so callers can branch on cause.
+2. MCP server resolves the tool in the registry, then delegates every call to the `ToolRouter` dispatch spine (`mcp-server/src/tool-router.ts`).
+3. `ToolRouter` classifies the tool name via its policy table into `live` | `offline` | `local` | `batch` and routes it:
+   - **live** (default) → the bridge via `LiveClient` — `unreal_open_mcp_ping` routes to `GET /ping`; every other tool routes to `POST /tools/{name}` (the first typed tool, `unreal_open_mcp_actor_find`, shipped in P2.2);
+   - **local** → in-process handlers — `unreal_open_mcp_capabilities` (capability surface) and `unreal_open_mcp_bridge_status` (lock classifier + one `/ping` probe) resolve without a bridge tool round-trip;
+   - **offline** / **batch** → recognized but refuse with structured `offline_not_implemented` / `batch_not_implemented` until their handlers land.
+4. `ToolRouter` stamps `_source` + `_route: { route }` metadata on every JSON result (success AND error) so agents can branch on where a response came from.
+5. Response is a structured MCP `CallToolResult`; live errors are classified into `bridge_offline` / `bridge_timeout` / `bridge_http_error` so callers can branch on cause.
 
 ```mermaid
 flowchart LR

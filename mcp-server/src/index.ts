@@ -27,8 +27,6 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { pathToFileURL } from "node:url";
 import { ALL_TOOLS } from "./tools/index.js";
-import { buildCapabilities } from "./capabilities/build-capabilities.js";
-import { RULE_CATALOG, FIX_CATALOG } from "./capabilities/rule-catalog.js";
 import { readPackageVersion } from "./package-version.js";
 import {
   computePort,
@@ -37,18 +35,9 @@ import {
   PORT_OVERRIDE_ENV_VAR,
   readInstanceLock,
   isPidAlive,
-  classifyInstance,
-  lockPath,
-  type InstanceLock,
 } from "./instance-discovery.js";
 import { LiveClient, type Router } from "./live-client.js";
-import {
-  deriveBridgeStatus,
-  summarizeInstanceLock,
-  bridgeStatusRecoveryHint,
-  bridgeStatusNextStep,
-  type PingProbe,
-} from "./tools/bridge-status-helpers.js";
+import { ToolRouter, routePolicy } from "./tool-router.js";
 
 /** Name advertised in the MCP `initialize` response. */
 export const SERVER_NAME = "unreal-open-mcp";
@@ -65,218 +54,108 @@ const PACKAGE_VERSION = readPackageVersion();
 const TOOL_BY_NAME = new Map(ALL_TOOLS.map((t) => [t.name, t]));
 
 /**
- * Local-route tools — resolved in-process by {@link handleLocalTool} without a
- * bridge POST round-trip. `capabilities` (P3.8) builds the capability surface
- * from the registered tool list + the static rule/fix catalog, so it works with
- * the editor down. `bridge_status` (P5.7) composes the instance-lock classifier
- * with one /ping probe (fired through the live router when one is installed); a
- * dead/stopped bridge is a successful status read, not an error. Adding a
- * local-route tool means extending this set AND adding a handler branch in
- * {@link handleLocalTool}.
- */
-const LOCAL_TOOLS: ReadonlySet<string> = new Set([
-  "unreal_open_mcp_capabilities",
-  "unreal_open_mcp_bridge_status",
-]);
-
-/**
- * Resolve a local-route tool call in-process. Returns `null` when the tool is
- * not a local-route tool (the caller then routes it through the live bridge).
- *
- * `router` is the currently-installed live router (the same one `handleCallTool`
- * dispatches live tools through). It is optional and threaded in only so
- * `bridge_status` can fire its /ping probe through the installed router;
- * capabilities ignores it. When null, bridge_status treats the ping as failed
- * (it still reports a status from the lock alone). Exported so unit tests can
- * drive the local dispatch directly without booting the live router.
- */
-export async function handleLocalTool(
-  name: string,
-  args: Record<string, unknown>,
-  router: Router | null = null,
-): Promise<CallToolResult | null> {
-  if (!LOCAL_TOOLS.has(name)) {
-    return null;
-  }
-  if (name === "unreal_open_mcp_capabilities") {
-    const kind =
-      args.kind === "tools" || args.kind === "rules" || args.kind === "fixes"
-        ? (args.kind as "tools" | "rules" | "fixes")
-        : undefined;
-    const includePlanned = args.include_planned !== false;
-    const result = buildCapabilities(
-      {
-        tools: ALL_TOOLS,
-        rules: RULE_CATALOG,
-        fixes: FIX_CATALOG,
-      },
-      { kind, includePlanned },
-    );
-    return {
-      content: [{ type: "text", text: JSON.stringify(result) }],
-      isError: false,
-    };
-  }
-  if (name === "unreal_open_mcp_bridge_status") {
-    return resolveBridgeStatus(router);
-  }
-  // Unreachable: LOCAL_TOOLS membership is checked above and every member has
-  // a handler branch. Defensive fallback keeps the call honest.
-  return {
-    isError: true,
-    content: [
-      {
-        type: "text",
-        text: `Tool ${name} is registered as local-route but has no in-process handler.`,
-      },
-    ],
-  };
-}
-
-/**
- * Module-level live router. Installed once by `main()` after env/port/token
- * resolution so the `tools/call` handler can dispatch live-routed tools without
- * threading the client through every handler closure. When unset (no client
- * installed — e.g. some unit tests exercise handlers directly without booting
- * the full wiring), known tools fall back to a "not wired" error rather than
- * crashing; unknown-tool handling is unaffected.
+ * Module-level dispatch router (P8.6). Installed once by `main()` after
+ * env/port/token resolution so the `tools/call` handler can delegate every
+ * call — local, offline, batch, and live alike — through a single policy
+ * table. The router owns the local handlers (capabilities, bridge_status) and
+ * POSTs live tools through the injected {@link LiveClient}. When unset (no
+ * router installed — e.g. a unit test exercising handlers directly), known
+ * tools fall back to a "not wired" error rather than crashing; unknown-tool
+ * handling is unaffected.
  *
  * Reset via {@link resetLiveRouterForTest} in tests so cases that assert the
  * fallback path aren't poisoned by a previous test's install.
  */
-let liveRouter: Router | null = null;
-
-/**
- * Install the live router. Called once from `main()`. Exported so tests that
- * want to drive `handleCallTool` against a stub bridge can install their own.
- */
-export function setLiveRouter(router: Router | null): void {
-  liveRouter = router;
-}
-
-/**
- * Test helper to clear the live router between cases. Not part of the runtime
- * contract — exported only because the fallback-path test needs a clean slate.
- */
-export function resetLiveRouterForTest(): void {
-  liveRouter = null;
-}
+let toolRouter: ToolRouter | null = null;
 
 /**
  * The Unreal project path the server is bound to, set by {@link getEnv} during
- * `main()`. Exported so unit tests can point it at a temp dir to plant/read an
- * instance lock without going through `main()`.
+ * `main()`. Threaded into the {@link ToolRouter} so the local `bridge_status`
+ * handler can read this project's instance lock without re-resolving env at
+ * call time. Exported so unit tests can point it at a temp dir to plant/read
+ * an instance lock without going through `main()`.
  */
 let boundProjectPath: string | null = null;
 
 /**
- * Set the bound project path used by {@link resolveBridgeStatus} to read the
- * instance lock. Installed by `main()` after env resolution; exported so tests
- * can drive bridge_status against a temp project without booting stdio.
+ * Set the bound project path used by {@link ToolRouter}'s bridge_status
+ * handler to read the instance lock. Installed by `main()` after env
+ * resolution; exported so tests can drive bridge_status against a temp project
+ * without booting stdio.
  */
 export function setBoundProjectPath(projectPath: string | null): void {
   boundProjectPath = projectPath;
 }
 
 /**
- * Resolve `unreal_open_mcp_bridge_status` in-process. Composes the instance-lock
- * classifier with one /ping probe fired through the installed `router`, then
- * maps the result with the pure `deriveBridgeStatus`. A dead / stopped bridge is
- * a *successful* status read — this never returns `isError:true`.
- *
- * The project path comes from {@link boundProjectPath} (set by `main()`); when
- * unset (a unit test that drives the handler directly), no lock is read and the
- * lock-derived signals are absent (classification defaults to `gone`).
+ * Install the live transport. Called once from `main()`; wraps the supplied
+ * transport in a {@link ToolRouter} bound to {@link boundProjectPath} so the
+ * `tools/call` handler delegates every call through the single dispatch spine.
+ * Exported so tests that want to drive `handleCallTool` against a stub bridge
+ * can install their own transport.
  */
-async function resolveBridgeStatus(
-  router: Router | null,
-): Promise<CallToolResult> {
-  const projectPath = boundProjectPath;
-  const lock: InstanceLock | null = projectPath
-    ? readInstanceLock(projectPath)
-    : null;
-  const classification = classifyInstance(lock);
-
-  // Fire one /ping probe through the installed router. When no router is
-  // installed (pre-main wiring / a direct unit test), the probe is treated as
-  // failed — the status is then derived from the lock alone (stopped unless a
-  // stale-heartbeat lock classifies dead_bridge).
-  const ping = await probeBridge(router);
-
-  const status = deriveBridgeStatus({ classification, ping });
-
-  const body = {
-    status,
-    ready: status === "running",
-    projectPath: projectPath ?? null,
-    classification,
-    recoveryHint: bridgeStatusRecoveryHint(status),
-    instance: {
-      lockPath: projectPath ? lockPath(projectPath) : null,
-      classification,
-      lock: summarizeInstanceLock(lock),
-    },
-    ping:
-      ping !== null && ping.kind === "ok"
-        ? {
-            reachable: true,
-            connected: ping.connected,
-            compiling: ping.compiling ?? null,
-            isPlaying: ping.isPlaying ?? null,
-            unrealVersion: ping.unrealVersion ?? null,
-            bridgeVersion: ping.bridgeVersion ?? null,
-            mode: ping.mode ?? null,
-          }
-        : { reachable: false },
-    nextStep: bridgeStatusNextStep(status),
-  };
-
-  return {
-    content: [{ type: "text", text: JSON.stringify(body) }],
-    isError: false,
-  };
+export function setLiveRouter(router: Router | null): void {
+  toolRouter = router ? new ToolRouter(router, boundProjectPath) : null;
 }
 
 /**
- * Fire one /ping probe through the router and parse the body into a
- * {@link PingProbe}. Returns `{ kind: "fail" }` when the router is null, the
- * probe returned an error, or the body did not parse — the status mapper only
- * needs reachable-vs-fail plus the health fields on success.
+ * Test helper to clear the dispatch router between cases. Not part of the
+ * runtime contract — exported only because the fallback-path test needs a
+ * clean slate.
  */
-async function probeBridge(router: Router | null): Promise<PingProbe> {
-  if (!router) return { kind: "fail" };
-  let result: CallToolResult;
-  try {
-    result = await router.route("unreal_open_mcp_ping", {});
-  } catch {
-    return { kind: "fail" };
-  }
-  if (result.isError) return { kind: "fail" };
-  const first = result.content[0];
-  if (!first || first.type !== "text" || typeof first.text !== "string") {
-    return { kind: "fail" };
-  }
-  let parsed: Record<string, unknown>;
-  try {
-    parsed = JSON.parse(first.text);
-  } catch {
-    return { kind: "fail" };
-  }
-  if (!parsed || typeof parsed !== "object") return { kind: "fail" };
-  return {
-    kind: "ok",
-    connected: parsed.connected === true,
-    compiling:
-      typeof parsed.compiling === "boolean" ? parsed.compiling : undefined,
-    isPlaying:
-      typeof parsed.isPlaying === "boolean" ? parsed.isPlaying : undefined,
-    unrealVersion:
-      typeof parsed.unrealVersion === "string" ? parsed.unrealVersion : null,
-    bridgeVersion:
-      typeof parsed.bridgeVersion === "string" ? parsed.bridgeVersion : undefined,
-    mode: typeof parsed.mode === "string" ? parsed.mode : undefined,
-  };
+export function resetLiveRouterForTest(): void {
+  toolRouter = null;
 }
+
+/**
+ * Resolve a local-route tool call in-process via a transient {@link ToolRouter}.
+ * Returns `null` when the tool is NOT a local-route tool (the caller then
+ * routes it through the live transport).
+ *
+ * `router` is the live transport to probe through (the same one `handleCallTool`
+ * dispatches live tools through). It is optional and threaded in only so
+ * `bridge_status` can fire its /ping probe through the installed transport;
+ * capabilities ignores it. When null, bridge_status treats the ping as failed
+ * (it still reports a status from the lock alone). Exported so unit tests can
+ * drive the local dispatch directly without booting the live transport — the
+ * router is built per-call from the passed transport + the module-level
+ * {@link boundProjectPath}, matching the production wiring.
+ */
+export async function handleLocalTool(
+  name: string,
+  args: Record<string, unknown>,
+  router: Router | null = null,
+): Promise<CallToolResult | null> {
+  if (routePolicy(name) !== "local") {
+    return null;
+  }
+  // A throwaway router bound to the same project path the production router
+  // uses. The local handlers never escape to the live transport except for the
+  // bridge_status /ping probe, so a null router degrades to a lock-only status
+  // (identical to the pre-P8.6 behavior).
+  const transient = new ToolRouter(
+    router ?? NOT_WIRED_ROUTER,
+    boundProjectPath,
+  );
+  return transient.route(name, args);
+}
+
+/**
+ * Stand-in transport for {@link handleLocalTool} when no live router is
+ * installed. capabilities never touches it; bridge_status treats any probe as
+ * failed (the expected lock-only path). It never throws on construction — the
+ * probe's own try/catch turns the call into `{ kind: "fail" }`.
+ */
+const NOT_WIRED_ROUTER: Router = {
+  async route() {
+    return {
+      isError: true,
+      content: [
+        { type: "text", text: '{"error":{"code":"not_wired"}}' },
+      ],
+    };
+  },
+};
 
 /**
  * tools/list handler. Returns the visible tool set. The registry is empty in
@@ -311,23 +190,25 @@ export async function handleCallTool(
       content: [{ type: "text", text: `Unknown tool: ${name}.${suffix}` }],
     };
   }
-  // Local-route tools resolve in-process — no bridge POST round-trip. The
-  // capabilities tool (P3.8) works with the editor down because the rule/fix
-  // catalog is static and the tool list is in-memory. bridge_status (P5.7)
-  // composes the lock classifier + one /ping probe through the installed
-  // router; a dead/stopped bridge is a successful status read.
-  // Resolve before the live-router check so a missing router never blocks a
-  // local tool (and so a unit test with no router installed can still call
-  // capabilities directly).
-  const localResult = await handleLocalTool(name, args ?? {}, liveRouter);
+  // P8.6 — every call goes through the ToolRouter dispatch spine. The router
+  // resolves local-route tools in-process (capabilities works with the editor
+  // down; bridge_status composes the lock classifier + one /ping probe) and
+  // POSTs live tools through the installed transport, stamping `_source` +
+  // `_route` metadata on every JSON result. When no router is installed (a
+  // unit test exercising handlers directly), local tools still resolve via the
+  // throwaway-router path in {@link handleLocalTool}; live/offline/batch tools
+  // fall through to the "not wired" error below.
+  if (toolRouter) {
+    return toolRouter.route(name, args ?? {});
+  }
+  // No dispatch router installed (e.g. a unit test exercising handlers
+  // directly). Local-route tools still resolve in-process so a test with no
+  // router can call capabilities / bridge_status; everything else surfaces a
+  // "not wired" error rather than silently succeeding.
+  const localResult = await handleLocalTool(name, args ?? {}, null);
   if (localResult !== null) {
     return localResult;
   }
-  if (liveRouter) {
-    return liveRouter.route(name, args ?? {});
-  }
-  // No live router installed — e.g. a unit test exercising handlers directly.
-  // Keeps the call honest rather than silently succeeding.
   return {
     isError: true,
     content: [
@@ -463,8 +344,11 @@ function getEnv(): {
 
 async function main(): Promise<void> {
   // Resolve project + bridge port + auth token at startup, then install the
-  // LiveClient so the tools/call handler can dispatch live-routed tools
-  // (`unreal_open_mcp_ping` is the first; other tools land in later phases).
+  // dispatch router. `getEnv()` first records the bound project path; the
+  // ToolRouter (installed next via setLiveRouter) captures it so the local
+  // bridge_status handler can read this project's instance lock. The router is
+  // the single dispatch spine for every tools/call (local + live; offline/batch
+  // stubs refuse until their handlers land).
   const env = getEnv();
   setLiveRouter(
     new LiveClient(env.port, env.authToken, env.projectPath),
@@ -527,22 +411,29 @@ if (entrypointUrl === import.meta.url) {
 //    fallback" vs Unity's "env override" / "instance discovery") so users can
 //    tell whether a live lock supplied the port.
 //  - LiveClient is the minimal P1.7 surface (ping only; `tool_not_routed` for
-//    other names). No BatchSpawn / ToolRouter / offline routing / resources /
-//    CLI dispatch yet. P3.8 adds the first **local-route** tool
-//    (`unreal_open_mcp_capabilities`) — resolved in-process by
-//    `handleLocalTool` before the live-router check, so it works with the
-//    editor down. P5.7 adds the second local-route tool
-//    (`unreal_open_mcp_bridge_status`) — composes the lock classifier with one
-//    /ping probe fired through the installed router; `handleLocalTool` now
-//    receives the router so the probe reuses the same LiveClient path. The full
-//    per-tool router (live / offline / local / batch) lands in Phase 8 and will
-//    absorb this dispatch into a `ToolRouter`.
+//    other names). No BatchSpawn / offline routing / resources / CLI dispatch
+//    yet. P3.8 added the first **local-route** tool
+//    (`unreal_open_mcp_capabilities`); P5.7 added the second
+//    (`unreal_open_mcp_bridge_status`). P8.6 folded both local handlers and the
+//    live dispatch into a single `ToolRouter` (`tool-router.ts`) — the dispatch
+//    spine this file delegates `tools/call` to. The router owns the policy
+//    table (live / offline / local / batch), resolves local tools in-process,
+//    POSTs live tools through the LiveClient, and stamps `_source` + `_route`
+//    metadata on every JSON result. Offline handlers (disk parsers) and batch
+//    (headless commandlet) are recognized policies that refuse with structured
+//    `offline_not_implemented` / `batch_not_implemented` until their phases
+//    land; they never silently fall through to live. The pre-P8.6 local
+//    dispatch (`handleLocalTool` + the inline `LOCAL_TOOLS` branching) is gone;
+//    `handleLocalTool` survives as a thin test facade that builds a throwaway
+//    `ToolRouter` so the bridge_status unit tests keep driving the local path
+//    without booting the live transport.
 //  - Handlers (`handleListTools`, `handleCallTool`) are exported standalone so
 //    tests can exercise them directly. Unity inlines them inside `createServer`
 //    and tests other modules; we export them so the dispatch + fallback paths
-//    are unit-testable without booting stdio. The live router is a module-level
-//    holder with a setter so `main()` installs the real client while tests can
-//    install a stub or clear it via `resetLiveRouterForTest`.
+//    are unit-testable without booting stdio. The dispatch router is a module-
+//    level holder with a setter so `main()` installs the real router while
+//    tests can install a stub transport or clear it via
+//    `resetLiveRouterForTest`.
 //  - Explicit `transport.onclose` → `server.close()` → `process.exit(0)` to
 //    make the "clean exit on disconnect" contract observable rather than
 //    relying solely on the event loop draining.

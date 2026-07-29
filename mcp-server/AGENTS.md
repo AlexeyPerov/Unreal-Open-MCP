@@ -19,13 +19,14 @@ Rules for `mcp-server/` — the stdio MCP server (`unreal-open-mcp`). Inherits r
 
 ## Routing
 
-- `src/tool-router.ts` selects live / offline / local / batch per tool call. Route policies:
-  - **live** — requires the bridge running; routes to `POST /tools/{name}`.
-  - **offline** — local disk parsers, no Unreal editor needed.
-  - **local** — never hits Unreal (capabilities, manage_tools, skill generation).
-  - **batch** — headless Unreal commandlet (when implemented; narrower than Unity batch).
+- `src/tool-router.ts` is the single dispatch spine for every `tools/call` — `handleCallTool` in `index.ts` delegates to it. It classifies a tool name via `routePolicy(name)` into one of four routes and stamps `_source` + `_route: { route }` metadata on every JSON result (success AND error) so agents can branch on where a response came from. Route policies:
+  - **live** (default) — POSTs to the bridge via the injected `LiveClient` (`unreal_open_mcp_ping` → `GET /ping`; everything else → `POST /tools/{name}`). Stamped `_source: "live"`, `_route.route: "live"`.
+  - **offline** — local disk parsers, no editor needed. Empty today; lands in P8.7. A tool classified offline before its handler lands returns `offline_not_implemented` (never a silent live fallthrough).
+  - **local** — resolved in-process, never hits the bridge. Wired today: `unreal_open_mcp_capabilities`, `unreal_open_mcp_bridge_status`. Forward-looking local-only tools (`generate_skill`, `manage_tools`) must never depend on the live bridge when they land. Stamped `_source: "local"`, `_route.route: "local"`.
+  - **batch** — headless Unreal commandlet (narrower than Unity batch). Empty today; a tool classified batch returns `batch_not_implemented` until the spawn lands.
+- The policy table lives in `routePolicy` (module-level sets: `LOCAL_ROUTE_TOOLS` / `OFFLINE_ROUTE_TOOLS` / `BATCH_ROUTE_TOOLS`; default `live`). Adding a routed tool means extending the matching set AND its handler in `ToolRouter`.
 - Do not add a new route type without updating `docs/architecture.md` and the route-policy table in `docs/api/mcp-tools.md`.
-- `unreal_open_mcp_capabilities`, `unreal_open_mcp_generate_skill`, and `unreal_open_mcp_manage_tools` are **local-only** — they must never depend on the live bridge.
+- `unreal_open_mcp_capabilities` and `unreal_open_mcp_bridge_status` are **local-only** today — they must never depend on the live bridge (bridge_status fires one `/ping` probe through the live transport but resolves the status in-process).
 
 ## Tool-group visibility
 

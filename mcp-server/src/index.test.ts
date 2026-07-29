@@ -89,7 +89,10 @@ test("handleCallTool returns a not-wired error for a known tool when no router i
 });
 
 // A known tool with a live router installed is routed through it. Proves the
-// handleCallTool → LiveClient dispatch wiring without booting stdio.
+// handleCallTool → ToolRouter → LiveClient dispatch wiring without booting
+// stdio. The ToolRouter stamps `_source` + `_route` metadata on the JSON body
+// (P8.6), so the assertion checks the inner payload survives verbatim AND the
+// route metadata identifies the live path.
 test("handleCallTool dispatches a known tool through the installed live router", async () => {
   const stubResult: CallToolResult = {
     content: [{ type: "text", text: '{"connected":true}' }],
@@ -108,7 +111,13 @@ test("handleCallTool dispatches a known tool through the installed live router",
       params: { name: "unreal_open_mcp_ping", arguments: {} },
     } as unknown as Parameters<typeof handleCallTool>[0]);
     assert.deepEqual(routed, ["unreal_open_mcp_ping"]);
-    assert.equal(result, stubResult);
+    assert.equal(result.isError, false);
+    const body = JSON.parse(
+      (result.content[0] as { type: string; text: string }).text,
+    ) as { connected: boolean; _source: string; _route: { route: string } };
+    assert.equal(body.connected, true);
+    assert.equal(body._source, "live");
+    assert.equal(body._route.route, "live");
   } finally {
     resetLiveRouterForTest();
   }

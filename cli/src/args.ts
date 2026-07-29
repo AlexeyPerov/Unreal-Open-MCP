@@ -50,6 +50,16 @@
 //     <projectDir>            project dir (also accepted positionally)
 //     --timeout <ms>          overall wait budget (default 120000)
 //     --interval <ms>         sleep between polls (default 2000)
+//
+//   status:
+//     <projectDir>            project dir (also accepted positionally)
+//     --no-probe              skip the live /ping probe
+//
+//   configure:
+//     <projectDir>            project dir (also accepted positionally)
+//     --bridge-port <n>       set the bridge port override in settings
+//     --clear-bridge-port     clear the bridge port override
+//     --dry-run               resolve + report, write nothing
 
 export type CliCommand =
   | "install-plugin"
@@ -75,6 +85,8 @@ export const IMPLEMENTED_COMMANDS: readonly string[] = [
   "setup-mcp",
   "open",
   "wait-for-ready",
+  "status",
+  "configure",
 ];
 
 /** Every command the parser recognizes (and --help advertises). */
@@ -146,6 +158,21 @@ export interface ParsedCli {
    * the command is wait-for-ready.
    */
   interval: number | undefined;
+  /**
+   * status: `--no-probe` — skip the live /ping probe and derive the status from
+   * the instance lock alone. Consumed only when the command is status.
+   */
+  noProbe: boolean;
+  /**
+   * configure: `--bridge-port <n>` — set the bridge port override in the
+   * project's settings file. Consumed only when the command is configure.
+   */
+  bridgePort: number | undefined;
+  /**
+   * configure: `--clear-bridge-port` — clear (delete) the bridge port override.
+   * Consumed only when the command is configure.
+   */
+  clearBridgePort: boolean;
   /** Leftover positionals after the command token (forwarded to future command modules). */
   positionals: string[];
   /** Parse error message; when set, the dispatcher prints it and exits non-zero. */
@@ -171,6 +198,9 @@ export function emptyParsed(): ParsedCli {
     noBuild: false,
     timeout: undefined,
     interval: undefined,
+    noProbe: false,
+    bridgePort: undefined,
+    clearBridgePort: false,
     positionals: [],
     error: undefined,
     unknown: [],
@@ -327,6 +357,33 @@ export function parseCliArgs(argv: string[]): ParsedCli {
       }
       parsed.interval = n;
       i += 2;
+      continue;
+    }
+
+    // --- status options (parsed globally so unknown tokens are still rejected;
+    // consumed only when the command is status). ---
+    if (tok === "--no-probe") {
+      parsed.noProbe = true;
+      i++;
+      continue;
+    }
+
+    // --- configure options (parsed globally so unknown tokens are still
+    // rejected; consumed only when the command is configure). ---
+    if (tok === "--bridge-port") {
+      const v = args[i + 1];
+      const n = parsePort(v);
+      if (n === undefined) {
+        parsed.error = `${tok} requires a valid port number (1-65535).`;
+        return parsed;
+      }
+      parsed.bridgePort = n;
+      i += 2;
+      continue;
+    }
+    if (tok === "--clear-bridge-port") {
+      parsed.clearBridgePort = true;
+      i++;
       continue;
     }
 

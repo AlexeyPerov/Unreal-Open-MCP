@@ -52,6 +52,9 @@ export function helpText(binName: string = BIN_NAME): string {
     `  ${binName} open --project /path/to/MyProject`,
     `  ${binName} wait-for-ready`,
     `  ${binName} status --json`,
+    `  ${binName} status --no-probe`,
+    `  ${binName} configure --bridge-port 27123`,
+    `  ${binName} configure --clear-bridge-port`,
   ].join("\n");
 }
 

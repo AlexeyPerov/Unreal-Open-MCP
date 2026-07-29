@@ -243,18 +243,13 @@ test("runCli(unknown option) writes the error to stderr and exits 2", async () =
   assert.equal(outcome.exitCode, 2);
 });
 
-test("runCli(recognized-but-unimplemented command) exits 2 with a not-implemented message", async () => {
-  // P8.2: install-plugin is implemented; pick a command that is still
-  // recognized-but-unimplemented to exercise the not-implemented branch.
-  const cmd = KNOWN_COMMANDS.find((c) => !IMPLEMENTED_COMMANDS.includes(c));
-  assert.ok(cmd, "expected at least one recognized-but-unimplemented command");
-  const out = await captureStream("stderr", () =>
-    runCli({ version: "0.0.0", argv: [cmd!] }),
-  );
-  assert.match(out, new RegExp(`'${cmd}' is recognized but not implemented yet`));
-  const outcome = await runCli({ version: "0.0.0", argv: [cmd!] });
-  assert.equal(outcome.handled, true);
-  assert.equal(outcome.exitCode, 2);
+test("every recognized command is implemented (no not-implemented branch reachable)", () => {
+  // P8.5: all six commands now have real handlers. The not-implemented branch
+  // in cli.ts is retained as a guard for future commands, but no recognized
+  // command reaches it today. This guards against a stub shipping before its
+  // module lands in either direction.
+  const unimplemented = KNOWN_COMMANDS.filter((c) => !IMPLEMENTED_COMMANDS.includes(c));
+  assert.deepEqual(unimplemented, [], `expected every recognized command implemented, but found: ${unimplemented.join(", ")}`);
 });
 
 // ---------------------------------------------------------------------------
@@ -274,15 +269,17 @@ test("versionText formats as '<bin> <version>'", () => {
   assert.equal(versionText("5.5.5", "custom-bin"), "custom-bin 5.5.5");
 });
 
-test("IMPLEMENTED_COMMANDS lists install-plugin + setup-mcp + open + wait-for-ready", () => {
-  // Guards against an accidental stub shipping before its module lands, while
-  // acknowledging install-plugin, setup-mcp, open, and wait-for-ready now have
-  // real handlers.
+test("IMPLEMENTED_COMMANDS lists every recognized command", () => {
+  // P8.5: the CLI track is complete — all six recognized commands have real
+  // handlers. Guards against an accidental stub shipping before its module
+  // lands (or a recognized command missing its dispatcher branch).
   assert.deepEqual([...IMPLEMENTED_COMMANDS], [
     "install-plugin",
     "setup-mcp",
     "open",
     "wait-for-ready",
+    "status",
+    "configure",
   ]);
 });
 

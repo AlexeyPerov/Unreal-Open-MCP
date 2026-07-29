@@ -18,8 +18,8 @@ are rejected with a helpful message); command handlers land incrementally:
 | `setup-mcp` | **implemented** |
 | `open` | **implemented** |
 | `wait-for-ready` | **implemented** |
-| `status` | planned |
-| `configure` | planned |
+| `status` | **implemented** |
+| `configure` | **implemented** |
 
 A recognized-but-unimplemented command exits `2` with a clear "not implemented
 yet" message — never a silent no-op.
@@ -191,6 +191,75 @@ module failed to recompile and `/ping` will never recover. The command exits
 
 Exit codes: `0` ready, `3` timeout / dead-bridge. With `--json`, the ready
 envelope goes to stdout; the non-ready envelope goes to stderr (exit `3`).
+
+## status
+
+Reports project, plugin presence, resolved bridge port, instance lock summary,
+and bridge readiness in one shot. This is the diagnostic surface for setup
+troubleshooting — it never fails solely because the editor is down
+(`stopped`/`unreachable` are successful reports, exit `0`), mirroring the MCP
+`unreal_open_mcp_bridge_status` tool so the CLI and MCP agree on status tokens.
+
+```sh
+unreal-open-mcp-cli status [projectDir]
+  [--port <n>]      # bridge port override (default: discovered, see below)
+  [--no-probe]      # skip the live /ping probe (derive status from the lock)
+```
+
+`projectDir` resolves in this order: the positional arg, `--project <path>`,
+`$UNREAL_PROJECT_PATH`, then the current working directory. A relative path is
+absolutized against the current working directory before hashing.
+
+The bridge port is resolved with the **same precedence the MCP server uses**
+(see `wait-for-ready`): `--port`/`$UNREAL_OPEN_MCP_BRIDGE_PORT` > live instance
+lock > deterministic hash. The instance lock + its classification are read from
+`~/.unreal-open-mcp/instances/<sha256(projectPath)>.json`. Plugin presence is
+probed under `<project>/Plugins/` (bridge + verify descriptors).
+
+Unless `--no-probe` is passed, a single `GET /ping` probe is fired at
+`http://127.0.0.1:<port>/ping`. The probe + the lock classification compose the
+coarse bridge status:
+
+- `running` — bridge connected, idle.
+- `compiling` — bridge connected, editor compiling.
+- `stopped` — editor not running OR bridge toggle off (no live listener).
+- `unreachable` — editor process alive but the listener did not respond (a
+  transient Live Coding / domain-reload window; retry shortly).
+- `dead_bridge` — editor process alive but the bridge module failed to
+  recompile, so `/ping` will never recover (fix the C++ errors and reload).
+
+With `--no-probe`, the status is derived from the lock alone (`dead_bridge` if
+the heartbeat is stale, `stopped` otherwise). Exit `0` on any report; exit `2`
+only on a project-dir resolution error. With `--json`, the report envelope goes
+to stdout.
+
+## configure
+
+Reads/writes the project-local Open MCP settings file
+(`<project>/.unreal-open-mcp/settings.json` — the same file the bridge reads
+`authMode` from, so there is one settings source). Local-only: no cloud host,
+cloud URL, connection-mode, or token fields. The MVP key is the bridge port
+override.
+
+```sh
+unreal-open-mcp-cli configure [projectDir]
+  [--bridge-port <n>]     # set the bridge port override
+  [--clear-bridge-port]   # clear (delete) the bridge port override
+  [--dry-run]             # resolve + report, write nothing
+```
+
+`projectDir` resolves in this order: the positional arg, `--project <path>`,
+`$UNREAL_PROJECT_PATH`, then the current working directory.
+
+A re-run **deep-merges** the patch into the existing settings — unrelated keys
+the bridge writes (`authMode`, `defaultGateMode`, ...) are preserved in place. A
+missing or malformed file is treated as empty (a fresh object), so configure
+never clobbers a hand-edited file with garbage. `--bridge-port` and
+`--clear-bridge-port` are mutually exclusive; running configure with neither
+prints the current settings (a read).
+
+With `--json`, the result envelope goes to stdout; failure emits it on stderr
+(exit `2`).
 
 ## The one-command loop
 

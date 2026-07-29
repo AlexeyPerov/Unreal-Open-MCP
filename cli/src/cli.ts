@@ -169,6 +169,41 @@ export async function runCli(opts: CliRunOptions = {}): Promise<CliRunOutcome> {
     return { handled: true, exitCode: outcome.exitCode };
   }
 
+  if (parsed.command === "status") {
+    const mod = await import("./commands/status.js");
+    const outcome = await mod.runStatusCommand(
+      {
+        projectPath: parsed.projectPath,
+        port: parsed.port,
+        noProbe: parsed.noProbe,
+        json: parsed.json,
+        positionalProjectDir,
+      },
+      (s) => writeAndDrain(process.stdout, s),
+      (s) => writeAndDrain(process.stderr, s),
+      binName,
+    );
+    return { handled: true, exitCode: outcome.exitCode };
+  }
+
+  if (parsed.command === "configure") {
+    const mod = await import("./commands/configure.js");
+    const outcome = await mod.runConfigureCommand(
+      {
+        projectPath: parsed.projectPath,
+        bridgePort: parsed.bridgePort,
+        clearBridgePort: parsed.clearBridgePort,
+        dryRun: parsed.dryRun,
+        json: parsed.json,
+        positionalProjectDir,
+      },
+      (s) => writeAndDrain(process.stdout, s),
+      (s) => writeAndDrain(process.stderr, s),
+      binName,
+    );
+    return { handled: true, exitCode: outcome.exitCode };
+  }
+
   // Future command dispatch goes here. Kept as an unreachable guard so the
   // compiler agrees the function always returns.
   return { handled: false, exitCode: 0 };

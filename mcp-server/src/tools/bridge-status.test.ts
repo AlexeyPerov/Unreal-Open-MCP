@@ -61,9 +61,10 @@ test("bridge_status description documents the status vocabulary, route, and reco
   assert.match(desc, /local/i);
   assert.match(desc, /read-only/i);
   assert.match(desc, /gate-free/i);
-  // The interim recovery hint names console_get_logs (the deferred offline
-  // compile-error reader is NOT shipped — see the spec's intentional delta).
-  assert.match(desc, /unreal_open_mcp_console_get_logs/);
+  // The recovery hint names read_compile_errors (the offline editor-log reader
+  // shipped in P8.7 — the one channel that works when the bridge module itself
+  // failed to compile).
+  assert.match(desc, /unreal_open_mcp_read_compile_errors/);
   // classification + recoveryHint + nextStep fields surfaced.
   assert.match(desc, /classification/);
   assert.match(desc, /recoveryHint/);
@@ -207,10 +208,10 @@ test("recoveryHint is null for running / compiling / stopped / unreachable", () 
   }
 });
 
-test("recoveryHint for dead_bridge points at console_get_logs (interim)", () => {
+test("recoveryHint for dead_bridge points at read_compile_errors", () => {
   const hint = bridgeStatusRecoveryHint("dead_bridge");
   assert.ok(hint, "dead_bridge must carry a hint");
-  assert.equal(hint.tool, "unreal_open_mcp_console_get_logs");
+  assert.equal(hint.tool, "unreal_open_mcp_read_compile_errors");
   assert.ok(hint.reason.length > 0, "reason must be non-empty");
 });
 
@@ -231,10 +232,10 @@ test("nextStep is a non-empty string for every status token", () => {
   }
 });
 
-test("nextStep for dead_bridge references console_get_logs", () => {
+test("nextStep for dead_bridge references read_compile_errors", () => {
   assert.match(
     bridgeStatusNextStep("dead_bridge"),
-    /unreal_open_mcp_console_get_logs/,
+    /unreal_open_mcp_read_compile_errors/,
   );
 });
 
@@ -508,8 +509,8 @@ test("bridge_status returns dead_bridge when the lock classifies dead + ping fai
     assert.equal(body.classification, "dead_bridge");
     assert.equal(body.ready, false);
     const hint = body.recoveryHint as { tool: string; reason: string };
-    assert.equal(hint.tool, "unreal_open_mcp_console_get_logs");
-    assert.match(body.nextStep as string, /unreal_open_mcp_console_get_logs/);
+    assert.equal(hint.tool, "unreal_open_mcp_read_compile_errors");
+    assert.match(body.nextStep as string, /unreal_open_mcp_read_compile_errors/);
     // instance.lock is populated from the planted lock.
     const lock = (body.instance as { lock: { pid: number } }).lock;
     assert.equal(lock.pid, RUNNER_PID);

@@ -42,8 +42,9 @@ export const bridgeStatus: Tool = {
     "(healthy | reloading | dead_bridge | gone) mirroring the instance lock, a " +
     "structured `recoveryHint` ({ tool, reason }) that is non-null only when " +
     "the status has a specific recovery tool (dead_bridge → " +
-    "unreal_open_mcp_console_get_logs as the interim offline-recovery surface; " +
-    "null otherwise), a `ping` summary (reachable + connected/compiling/" +
+    "unreal_open_mcp_read_compile_errors — the offline editor-log surface that " +
+    "works with the bridge assembly dead; null otherwise), a `ping` summary " +
+    "(reachable + connected/compiling/" +
     "isPlaying/versions when the probe succeeded, reachable:false otherwise), " +
     "an `instance` summary (lock path + classification + a redacted lock when a " +
     "live lock was found), and a human-readable `nextStep`. The result is a " +
@@ -61,11 +62,12 @@ export const bridgeStatus: Tool = {
 
 // Intentional deltas from Unity Open MCP (mcp-server/src/tools/bridge-status.ts):
 //   - Name `unreal_open_mcp_bridge_status` (Unity: `unity_open_mcp_bridge_status`).
-//   - `dead_bridge` recovery hint points at `unreal_open_mcp_console_get_logs`
-//     (the interim offline Output-Log surface; shipped) rather than Unity's
-//     `read_compile_errors`. The dedicated Unreal offline compile-error reader
-//     is deferred — the hint is upgraded in place when that tool ships. See
-//     bridge-status-helpers.ts#bridgeStatusRecoveryHint.
+//   - `dead_bridge` recovery hint points at `unreal_open_mcp_read_compile_errors`
+//     (the offline editor-log reader shipped in P8.7 — the one channel that
+//     works when the bridge module itself failed to compile). Unity points its
+//     equivalent at the same-named tool; the Unreal twin mirrors Unity's log-tail
+//     + structured-diagnostic shape, adapted to `<Project>/Saved/Logs/*.log` and
+//     MSVC/clang parsing. See bridge-status-helpers.ts#bridgeStatusRecoveryHint.
 //   - No cold-Safe-Mode process-scan branch. Unity detects a Unity editor
 //     running for this project even without a lock (Unity Safe Mode) and reuses
 //     the dead_bridge token. Unreal has no MCP-side editor-process scanner yet,

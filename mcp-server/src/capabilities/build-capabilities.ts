@@ -49,8 +49,18 @@ const LOCAL_TOOLS: ReadonlySet<string> = new Set([
   "unreal_open_mcp_bridge_status",
 ]);
 
+// P8.7 — offline-route tools (resolved from disk; never hit the bridge). Kept
+// in sync with the OFFLINE_ROUTE_TOOLS set in tool-router.ts (the capability
+// surface reports the same route per tool).
+const OFFLINE_TOOLS: ReadonlySet<string> = new Set([
+  "unreal_open_mcp_read_compile_errors",
+  "unreal_open_mcp_source_read_offline",
+  "unreal_open_mcp_project_index",
+]);
+
 function routePolicyFor(toolName: string): RoutePolicy {
   if (LOCAL_TOOLS.has(toolName)) return "local";
+  if (OFFLINE_TOOLS.has(toolName)) return "offline";
   return "live";
 }
 
@@ -187,6 +197,15 @@ const TOOL_CATEGORY: Record<string, string> = {
   unreal_open_mcp_source_update: "source",
   unreal_open_mcp_source_delete: "source",
   unreal_open_mcp_source_compile: "source",
+  // P8.7 — Offline reads. Three read-only tools resolved from disk (never hit
+  // the bridge) so an agent gets useful introspection when the bridge is dead:
+  // read_compile_errors (editor log tail → structured diagnostics), source_read
+  // _offline (offline twin of source_read, same Source/ jail), project_index
+  // (.uproject basics + optional Source/Config/Content file listing). All route
+  // offline; ADR-006 scope (no .uasset offline parse).
+  unreal_open_mcp_read_compile_errors: "offline",
+  unreal_open_mcp_source_read_offline: "offline",
+  unreal_open_mcp_project_index: "offline",
 };
 
 function categoryFor(toolName: string): string {

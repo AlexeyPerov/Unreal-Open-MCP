@@ -6,22 +6,24 @@
 // chosen route as metadata on the JSON result so an agent (or the integration
 // suite) can branch on where a response came from.
 //
-// Today only two routes are wired end-to-end:
+// Today three routes are wired end-to-end:
 //   - **local** — `unreal_open_mcp_capabilities` + `unreal_open_mcp_bridge_status`
 //     resolve entirely in-process (no bridge round-trip). capabilities builds
 //     the surface from the in-memory tool list + static rule/fix catalog;
 //     bridge_status composes the instance-lock classifier with one /ping probe
 //     fired through the live transport (a dead/stopped bridge is a successful
 //     status read, not an error).
+//   - **offline** (P8.7) — `unreal_open_mcp_read_compile_errors`,
+//     `unreal_open_mcp_source_read_offline`, and `unreal_open_mcp_project_index`
+//     resolve from disk with the editor DOWN (no bridge hop). read_compile_errors
+//     is the one channel that survives a dead bridge assembly — it reads the
+//     editor log tail the editor writes independently of the bridge; the source
+//     + project readers give an agent enough to orient when the bridge is dead.
 //   - **live** — the default. Every tool that is not local/offline/batch is
 //     POSTed to the bridge via the injected `LiveClient`
 //     (`unreal_open_mcp_ping` → GET /ping; everything else → POST /tools/{name}).
 //
-// The other two routes are recognized but refuse until their handlers land:
-//   - **offline** — empty today. Offline disk parsers (read_compile_errors,
-//     list_assets, …) land in P8.7. A tool routed offline before its handler
-//     exists returns a structured `offline_not_implemented` error rather than
-//     silently falling through to live.
+// The remaining route is recognized but refuses until its handler lands:
 //   - **batch** — empty today. Headless commandlet dispatch is owned by a later
 //     phase; a tool routed batch returns `batch_not_implemented` pointing at
 //     future commandlet support.
@@ -48,6 +50,19 @@ import {
   bridgeStatusNextStep,
   type PingProbe,
 } from "./tools/bridge-status-helpers.js";
+// P8.7 — offline disk readers. Read-only filesystem parsers resolved from disk
+// (no editor needed). No new runtime deps beyond node built-ins.
+import {
+  resolveEditorLogPath,
+  readLogTail,
+  DEFAULT_LOG_TAIL_BYTES,
+} from "./offline/editor-log.js";
+import {
+  summarizeProjectHealth,
+  compileErrorStatus,
+} from "./offline/compile-errors.js";
+import { readSourceOffline } from "./offline/source-read.js";
+import { buildProjectIndex } from "./offline/project-index.js";
 
 export type { CallToolResult, Router };
 
@@ -100,12 +115,21 @@ const LOCAL_ROUTE_TOOLS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * Offline-route tools — local disk parsers, no editor needed. Empty today;
- * P8.7 populates this with `read_compile_errors`, `list_assets`, etc. A name
- * here before its handler lands yields `offline_not_implemented` (never a
- * silent live fallthrough).
+ * Offline-route tools — local disk parsers, no editor needed. P8.7 populates
+ * this with the three offline read surfaces: `read_compile_errors` (editor log
+ * tail → structured diagnostics — the one channel that works when the bridge
+ * module itself failed to compile), `source_read_offline` (offline twin of
+ * source_read with the same Source/ jail), and `project_index` (.uproject
+ * basics + optional Source/Config/Content file listing). Kept in sync with the
+ * `OFFLINE_TOOLS` set in `capabilities/build-capabilities.ts`. A name here
+ * without a matching handler in {@link ToolRouter.routeOffline} yields
+ * `offline_not_implemented` (never a silent live fallthrough).
  */
-const OFFLINE_ROUTE_TOOLS: ReadonlySet<string> = new Set([]);
+const OFFLINE_ROUTE_TOOLS: ReadonlySet<string> = new Set([
+  "unreal_open_mcp_read_compile_errors",
+  "unreal_open_mcp_source_read_offline",
+  "unreal_open_mcp_project_index",
+]);
 
 /**
  * Batch-route tools — headless commandlet dispatch. Empty today; a later phase
@@ -210,6 +234,41 @@ function localError(code: string, message: string): CallToolResult {
   return sourceResult({ error: { code, message } }, "local", "local", true);
 }
 
+/**
+ * Build an offline-routed error result (a jail escape, a read failure, etc.).
+ * Tagged `_source: "offline"` + `_route: { route: "offline" }` because it is
+ * resolved from disk (the disk parse failed, but the response still came from
+ * the offline path — agents branch on `_source`/`_route`).
+ */
+function offlineError(code: string, message: string): CallToolResult {
+  return sourceResult({ error: { code, message } }, "offline", "offline", true);
+}
+
+/**
+ * Map a `source_read_offline` error code to a human-readable message (mirrors
+ * the live source_read error messages so an agent treats both paths alike).
+ */
+function describeSourceReadError(
+  code: "path_escapes_jail" | "file_not_found" | "not_a_file" | "read_failed",
+  path: string,
+): string {
+  switch (code) {
+    case "path_escapes_jail":
+      return (
+        `Path '${path}' escapes the <Project>/Source/ jail. Only relative-to-` +
+        "Source or absolute-inside-Source paths are accepted; '..' traversal, " +
+        "absolute-outside, and NTFS alternate-data-stream (':') escapes are " +
+        "refused."
+      );
+    case "file_not_found":
+      return `Source file not found: '${path}' (jailed to <Project>/Source/).`;
+    case "not_a_file":
+      return `Path '${path}' is a directory, not a file (jailed to <Project>/Source/).`;
+    case "read_failed":
+      return `Could not read source file '${path}' (jailed to <Project>/Source/).`;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // ToolRouter
 // ---------------------------------------------------------------------------
@@ -246,17 +305,7 @@ export class ToolRouter implements Router {
       case "local":
         return this.routeLocal(toolName, args);
       case "offline":
-        // P8.7 lands the offline disk parsers. Until then a tool classified
-        // offline returns a structured refusal — never a silent live
-        // fallthrough (that would mask the missing handler behind a live
-        // tool_not_found).
-        return localError(
-          "offline_not_implemented",
-          `Tool ${toolName} is classified offline-route but its disk parser ` +
-            `has not landed yet. Offline handlers ship in a later phase; until ` +
-            `then route it live (the bridge may implement it) or call ` +
-            `unreal_open_mcp_capabilities to confirm the current surface.`,
-        );
+        return this.routeOffline(toolName, args);
       case "batch":
         // A later phase owns the headless commandlet spawn. Recognize the
         // policy so a future batch tool is never accidentally POSTed live,
@@ -300,6 +349,176 @@ export class ToolRouter implements Router {
         `This is a policy-table / handler drift bug; extend LOCAL_ROUTE_TOOLS ` +
         `and routeLocal together.`,
     );
+  }
+
+  /**
+   * Resolve an offline-route tool from disk. Returns a tagged CallToolResult
+   * (stamped `_source: "offline"` + `_route: { route: "offline" }`) for every
+   * known offline tool; an unknown name that nonetheless classified offline
+   * (a policy-table / handler drift bug) surfaces as a structured offline error
+   * rather than crashing. All three offline handlers work with the editor down
+   * — they never touch the live transport.
+   *
+   * A null `projectPath` (no `UNREAL_PROJECT_PATH`) is refused with
+   * `project_path_not_bound` — the offline readers need the project root to
+   * resolve the log dir / Source jail / `.uproject`. This never falls through
+   * to live.
+   */
+  private async routeOffline(
+    name: string,
+    args: Record<string, unknown>,
+  ): Promise<CallToolResult> {
+    const projectPath = this.projectPath;
+    if (!projectPath) {
+      return offlineError(
+        "project_path_not_bound",
+        `Tool ${name} is offline-route but the MCP server has no bound project ` +
+          `path (set UNREAL_PROJECT_PATH). Offline readers need the project root ` +
+          `to resolve the editor log dir / Source jail / .uproject.`,
+      );
+    }
+    if (name === "unreal_open_mcp_read_compile_errors") {
+      return this.routeReadCompileErrors(projectPath, args);
+    }
+    if (name === "unreal_open_mcp_source_read_offline") {
+      return this.routeSourceReadOffline(projectPath, args);
+    }
+    if (name === "unreal_open_mcp_project_index") {
+      return this.routeProjectIndex(projectPath, args);
+    }
+    // Unreachable when the policy table and handler set are in sync. Defensive
+    // fallback — a live fallthrough would mask the drift.
+    return offlineError(
+      "offline_handler_missing",
+      `Tool ${name} is registered offline-route but has no disk-parser handler. ` +
+        `This is a policy-table / handler drift bug; extend OFFLINE_ROUTE_TOOLS ` +
+        `and routeOffline together.`,
+    );
+  }
+
+  /**
+   * read_compile_errors (P8.7) — read the newest editor log tail and extract
+   * structured MSVC / clang diagnostics. Works with the bridge DOWN: it reads
+   * `<Project>/Saved/Logs/*.log` directly, the one channel that survives a dead
+   * bridge assembly. A missing log is a non-error `log_not_found`; an unreadable
+   * log is `editor_log_unreadable`. Never returns `isError:true` for an empty /
+   * clean log — that is a successful read of zero diagnostics.
+   */
+  private async routeReadCompileErrors(
+    projectPath: string,
+    args: Record<string, unknown>,
+  ): Promise<CallToolResult> {
+    const tailBytes =
+      typeof args.tail_bytes === "number" && args.tail_bytes >= 4096
+        ? Math.min(Math.floor(args.tail_bytes), 1048576)
+        : DEFAULT_LOG_TAIL_BYTES;
+
+    const logPath = resolveEditorLogPath(projectPath);
+    if (!logPath) {
+      return sourceResult(
+        {
+          status: "log_not_found",
+          unhealthy: false,
+          headline: "",
+          error_count: 0,
+          errors: [],
+          logPath: null,
+          message: `No .log found under ${projectPath}/Saved/Logs/. The Unreal ` +
+            "Editor may not have written errors yet, or it is running with a " +
+            "custom -logFile path this tool does not resolve.",
+        },
+        "offline",
+        "offline",
+      );
+    }
+
+    const tail = readLogTail(logPath, tailBytes);
+    if (tail.error) {
+      return offlineError(
+        "editor_log_unreadable",
+        `Could not read the editor log at ${logPath}: ${tail.error}`,
+      );
+    }
+
+    const health = summarizeProjectHealth(tail.content);
+    const status = compileErrorStatus(health, true);
+    return sourceResult(
+      {
+        status,
+        unhealthy: health.unhealthy,
+        headline: health.headline,
+        error_count: health.errors.filter((e) => e.severity === "error").length,
+        errors: health.errors,
+        logPath,
+        tailBytes: tail.bytes,
+      },
+      "offline",
+      "offline",
+    );
+  }
+
+  /**
+   * source_read_offline (P8.7) — offline twin of source_read. Same Source/ jail
+   * + result shape; resolved from disk with the bridge down. The jail rejects
+   * `..` / absolute-outside / NTFS ADS escapes with `path_escapes_jail`.
+   */
+  private async routeSourceReadOffline(
+    projectPath: string,
+    args: Record<string, unknown>,
+  ): Promise<CallToolResult> {
+    const path = typeof args.path === "string" ? args.path : "";
+    if (!path) {
+      return offlineError(
+        "missing_parameter",
+        "Missing required parameter 'path'.",
+      );
+    }
+    const outcome = readSourceOffline(projectPath, path, {
+      start_line: typeof args.start_line === "number" ? args.start_line : undefined,
+      end_line: typeof args.end_line === "number" ? args.end_line : undefined,
+      max_lines: typeof args.max_lines === "number" ? args.max_lines : undefined,
+    });
+    if (!outcome.ok) {
+      return offlineError(outcome.code, describeSourceReadError(outcome.code, path));
+    }
+    return sourceResult(outcome.result, "offline", "offline");
+  }
+
+  /**
+   * project_index (P8.7) — `.uproject` basics + an optional file listing under
+   * Source/Config/Content. A missing `.uproject` is a non-error
+   * `uproject.found:false`; a `list` root outside the allow-list is
+   * `invalid_parameter`. Works with the bridge down.
+   */
+  private async routeProjectIndex(
+    projectPath: string,
+    args: Record<string, unknown>,
+  ): Promise<CallToolResult> {
+    const list =
+      typeof args.list === "string" ? args.list : undefined;
+    if (
+      list !== undefined &&
+      list !== "Source" &&
+      list !== "Config" &&
+      list !== "Content"
+    ) {
+      return offlineError(
+        "invalid_parameter",
+        `Invalid 'list' root '${list}'. Must be one of Source / Config / Content.`,
+      );
+    }
+    const recursive = args.recursive !== false;
+    const maxFiles =
+      typeof args.max_files === "number" && args.max_files >= 1
+        ? Math.floor(args.max_files)
+        : undefined;
+
+    const result = buildProjectIndex(projectPath, {
+      list,
+      recursive,
+      max_files: maxFiles,
+    });
+    return sourceResult(result, "offline", "offline");
   }
 
   /** capabilities (P3.8) — local-route, works with the editor down. */
@@ -415,14 +634,19 @@ export class ToolRouter implements Router {
 }
 
 // Intentional deltas from Unity Open MCP (mcp-server/src/tool-router.ts):
-//  - Skeleton only: live + local wired end-to-end. Unity's router additionally
-//    owns offline disk parsers (compressible-router + AssetModelCache), batch
-//    spawn (BatchSpawn), tool-group manage_tools, generate_skill, hub_*,
-//    restart_editor / resource_pressure, and SSE event streaming. Those land in
-//    later phases here; the router is built to absorb them via the same
-//    routePolicy table + per-route handlers.
-//  - No compressible-router / AssetModelCache (ADR-006 — no .uasset offline
-//    pipeline). Offline asset reads stay a later-phase decision.
+//  - Skeleton + offline reads wired: live + local + offline wired end-to-end.
+//    Unity's router additionally owns the compressible-router / AssetModelCache
+//    offline asset parsers, batch spawn (BatchSpawn), tool-group manage_tools,
+//    generate_skill, hub_*, restart_editor / resource_pressure, and SSE event
+//    streaming. Those land in later phases here; the router is built to absorb
+//    them via the same routePolicy table + per-route handlers.
+//  - Narrower offline set (ADR-006 — no .uasset offline pipeline): only three
+//    read surfaces today — read_compile_errors (editor log tail), source_read
+//    _offline (Source/ jail), project_index (.uproject + file tree). No
+//    compressible-router / AssetModelCache; offline `.uasset` reads stay a
+//    later-phase decision (batch commandlet). The offline diagnostic parser
+//    mirrors the bridge's ParseDiagnostics (MSVC + clang) instead of Unity's
+//    CSxxxx extractor.
 //  - Narrower batch (stub only). Unity's batch spawn covers compile_check +
 //    scan_all + baseline + regression; the Unreal commandlet equivalent is
 //    owned by a later phase.

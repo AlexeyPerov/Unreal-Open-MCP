@@ -31,13 +31,15 @@ Part of Open MCP toolset
 
 ## Key features
 
-### Live bridge + offline reads (planned)
+### Live bridge + offline reads
 
 Prefer the live Editor via a loopback HTTP bridge; read project data from disk
-when the editor is unavailable (narrow scope for binary `.uasset` assets).
+when the editor is unavailable. Offline reads cover project files, source text,
+and the editor log (compile errors when the bridge is dead) — binary `.uasset`
+assets are not parsed offline.
 
-> **Example:** "Bridge is offline — list Content Browser folders I can still
-> inspect without opening the editor."
+> **Example:** "The bridge is dead — read the compile errors from the editor
+> log and inspect the offending source file without opening the editor."
 
 ### Typed editor tool families
 

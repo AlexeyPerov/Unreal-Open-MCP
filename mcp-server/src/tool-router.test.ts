@@ -229,25 +229,22 @@ test("local route bridge_status with a failing probe still reports a status (not
 });
 
 // ---------------------------------------------------------------------------
-// Offline / batch — recognized policies that refuse until their handlers land
+// Offline — P8.7 wired end-to-end (batch still refuses until its handler lands)
 // ---------------------------------------------------------------------------
 
-test("routePolicy has no offline tools today (P8.7 lands them)", () => {
-  // Pin the empty state so a premature offline classification is caught.
-  // When P8.7 adds the first offline tool, it will also add a behavioral test
-  // asserting the offline_not_implemented refusal envelope (code + _source=local
-  // + _route.route=local). Today the policy table classifies every known tool
-  // live or local.
-  for (const name of [
-    "unreal_open_mcp_read_compile_errors",
-    "unreal_open_mcp_list_assets",
-    "unreal_open_mcp_ping",
-  ]) {
-    assert.equal(routePolicy(name), "live", `${name} should be live today`);
-  }
+test("routePolicy classifies the three P8.7 offline tools as offline", () => {
+  // P8.7 landed the first offline tools. Each is resolved from disk and never
+  // hits the live transport. The behavioral coverage (route metadata + the
+  // never-hit-live contract + structured diagnostics) lives in
+  // offline/offline.test.ts; this pins the classification table.
+  assert.equal(routePolicy("unreal_open_mcp_read_compile_errors"), "offline");
+  assert.equal(routePolicy("unreal_open_mcp_source_read_offline"), "offline");
+  assert.equal(routePolicy("unreal_open_mcp_project_index"), "offline");
   // The two local-route tools are explicitly NOT offline.
   assert.equal(routePolicy("unreal_open_mcp_capabilities"), "local");
   assert.equal(routePolicy("unreal_open_mcp_bridge_status"), "local");
+  // An unrelated name still defaults to live.
+  assert.equal(routePolicy("unreal_open_mcp_ping"), "live");
 });
 
 test("routePolicy has no batch tools today (commandlet deferred)", () => {
@@ -262,13 +259,14 @@ test("routePolicy has no batch tools today (commandlet deferred)", () => {
 // Route type coverage — every Route value is reachable through routePolicy
 // ---------------------------------------------------------------------------
 
-test("every Route value is represented in the policy table (live + local today)", () => {
+test("every Route value is represented in the policy table (live + local + offline today)", () => {
   const seen = new Set<Route>();
   seen.add(routePolicy("unreal_open_mcp_ping")); // live
   seen.add(routePolicy("unreal_open_mcp_capabilities")); // local
-  // offline + batch are empty today; documented as planned. This assertion
-  // pins the two wired routes so a regression that re-classifies either is
-  // caught.
+  seen.add(routePolicy("unreal_open_mcp_read_compile_errors")); // offline (P8.7)
+  // batch is empty today; documented as planned. This assertion pins the three
+  // wired routes so a regression that re-classifies either is caught.
   assert.ok(seen.has("live"));
   assert.ok(seen.has("local"));
+  assert.ok(seen.has("offline"));
 });

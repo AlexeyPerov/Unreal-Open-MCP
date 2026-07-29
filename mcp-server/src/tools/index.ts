@@ -214,6 +214,17 @@ import { sourceDelete } from "./source-delete.js";
 // launch failure, malformed body) map to ok:false. Closes the C++ edit loop
 // (edit -> compile -> read diagnostics -> fix -> recompile).
 import { sourceCompile } from "./source-compile.js";
+// P8.7 — Offline reads. Three read-only tools resolved from disk (never hit the
+// bridge) so an agent gets useful introspection when the bridge is dead:
+// read_compile_errors (newest <Project>/Saved/Logs/*.log tail → structured
+// MSVC/clang diagnostics — the one channel that works when the bridge module
+// itself failed to compile), source_read_offline (offline twin of source_read
+// with the same <Project>/Source/ jail), and project_index (.uproject basics +
+// an optional file listing under Source/Config/Content). All route **offline**;
+// ADR-006 scope — no .uasset offline parse.
+import { readCompileErrors } from "./read-compile-errors.js";
+import { sourceReadOffline } from "./source-read-offline.js";
+import { projectIndex } from "./project-index.js";
 
 // Tool registry. P1.7 registers the first real tool — `unreal_open_mcp_ping` —
 // which the MCP server routes to the bridge's `GET /ping`. Each subsequent tool
@@ -359,4 +370,7 @@ export const ALL_TOOLS: Tool[] = [
   sourceUpdate,
   sourceDelete,
   sourceCompile,
+  readCompileErrors,
+  sourceReadOffline,
+  projectIndex,
 ];

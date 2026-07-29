@@ -22,10 +22,10 @@
 //     has no MCP-side editor-process scanner yet, so a missing lock + a ping
 //     failure classifies as `stopped` rather than dead_bridge. When a Phase 8
 //     process scan lands, this branch can narrow.
-//   - `recoveryHint` points at `unreal_open_mcp_console_get_logs` (P5.3) as the
-//     interim offline-recovery surface; Unity points at read_compile_errors.
-//     The Unreal offline log/compile-error reader is deferred — the hint is
-//     upgraded in place when that tool ships.
+//   - `recoveryHint` now points at `unreal_open_mcp_read_compile_errors` (the
+//     offline editor-log reader shipped in P8.7) — the one channel that works
+//     when the bridge module itself failed to compile. (Previously pointed at
+//     the interim `console_get_logs` while the offline reader was deferred.)
 
 import type {
   InstanceClassification,
@@ -120,27 +120,28 @@ export function summarizeInstanceLock(
 /**
  * The recovery hint for a status, or null when the status has no specific next
  * tool (running / compiling / stopped / unreachable). `dead_bridge` carries a
- * hint pointing at the interim offline-recovery surface (`console_get_logs`);
- * upgraded to a dedicated read_compile_errors tool when that ships.
+ * hint pointing at the offline editor-log reader (`read_compile_errors`) —
+ * the one channel that works when the bridge module itself failed to compile.
  */
 export function bridgeStatusRecoveryHint(
   status: BridgeStatus,
 ): BridgeRecoveryHint | null {
   if (status === "dead_bridge") {
     return {
-      // Interim: the offline compile-error/log reader is deferred (planned
-      // later phase). Until it lands, the Output Log is the only channel that
-      // works with the bridge assembly dead — console_get_logs reads the
-      // session's GLog ring buffer so an operator can see the compile/Live
-      // Coding failure that killed the bridge. Swapped for the dedicated
-      // reader in place when it ships.
-      tool: "unreal_open_mcp_console_get_logs",
+      // The bridge assembly is dead, so every in-bridge channel
+      // (console_get_logs, source_compile, the ping probe) is dead with it.
+      // read_compile_errors reads the editor log tail directly from disk — the
+      // editor writes UBT / Live Coding / compiler diagnostics there regardless
+      // of bridge health. This is the offline twin of source_compile's
+      // structured diagnostic report (same MSVC + clang parser).
+      tool: "unreal_open_mcp_read_compile_errors",
       reason:
         "The editor process is alive but the bridge module is unreachable " +
-        "(likely a Live Coding / compile failure). Read the Output Log via " +
-        "console_get_logs for the compile errors that killed the bridge — " +
-        "the dedicated offline compile-error reader is deferred and will " +
-        "replace this hint when it ships.",
+        "(likely a Live Coding / compile failure killed the bridge assembly). " +
+        "Call read_compile_errors to read the compile errors from the editor " +
+        "log tail on disk — it works with the bridge down because the editor " +
+        "writes the log independently of the bridge. Fix the error and let the " +
+        "editor reload; the bridge reconnects on the next heartbeat.",
     };
   }
   return null;
@@ -172,17 +173,20 @@ export function bridgeStatusNextStep(status: BridgeStatus): string {
       return (
         "The bridge listener is not responding but the editor process is " +
         "running — likely a transient Live Coding / domain-reload window. " +
-        "Retry shortly; if it persists, read the Output Log via " +
-        "unreal_open_mcp_console_get_logs to check for compile errors."
+        "Retry shortly; if it persists, call " +
+        "unreal_open_mcp_read_compile_errors to read the editor log tail for " +
+        "compile errors."
       );
     case "dead_bridge":
       return (
         "The editor process is alive but the bridge module is unreachable " +
-        "(likely a Live Coding / compile failure). Call " +
-        "unreal_open_mcp_console_get_logs to read the Output Log for the " +
-        "compile errors that killed the bridge. Fix the error and let the " +
-        "editor reload; the bridge reconnects on the next heartbeat. " +
-        "If the editor is NOT reloading, the bridge toggle may be off."
+        "(likely a Live Coding / compile failure killed the bridge assembly). " +
+        "Call unreal_open_mcp_read_compile_errors to read the compile errors " +
+        "from the editor log tail on disk — it works with the bridge down " +
+        "because the editor writes the log independently of the bridge. Fix " +
+        "the error and let the editor reload; the bridge reconnects on the " +
+        "next heartbeat. If the editor is NOT reloading, the bridge toggle " +
+        "may be off."
       );
   }
 }

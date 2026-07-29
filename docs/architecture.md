@@ -26,7 +26,8 @@ A desktop **Hub** app for guided setup is planned but deferred.
 3. `ToolRouter` classifies the tool name via its policy table into `live` | `offline` | `local` | `batch` and routes it:
    - **live** (default) → the bridge via `LiveClient` — `unreal_open_mcp_ping` routes to `GET /ping`; every other tool routes to `POST /tools/{name}` (the first typed tool, `unreal_open_mcp_actor_find`, shipped in P2.2);
    - **local** → in-process handlers — `unreal_open_mcp_capabilities` (capability surface) and `unreal_open_mcp_bridge_status` (lock classifier + one `/ping` probe) resolve without a bridge tool round-trip;
-   - **offline** / **batch** → recognized but refuse with structured `offline_not_implemented` / `batch_not_implemented` until their handlers land.
+   - **offline** → disk readers resolved from the project tree with the editor DOWN — `unreal_open_mcp_read_compile_errors` (newest `<Project>/Saved/Logs/*.log` tail → structured MSVC/clang diagnostics; the one channel that works when the bridge module itself failed to compile), `unreal_open_mcp_source_read_offline` (offline twin of `source_read` with the same `<Project>/Source/` jail), and `unreal_open_mcp_project_index` (`.uproject` basics + an optional `Source`/`Config`/`Content` file listing). Offline scope is narrow (ADR-006): project files, logs, source text — **no** `.uasset` offline parse;
+   - **batch** → recognized but refuses with structured `batch_not_implemented` until the headless commandlet spawn lands.
 4. `ToolRouter` stamps `_source` + `_route: { route }` metadata on every JSON result (success AND error) so agents can branch on where a response came from.
 5. Response is a structured MCP `CallToolResult`; live errors are classified into `bridge_offline` / `bridge_timeout` / `bridge_http_error` so callers can branch on cause.
 
@@ -45,9 +46,19 @@ flowchart LR
 ## Route types
 
 - `live` — Unreal Editor bridge is running and reachable.
-- `offline` — disk readers for selected project/source operations (no editor required).
+- `offline` — disk readers for selected project/source/log operations (no editor required). Wired: `read_compile_errors`, `source_read_offline`, `project_index`.
 - `local` — no Unreal call required (catalog-style operations).
 - `batch` — headless Unreal commandlet for supported read/compile operations (planned; narrower than Unity batch).
+
+## Offline reads
+
+When the bridge is dead — the editor crashed, the bridge module failed to compile (Live Coding failure / a bad C++ edit), or the editor is simply not running — three offline tools still give an agent useful introspection by reading the project tree directly from disk. They route `offline` and never touch the live transport; every result is stamped `_source: "offline"` + `_route: { route: "offline" }`.
+
+- `unreal_open_mcp_read_compile_errors` — reads the newest `<Project>/Saved/Logs/*.log` tail and parses MSVC + clang diagnostics into the SAME `{ file, line, severity, message }[]` shape `source_compile` returns (the offline twin of the bridge's `ParseDiagnostics`). This is the one channel that survives a dead bridge assembly: the editor writes UBT / Live Coding / compiler diagnostics to the log regardless of bridge health. A missing log is a non-error `log_not_found`; a clean log is `no_errors_found`.
+- `unreal_open_mcp_source_read_offline` — the offline twin of `source_read`: same `<Project>/Source/` jail (rejects `..`, absolute-outside, and NTFS alternate-data-stream escapes), same result shape, same `start_line`/`end_line`/`max_lines` windowing. Use it when the bridge is down and you need to inspect project C++ the live tool cannot reach.
+- `unreal_open_mcp_project_index` — parses the `.uproject` descriptor (engine association, declared modules, enabled plugins) and optionally lists files under an allow-listed root (`Source` / `Config` / `Content`). The listing surfaces text extensions only; binary `.uasset`/`.umap` assets are never read or listed.
+
+**Scope (ADR-006):** offline reads cover project files, logs, and source text — they do **not** parse `.uasset` binary assets. There is no persistent parse cache; parsers rebuild per request. The `bridge_status` `dead_bridge` recovery hint points at `read_compile_errors` (the offline log reader) because it is the one diagnostic channel that works when the bridge assembly itself is dead.
 
 ## Unreal-specific constraints
 

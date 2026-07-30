@@ -45,6 +45,11 @@ flowchart LR
 
 ## Route types
 
+The per-tool route classification for every shipped tool lives in the
+[MCP tools catalog](api/mcp-tools.md#route-policy-by-tool); the table below is the
+summary. The source of truth is the `routePolicy` table in
+`mcp-server/src/tool-router.ts`.
+
 - `live` — Unreal Editor bridge is running and reachable.
 - `offline` — disk readers for selected project/source/log operations (no editor required). Wired: `read_compile_errors`, `source_read_offline`, `project_index`.
 - `local` — no Unreal call required (catalog-style operations).
@@ -267,5 +272,7 @@ The repo tracks a shared version for the npm MCP server, bridge plugin, and veri
 ## Related docs
 
 - [API index](api.md)
+- [MCP tools catalog](api/mcp-tools.md) — per-tool route classification (`live`/`offline`/`local`/`batch`), mutation + gate contract, offline coverage.
+- [Bridge HTTP](api/bridge-http.md) — loopback bridge endpoints and envelopes.
 - [Porting principles](porting-principles.md)
-- Detailed API docs (TBD): `api/mcp-tools.md`, `api/bridge-http.md`, `api/resources.md`
+- Detailed API docs (TBD): `api/resources.md`

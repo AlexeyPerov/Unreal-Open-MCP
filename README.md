@@ -101,6 +101,7 @@ Setup guides will land as the install path stabilizes.
 For users:
 
 - [API index](docs/api.md) — MCP, bridge, and contract documentation map.
+- [MCP tools catalog](docs/api/mcp-tools.md) — every tool's route (`live`/`offline`/`local`/`batch`), mutation + gate contract, and offline coverage.
 - [Bridge HTTP](docs/api/bridge-http.md) — loopback bridge endpoints and envelopes.
 
 For contributors:

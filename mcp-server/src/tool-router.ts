@@ -37,6 +37,10 @@ import type { Router } from "./live-client.js";
 import { ALL_TOOLS } from "./tools/index.js";
 import { buildCapabilities } from "./capabilities/build-capabilities.js";
 import { RULE_CATALOG, FIX_CATALOG } from "./capabilities/rule-catalog.js";
+// P8.9 — tool-group catalog + per-tool resolver. capabilities surfaces the
+// session-agnostic group catalog (which groups exist + per-group rosters);
+// per-session activation state stays in manage_tools (P8.10).
+import { TOOL_GROUPS, groupFor } from "./capabilities/tool-groups.js";
 import {
   readInstanceLock,
   classifyInstance,
@@ -535,6 +539,8 @@ export class ToolRouter implements Router {
         tools: ALL_TOOLS,
         rules: RULE_CATALOG,
         fixes: FIX_CATALOG,
+        toolGroups: TOOL_GROUPS,
+        resolveToolGroup: groupFor,
       },
       { kind, includePlanned },
     );

@@ -316,6 +316,118 @@ test("counts reflect implemented vs planned split", () => {
 });
 
 // ---------------------------------------------------------------------------
+// toolGroups block (P8.9) — session-agnostic catalog + per-group rosters
+// ---------------------------------------------------------------------------
+
+const FIXTURE_CATALOG = [
+  {
+    id: "core",
+    description: "Essential entry points.",
+    defaultEnabled: true,
+  },
+  {
+    id: "gate-and-verify",
+    description: "Verify surface.",
+    defaultEnabled: false,
+  },
+  {
+    id: "diagnostics",
+    description: "Reserved empty group.",
+    defaultEnabled: false,
+  },
+];
+
+// ping → core, validate_edit + apply_fix → gate-and-verify, capabilities →
+// null (always-visible meta). Mirrors the real catalog assignment shape.
+const FIXTURE_RESOLVE = (name: string): string | null => {
+  if (name === "unreal_open_mcp_ping") return "core";
+  if (
+    name === "unreal_open_mcp_validate_edit" ||
+    name === "unreal_open_mcp_apply_fix"
+  )
+    return "gate-and-verify";
+  return null;
+};
+
+const GROUP_DEPS: BuildCapabilitiesDeps = {
+  ...DEPS,
+  toolGroups: FIXTURE_CATALOG,
+  resolveToolGroup: FIXTURE_RESOLVE,
+};
+
+test("toolGroups surfaces the catalog with per-group rosters", () => {
+  const caps = buildCapabilities(GROUP_DEPS);
+  assert.equal(caps.toolGroups.length, FIXTURE_CATALOG.length);
+  const byId = new Map(caps.toolGroups.map((g) => [g.id, g]));
+  const core = byId.get("core");
+  assert.ok(core);
+  assert.equal(core!.defaultEnabled, true);
+  assert.deepEqual(core!.tools, ["unreal_open_mcp_ping"]);
+  assert.equal(core!.toolCount, 1);
+
+  const gate = byId.get("gate-and-verify");
+  assert.ok(gate);
+  assert.equal(gate!.defaultEnabled, false);
+  assert.deepEqual(gate!.tools, [
+    "unreal_open_mcp_apply_fix",
+    "unreal_open_mcp_validate_edit",
+  ]);
+
+  // Empty reserved group still appears with an empty roster.
+  const diag = byId.get("diagnostics");
+  assert.ok(diag);
+  assert.deepEqual(diag!.tools, []);
+  assert.equal(diag!.toolCount, 0);
+});
+
+test("toolGroups omits null-group (always-visible meta) tools from rosters", () => {
+  const caps = buildCapabilities(GROUP_DEPS);
+  for (const g of caps.toolGroups) {
+    for (const name of g.tools) {
+      assert.notEqual(name, "unreal_open_mcp_capabilities");
+      assert.notEqual(name, "unreal_open_mcp_actor_find");
+    }
+  }
+});
+
+test("toolGroups counts default-on and total groups", () => {
+  const caps = buildCapabilities(GROUP_DEPS);
+  assert.equal(caps.counts.toolGroupsTotal, FIXTURE_CATALOG.length);
+  assert.equal(caps.counts.toolGroupsDefaultEnabled, 1);
+});
+
+test("toolGroups is independent of the kind filter", () => {
+  // An agent asking for rules still sees the group catalog.
+  const caps = buildCapabilities(GROUP_DEPS, { kind: "rules" });
+  assert.equal(caps.toolGroups.length, FIXTURE_CATALOG.length);
+  assert.equal(caps.tools.length, 0);
+});
+
+test("toolGroups defaults to empty when the catalog is omitted", () => {
+  // Test fixtures that pre-date the toolGroups block (DEPS has no catalog)
+  // must keep working — the block is optional.
+  const caps = buildCapabilities(DEPS);
+  assert.deepEqual(caps.toolGroups, []);
+  assert.equal(caps.counts.toolGroupsTotal, 0);
+  assert.equal(caps.counts.toolGroupsDefaultEnabled, 0);
+});
+
+test("usageHint points at manage_tools for opt-in groups", () => {
+  const caps = buildCapabilities(GROUP_DEPS);
+  const gate = caps.toolGroups.find((g) => g.id === "gate-and-verify");
+  assert.ok(gate);
+  assert.match(gate!.usageHint, /manage_tools/);
+  assert.match(gate!.usageHint, /gate-and-verify/);
+});
+
+test("usageHint reflects default-on groups", () => {
+  const caps = buildCapabilities(GROUP_DEPS);
+  const core = caps.toolGroups.find((g) => g.id === "core");
+  assert.ok(core);
+  assert.match(core!.usageHint, /default/i);
+});
+
+// ---------------------------------------------------------------------------
 // buildCapabilities — filters
 // ---------------------------------------------------------------------------
 

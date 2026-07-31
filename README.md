@@ -68,13 +68,16 @@ through dedicated meta-tools.
 > **Example:** "Validate the last edit, show the delta, and dry-run any safe
 > fixes."
 
-### Tool groups and skills (planned)
+### Tool groups and session visibility
 
-Keep the default prompt surface small; activate domains on demand. Project
-skills teach agents the mutate → gate → fix loop.
+The default `tools/list` surface is intentionally small — `core` connectivity
+plus the always-visible discovery / recovery tools — so an agent's prompt is
+not bloated. Activate a family on demand via `manage_tools`.
 
-> **Example:** "Reset tool groups, then activate only core editor and
-> gate-and-verify."
+> **Example:** "Reset tool groups, then activate `typed-editor` and
+> `gate-and-verify`." See [Tool groups and session visibility](docs/api/tool-groups.md).
+
+Project skills (planned) will teach agents the mutate → gate → fix loop.
 
 ### Native stdio MCP
 
@@ -102,6 +105,7 @@ For users:
 
 - [API index](docs/api.md) — MCP, bridge, and contract documentation map.
 - [MCP tools catalog](docs/api/mcp-tools.md) — every tool's route (`live`/`offline`/`local`/`batch`), mutation + gate contract, and offline coverage.
+- [Tool groups and session visibility](docs/api/tool-groups.md) — group catalog, default surface, and per-session activation.
 - [Bridge HTTP](docs/api/bridge-http.md) — loopback bridge endpoints and envelopes.
 
 For contributors:

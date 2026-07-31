@@ -1,10 +1,10 @@
 // Capability-discovery builder.
 //
-// Aggregates the full capability surface (tools + verify rules + fixes) that
-// `unreal_open_mcp_capabilities` returns. Every registered tool ships as
-// `implemented: true`; planned rules (the verify-rule roadmap) are listed with
-// `implemented: false` and guidance so agents get structured "not yet
-// available" signals instead of discovering gaps by trial and error.
+// Aggregates the full capability surface (tools + verify rules + fixes + tool
+// groups) that `unreal_open_mcp_capabilities` returns. Every registered tool
+// ships as `implemented: true`; planned rules (the verify-rule roadmap) are
+// listed with `implemented: false` and guidance so agents get structured "not
+// yet available" signals instead of discovering gaps by trial and error.
 //
 // Route: **local** — no bridge round-trip required. An agent can call
 // `unreal_open_mcp_capabilities` with the editor down and still get an
@@ -15,16 +15,22 @@
 // Pure transformation module: dependencies (registered tools, rule/fix
 // catalogs) are passed in by the caller so this file has zero runtime
 // cross-file imports and loads cleanly under `node --experimental-strip-types`.
+// The tool-group catalog is a compile-time constant (see
+// `capabilities/tool-groups.ts`); it is read here without a runtime import
+// via the `groupFor` resolver passed in by the caller, keeping this module
+// import-free per the P3.8 design.
 //
-// P3.8 scope (intentional deltas from Unity):
+// Intentional deltas from Unity:
 //   1. Smaller rule catalog — Unreal v1 codes only (broken_soft_reference /
 //      missing_blueprint_parent / compile_error issue codes). No asmdef / Unity-only rules.
-//   2. No tool-groups / lifecycle / cost-hints blocks. Those land with the
-//      Phase 8 routing + session-visibility work (manage_tools / tool-session-
-//      state). The capabilities surface reports accurate rule/fix data now;
-//      the richer metadata layers stack on top later without breaking the
-//      contract (callers read only what they need).
-//   3. Local-first builder — same as Unity; no need for a bridge round-trip
+//   2. toolGroups block reports the session-agnostic catalog (which groups
+//      exist, their defaults, per-group tool rosters). Per-session activation
+//      state is NOT reported here — that lives in manage_tools `list_groups`
+//      (P8.10). No domainDefine / unityPackage / autoActivate / availability
+//      fields: Unreal has no compile-gated domain packs yet (P12), so every
+//      group is always compiled in.
+//   3. No lifecycle / cost-hints / routing-narrative blocks yet.
+//   4. Local-first builder — same as Unity; no need for a bridge round-trip
 //      to list rules.
 
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
@@ -231,12 +237,49 @@ export interface CapabilitiesResult {
   tools: ToolCapability[];
   rules: RuleCapability[];
   fixes: FixCapability[];
+  /**
+   * Tool-group catalog (session-agnostic). Reports which groups exist, their
+   * default-on flag, and the per-group tool roster so an agent can reason
+   * about the visibility surface before calling manage_tools. Per-session
+   * activation state is NOT here — that lives in manage_tools `list_groups`
+   * (P8.10). Independent of the `kind` filter: an agent asking for rules or
+   * fixes still benefits from seeing the group catalog.
+   */
+  toolGroups: ToolGroupCapability[];
   counts: {
     toolsImplemented: number;
     rulesImplemented: number;
     rulesPlanned: number;
     fixesImplemented: number;
+    /** Count of catalog groups enabled by default for a fresh session. */
+    toolGroupsDefaultEnabled: number;
+    /** Total group count. */
+    toolGroupsTotal: number;
   };
+}
+
+/**
+ * One tool-group catalog entry surfaced via capabilities. Session-agnostic —
+ * mirrors the catalog row in `capabilities/tool-groups.ts` plus the per-group
+ * tool roster derived from the registered tool set. No availability / domain-
+ * define fields: Unreal has no compile-gated domain packs yet, so every group
+ * is always compiled in.
+ */
+export interface ToolGroupCapability {
+  /** Stable lowercase group id. */
+  id: string;
+  description: string;
+  /** True when the group is enabled by default for fresh sessions. */
+  defaultEnabled: boolean;
+  /** Count of registered tools in the group. */
+  toolCount: number;
+  /** Registered tool names in the group, sorted. */
+  tools: string[];
+  /**
+   * Usage hint surfaced to the agent. Always points at manage_tools so the
+   * agent knows to activate the group before invoking its tools.
+   */
+  usageHint: string;
 }
 
 export interface CapabilitiesFilter {
@@ -250,10 +293,74 @@ export interface CapabilitiesFilter {
 // Dependencies — injected by the caller so this module stays import-free
 // ---------------------------------------------------------------------------
 
+/**
+ * Minimal catalog row shape build-capabilities needs to surface a group. A
+ * structural subset of the full {@link ToolGroup} in `tool-groups.ts` — kept
+ * local so this module does not import the catalog module (the catalog is
+ * passed in via {@link BuildCapabilitiesDeps.toolGroups}).
+ */
+export interface ToolGroupCatalogEntry {
+  id: string;
+  description: string;
+  defaultEnabled: boolean;
+}
+
 export interface BuildCapabilitiesDeps {
   tools: Tool[];
   rules: RuleCapability[];
   fixes: FixCapability[];
+  /**
+   * Tool-group catalog (session-agnostic). Optional — when omitted, the
+   * `toolGroups` block is empty. The production caller passes the real
+   * catalog from `capabilities/tool-groups.ts`; test fixtures may omit it.
+   */
+  toolGroups?: ToolGroupCatalogEntry[];
+  /**
+   * Resolves a tool name to its group id (or `null` for always-visible meta /
+   * recovery tools). Used to bucket the registered tool set into per-group
+   * rosters. Optional — defaults to "no assignment" when omitted.
+   */
+  resolveToolGroup?: (toolName: string) => string | null;
+}
+
+/**
+ * Build the session-agnostic tool-group catalog block. Buckets the registered
+ * tool names into per-group rosters via the resolver, then maps the catalog
+ * rows to capability descriptors. Groups with no tools still appear (the
+ * `diagnostics` reserved group ships empty in the current phase). Tools with
+ * a `null` group (meta / recovery tools) are intentionally omitted.
+ */
+function buildToolGroups(
+  catalog: ToolGroupCatalogEntry[],
+  tools: Tool[],
+  resolveGroup: (toolName: string) => string | null,
+): ToolGroupCapability[] {
+  const toolsByGroup = new Map<string, string[]>();
+  for (const tool of tools) {
+    const g = resolveGroup(tool.name);
+    if (g === null) continue;
+    const list = toolsByGroup.get(g) ?? [];
+    list.push(tool.name);
+    toolsByGroup.set(g, list);
+  }
+
+  return catalog.map((g) => {
+    const roster = (toolsByGroup.get(g.id) ?? []).slice().sort();
+    return {
+      id: g.id,
+      description: g.description,
+      defaultEnabled: g.defaultEnabled,
+      toolCount: roster.length,
+      tools: roster,
+      usageHint: buildUsageHint(g),
+    };
+  });
+}
+
+function buildUsageHint(group: ToolGroupCatalogEntry): string {
+  return group.defaultEnabled
+    ? `On by default; deactivate via manage_tools to hide.`
+    : `Activate via manage_tools(action=activate, group='${group.id}') to surface these tools.`;
 }
 
 export function buildCapabilities(
@@ -280,10 +387,17 @@ export function buildCapabilities(
     ? deps.fixes
     : deps.fixes.filter((f) => f.implemented);
 
+  // toolGroups is independent of the kind filter — an agent asking for rules
+  // or fixes still benefits from seeing the group catalog.
+  const catalog = deps.toolGroups ?? [];
+  const resolveGroup = deps.resolveToolGroup ?? (() => null);
+  const toolGroups = buildToolGroups(catalog, deps.tools, resolveGroup);
+
   return {
     tools: filter.kind === "rules" || filter.kind === "fixes" ? [] : tools,
     rules: filter.kind === "tools" || filter.kind === "fixes" ? [] : rules,
     fixes: filter.kind === "tools" || filter.kind === "rules" ? [] : fixes,
+    toolGroups,
     counts: {
       toolsImplemented: tools.length,
       rulesImplemented: deps.rules.filter((r) => r.implemented).length,
@@ -291,6 +405,8 @@ export function buildCapabilities(
         ? deps.rules.filter((r) => !r.implemented).length
         : 0,
       fixesImplemented: deps.fixes.filter((f) => f.implemented).length,
+      toolGroupsDefaultEnabled: catalog.filter((g) => g.defaultEnabled).length,
+      toolGroupsTotal: catalog.length,
     },
   };
 }

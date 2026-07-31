@@ -12,6 +12,7 @@ import {
   resetLiveRouterForTest,
   SERVER_NAME,
   PROJECT_PATH_ENV_VAR,
+  sessionState,
 } from "./index.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 
@@ -20,52 +21,63 @@ const here = dirname(fileURLToPath(import.meta.url));
 // server entrypoint under test is the sibling dist-test/index.js.
 const SERVER_ENTRY = resolve(here, "index.js");
 
-// tools/list returns the registered tool set. P1.7 registered the first tool
-// (`unreal_open_mcp_ping`); P2.2 added `unreal_open_mcp_actor_find`; P2.3 added
-// `unreal_open_mcp_actor_create`; P2.4 added `unreal_open_mcp_actor_modify` +
-// `unreal_open_mcp_object_modify`; P2.5 added actor_set_parent /
-// actor_duplicate / actor_destroy + the five actor_component_* tools; P2.6
-// added the five level lifecycle tools (level_open / level_save /
-// level_list_loaded / level_set_current / level_unload_sublevel); P2.7 added
-// the level inspect + create pair (level_get_data / level_create); P3.6 added
-// the three gate meta-tools (validate_edit / checkpoint_create / delta); P3.7
-// added apply_fix; P3.8 added capabilities; P4.1 added the asset read pair
-// (asset_find / asset_get_data); P4.2 added the Content Browser CRUD family
-// (asset_create_folder / asset_copy / asset_move / asset_delete /
-// asset_refresh); P4.3 added the material family (material_create /
-// material_modify / material_get_data); P4.4 added asset_import; P5.1 added the
-// editor family; P5.2 added editor selection; P5.3 added the console family;
-// P5.4 added the reflection family; P5.5 added the screenshot family; P5.7
-// added bridge_status; P6.1 added the Blueprint family (blueprint_create /
-// blueprint_get; P6.2 added blueprint_add_component /
-// blueprint_remove_component; P6.3 added blueprint_add_variable /
-// blueprint_modify_variable / blueprint_set_default; P6.4 added
-// blueprint_add_function / blueprint_add_event; P6.5 added blueprint_compile;
-// P6.6 added blueprint_spawn).
-// Further tools land in later phases and append here.
-test("handleListTools returns the registered tools", async () => {
+// tools/list returns the *visible* tool set, filtered through the per-session
+// tool-group state (P8.9). A fresh session advertises the lean `core` surface
+// plus the always-visible meta / recovery tools. The full registry is larger
+// (70 tools as of P8.7); the default surface is intentionally small so an
+// agent's prompt is not bloated before it activates a group.
+//
+// Registry history (the full set is larger than the default surface): P1.7
+// registered `unreal_open_mcp_ping`; P2.x added the actor / object / level
+// families; P3.6 added the three gate meta-tools; P3.7 added apply_fix; P3.8
+// added capabilities; P4.x added asset / material / import; P5.x added editor /
+// selection / console / reflection / screenshot / bridge_status; P6.x added
+// the Blueprint family; P7.x added the source family; P8.7 added the offline
+// readers. Further tools land in later phases.
+test("handleListTools returns the lean default surface for a fresh session", async () => {
+  // Isolate: a previous test may have activated a group on the shared session
+  // state. Reset to defaults so this assertion pins the fresh-session surface.
+  sessionState.reset();
   const result = await handleListTools();
-  assert.equal(result.tools.length, 70);
-  assert.equal(result.tools[0].name, "unreal_open_mcp_ping");
-  assert.equal(result.tools[1].name, "unreal_open_mcp_actor_find");
-  assert.equal(result.tools[2].name, "unreal_open_mcp_actor_create");
-  assert.equal(result.tools[3].name, "unreal_open_mcp_actor_modify");
-  assert.equal(result.tools[4].name, "unreal_open_mcp_object_modify");
-  assert.equal(result.tools[5].name, "unreal_open_mcp_actor_set_parent");
-  assert.equal(result.tools[6].name, "unreal_open_mcp_actor_duplicate");
-  assert.equal(result.tools[7].name, "unreal_open_mcp_actor_destroy");
-  assert.equal(result.tools[8].name, "unreal_open_mcp_actor_component_add");
-  assert.equal(result.tools[9].name, "unreal_open_mcp_actor_component_destroy");
-  assert.equal(result.tools[10].name, "unreal_open_mcp_actor_component_get");
-  assert.equal(result.tools[11].name, "unreal_open_mcp_actor_component_modify");
-  assert.equal(result.tools[12].name, "unreal_open_mcp_actor_component_list_all");
+  // Default-on group is `core` only (ping) + the always-visible meta / recovery
+  // tools. ping is both in `core` and always-visible, so it is counted once.
+  // The offline recovery tools (source_read_offline, project_index) have no
+  // group assignment (null group) and are always visible via the filter's null
+  // fallback.
+  const names = result.tools.map((t) => t.name).sort();
+  assert.deepEqual(names, [
+    "unreal_open_mcp_bridge_status",
+    "unreal_open_mcp_capabilities",
+    "unreal_open_mcp_ping",
+    "unreal_open_mcp_project_index",
+    "unreal_open_mcp_read_compile_errors",
+    "unreal_open_mcp_source_read_offline",
+  ]);
 });
 
-// Unknown tool → structured MCP error with isError, listing registered names.
-// The suffix names every registered tool so the agent can self-correct.
+test("handleListTools reflects the full registry when every group is active", async () => {
+  // Sanity check the filter is not accidentally dropping tools when nothing is
+  // hidden. Activate every group and confirm the surface matches the registry
+  // size (the non-grouped meta / recovery tools are always visible, so the
+  // union is the full registry).
+  sessionState.reset();
+  sessionState.activate("gate-and-verify");
+  sessionState.activate("typed-editor");
+  try {
+    const result = await handleListTools();
+    assert.equal(result.tools.length, 70);
+    assert.equal(result.tools[0].name, "unreal_open_mcp_ping");
+  } finally {
+    sessionState.reset();
+  }
+});
+
+// Unknown tool → structured MCP error with isError, listing the *visible*
+// registered names (the session-filtered set the agent sees via tools/list).
 test("handleCallTool returns isError for an unknown tool", async () => {
   // Clear any router a previous test installed so this case is isolated.
   resetLiveRouterForTest();
+  sessionState.reset();
   const result = await handleCallTool({
     params: { name: "unreal_open_mcp_does_not_exist", arguments: {} },
   } as unknown as Parameters<typeof handleCallTool>[0]);
@@ -73,7 +85,14 @@ test("handleCallTool returns isError for an unknown tool", async () => {
   assert.ok(Array.isArray(result.content));
   const text = (result.content[0] as { type: string; text: string }).text;
   assert.match(text, /Unknown tool:/);
-  assert.match(text, /Registered tools: unreal_open_mcp_ping, unreal_open_mcp_actor_find, unreal_open_mcp_actor_create, unreal_open_mcp_actor_modify, unreal_open_mcp_object_modify/);
+  // The self-correction suffix names the visible tools (the lean default
+  // surface), not the full registry.
+  assert.match(text, /unreal_open_mcp_ping/);
+  assert.doesNotMatch(
+    text,
+    /unreal_open_mcp_actor_find/,
+    "a hidden tool must not be listed as reachable",
+  );
 });
 
 // A known tool with no live router installed falls back to a "not wired" error
@@ -259,20 +278,20 @@ test("subprocess: boots, answers initialize + tools/list, exits 0 on EOF", async
     | undefined;
   assert.ok(list, "tools/list response missing");
   const tools = list?.result?.tools ?? [];
-  assert.equal(tools.length, 70);
-  assert.equal(tools[0].name, "unreal_open_mcp_ping");
-  assert.equal(tools[1].name, "unreal_open_mcp_actor_find");
-  assert.equal(tools[2].name, "unreal_open_mcp_actor_create");
-  assert.equal(tools[3].name, "unreal_open_mcp_actor_modify");
-  assert.equal(tools[4].name, "unreal_open_mcp_object_modify");
-  assert.equal(tools[5].name, "unreal_open_mcp_actor_set_parent");
-  assert.equal(tools[6].name, "unreal_open_mcp_actor_duplicate");
-  assert.equal(tools[7].name, "unreal_open_mcp_actor_destroy");
-  assert.equal(tools[8].name, "unreal_open_mcp_actor_component_add");
-  assert.equal(tools[9].name, "unreal_open_mcp_actor_component_destroy");
-  assert.equal(tools[10].name, "unreal_open_mcp_actor_component_get");
-  assert.equal(tools[11].name, "unreal_open_mcp_actor_component_modify");
-  assert.equal(tools[12].name, "unreal_open_mcp_actor_component_list_all");
+  // A fresh subprocess session advertises the lean default surface: the `core`
+  // group (ping) plus the always-visible meta / recovery tools (capabilities,
+  // bridge_status, read_compile_errors, source_read_offline, project_index —
+  // the last two have a null group and survive the filter's null fallback).
+  // The full registry is larger; groups activate on demand via manage_tools.
+  const names = tools.map((t) => t.name).sort();
+  assert.deepEqual(names, [
+    "unreal_open_mcp_bridge_status",
+    "unreal_open_mcp_capabilities",
+    "unreal_open_mcp_ping",
+    "unreal_open_mcp_project_index",
+    "unreal_open_mcp_read_compile_errors",
+    "unreal_open_mcp_source_read_offline",
+  ]);
 });
 
 // Missing UNREAL_PROJECT_PATH → exit 1 with a clear stderr message.

@@ -47,6 +47,7 @@ import {
   setLiveRouter,
   resetLiveRouterForTest,
   SERVER_NAME,
+  sessionState,
 } from "./index.js";
 import { LiveClient, type PingResponse } from "./live-client.js";
 
@@ -213,6 +214,13 @@ test("integration: tools/list advertises unreal_open_mcp_ping", async () => {
   // stray tools/call couldn't crash. Point it at a dead port; we never call.
   const { client, cleanup } = await setupClient(1);
   try {
+    // The per-session group filter (P8.9) shrinks tools/list to the lean
+    // default surface. Activate every group so this drift-guard deep-equals
+    // the full registered roster; the lean-surface contract is pinned in
+    // index.test.ts + tool-session-state.test.ts. Reset on exit so the shared
+    // module-level store does not leak into the next case.
+    sessionState.activate("gate-and-verify");
+    sessionState.activate("typed-editor");
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name);
     assert.ok(
@@ -316,6 +324,7 @@ test("integration: tools/list advertises unreal_open_mcp_ping", async () => {
       "unreal_open_mcp_project_index",
     ]);
   } finally {
+    sessionState.reset();
     await cleanup();
   }
 });

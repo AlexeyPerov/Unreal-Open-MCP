@@ -38,6 +38,14 @@ import {
 } from "./instance-discovery.js";
 import { LiveClient, type Router } from "./live-client.js";
 import { ToolRouter, routePolicy } from "./tool-router.js";
+// P8.9 — per-session tool-group visibility. ListTools filters the registered
+// tool set through this store so a fresh session advertises the lean `core`
+// surface (+ always-visible meta / recovery tools) instead of the full catalog.
+// manage_tools (P8.10) is the only mutator; ListTools is the only reader here.
+import {
+  ToolSessionState,
+  filterVisibleTools,
+} from "./tool-session-state.js";
 
 /** Name advertised in the MCP `initialize` response. */
 export const SERVER_NAME = "unreal-open-mcp";
@@ -86,6 +94,19 @@ let boundProjectPath: string | null = null;
 export function setBoundProjectPath(projectPath: string | null): void {
   boundProjectPath = projectPath;
 }
+
+/**
+ * Per-session tool-group visibility store (P8.9). One stdio server process
+ * has one connected MCP client and therefore one store. ListTools filters the
+ * registered tool set through it via {@link filterVisibleTools}; manage_tools
+ * (P8.10) will be the only mutator. The store is in-memory and resets to the
+ * catalog default-on set (`core` only) on every server restart.
+ *
+ * Module-level so the ListTools handler and the future manage_tools handler
+ * share one instance. Exported so unit tests can drive the store (activate a
+ * group, then assert ListTools reflects it) without re-creating it.
+ */
+export const sessionState = new ToolSessionState();
 
 /**
  * Install the live transport. Called once from `main()`; wraps the supplied
@@ -158,12 +179,14 @@ const NOT_WIRED_ROUTER: Router = {
 };
 
 /**
- * tools/list handler. Returns the visible tool set. The registry is empty in
- * P1.5; per-session group filtering lands later. Exported so unit tests can
- * call it directly without booting a stdio transport.
+ * tools/list handler. Returns the visible tool set, filtered through the
+ * per-session tool-group state ({@link sessionState}). A fresh session
+ * advertises the lean `core` surface plus always-visible meta / recovery
+ * tools; manage_tools (P8.10) activates other groups on demand. Exported so
+ * unit tests can call it directly without booting a stdio transport.
  */
 export async function handleListTools(_request?: ListToolsRequest) {
-  return { tools: ALL_TOOLS };
+  return { tools: filterVisibleTools(ALL_TOOLS, sessionState) };
 }
 
 /**
@@ -180,11 +203,16 @@ export async function handleCallTool(
   const { name, arguments: args } = request.params;
   const tool = TOOL_BY_NAME.get(name);
   if (!tool) {
-    const known = ALL_TOOLS.map((t) => t.name);
+    // List the VISIBLE tools (the session-filtered set the agent sees via
+    // tools/list), not the full registry — a self-correction hint that names
+    // tools the agent cannot currently reach would be misleading.
+    const visible = filterVisibleTools(ALL_TOOLS, sessionState).map(
+      (t) => t.name,
+    );
     const suffix =
-      known.length > 0
-        ? ` Registered tools: ${known.join(", ")}.`
-        : " No tools are registered yet.";
+      visible.length > 0
+        ? ` Registered tools: ${visible.join(", ")}.`
+        : " No tools are visible in this session.";
     return {
       isError: true,
       content: [{ type: "text", text: `Unknown tool: ${name}.${suffix}` }],

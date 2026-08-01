@@ -41,6 +41,7 @@ import {
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { ToolListChangedNotificationSchema } from "@modelcontextprotocol/sdk/types.js";
 
 import {
   createServer as createMcpServer,
@@ -322,6 +323,7 @@ test("integration: tools/list advertises unreal_open_mcp_ping", async () => {
       "unreal_open_mcp_read_compile_errors",
       "unreal_open_mcp_source_read_offline",
       "unreal_open_mcp_project_index",
+      "unreal_open_mcp_manage_tools",
     ]);
   } finally {
     sessionState.reset();
@@ -1463,5 +1465,99 @@ test("P7.4 integration: tools/call source_update surfaces the tool error envelop
     }
   } finally {
     await bridge.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// manage_tools (P8.10) — activate → tools/list_changed → filtered tools grow
+//
+// The full MCP round-trip a compliant client relies on: calling manage_tools
+// to activate a group must (a) emit exactly one notifications/tools/list_changed
+// over the transport and (b) make the newly-active group's tools appear in the
+// next tools/list. No-op activations must NOT emit. This pins the wiring end
+// to end — the ToolRouter fires the callback installed by createServer, which
+// pushes server.notification({ method: "notifications/tools/list_changed" }),
+// and the SDK Client delivers it to a registered notification handler.
+// ---------------------------------------------------------------------------
+
+test("integration: manage_tools activate typed-editor emits tools/list_changed and grows tools/list", async () => {
+  const { client, cleanup } = await setupClient(1);
+  try {
+    sessionState.reset();
+    // Collect every tools/list_changed notification the client receives.
+    const notifications: unknown[] = [];
+    client.setNotificationHandler(ToolListChangedNotificationSchema, (n) => {
+      notifications.push(n);
+    });
+
+    // Pre-condition: a fresh session hides typed-editor tools.
+    const before = await client.listTools();
+    assert.ok(
+      !before.tools.some((t) => t.name === "unreal_open_mcp_actor_find"),
+      "actor_find must be hidden before typed-editor is active",
+    );
+
+    // Activate typed-editor over the MCP wire.
+    const result = await client.callTool({
+      name: "unreal_open_mcp_manage_tools",
+      arguments: { action: "activate", group: "typed-editor" },
+    });
+    const payload = payloadOf(result) as { changed: boolean };
+    assert.equal(payload.changed, true);
+
+    // The notification is pushed asynchronously; give the transport a beat to
+    // deliver it before asserting.
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(
+      notifications.length,
+      1,
+      "a real visibility change emits exactly one tools/list_changed",
+    );
+
+    // The next tools/list now includes the previously-hidden tool.
+    const after = await client.listTools();
+    assert.ok(
+      after.tools.some((t) => t.name === "unreal_open_mcp_actor_find"),
+      "actor_find must be visible after typed-editor activates",
+    );
+  } finally {
+    sessionState.reset();
+    await cleanup();
+  }
+});
+
+test("integration: a no-op manage_tools activate does NOT emit tools/list_changed", async () => {
+  const { client, cleanup } = await setupClient(1);
+  try {
+    sessionState.reset();
+    const notifications: unknown[] = [];
+    client.setNotificationHandler(ToolListChangedNotificationSchema, (n) => {
+      notifications.push(n);
+    });
+
+    // First activate is a real change → one notification.
+    await client.callTool({
+      name: "unreal_open_mcp_manage_tools",
+      arguments: { action: "activate", group: "typed-editor" },
+    });
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(notifications.length, 1);
+
+    // Second activate of the same group is a no-op → no new notification.
+    const result = await client.callTool({
+      name: "unreal_open_mcp_manage_tools",
+      arguments: { action: "activate", group: "typed-editor" },
+    });
+    const payload = payloadOf(result) as { changed: boolean };
+    assert.equal(payload.changed, false);
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(
+      notifications.length,
+      1,
+      "a no-op activate must NOT emit a second notification",
+    );
+  } finally {
+    sessionState.reset();
+    await cleanup();
   }
 });

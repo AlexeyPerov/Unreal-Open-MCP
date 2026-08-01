@@ -7,9 +7,10 @@
 //
 // `unreal_open_mcp_manage_tools` (P8.10) is the only mutator of the tool-group
 // state. ListTools reads it via `filterVisibleTools` to drop tools whose group
-// is not active. In P8.9 only the store + filter are wired; manage_tools and
-// the `notifications/tools/list_changed` signal land in P8.10. Unit tests
-// exercise the store's `activate` / `deactivate` / `reset` directly.
+// is not active. manage_tools (routed in tool-router.ts) mutates the store on
+// activate / deactivate / reset, and the server emits
+// `notifications/tools/list_changed` when the visible surface changes. Unit
+// tests also exercise the store's `activate` / `deactivate` / `reset` directly.
 //
 // The store is intentionally not keyed by session id — the stdio MCP server
 // has exactly one client per process. HTTP/SSE MCP transports would need a
@@ -66,8 +67,10 @@ export type ActivationSource = "default" | "manual";
  */
 const ALWAYS_VISIBLE_TOOLS: ReadonlySet<string> = new Set([
   "unreal_open_mcp_capabilities",
-  // manage_tools is not registered yet (P8.10); listed now so the allow-list
-  // is complete the moment it lands and the filter needs no edit.
+  // P8.10 — manage_tools is the group mutator. It has no group assignment
+  // (groupFor → null, so the filter would already keep it visible) AND sits in
+  // this allow-list so it survives even a `core` teardown — an agent must
+  // always be able to re-activate a group.
   "unreal_open_mcp_manage_tools",
   "unreal_open_mcp_ping",
   "unreal_open_mcp_bridge_status",

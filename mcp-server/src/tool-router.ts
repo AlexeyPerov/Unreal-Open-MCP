@@ -7,12 +7,15 @@
 // suite) can branch on where a response came from.
 //
 // Today three routes are wired end-to-end:
-//   - **local** — `unreal_open_mcp_capabilities` + `unreal_open_mcp_bridge_status`
+//   - **local** — `unreal_open_mcp_capabilities`,
+//     `unreal_open_mcp_bridge_status`, and `unreal_open_mcp_manage_tools`
 //     resolve entirely in-process (no bridge round-trip). capabilities builds
 //     the surface from the in-memory tool list + static rule/fix catalog;
 //     bridge_status composes the instance-lock classifier with one /ping probe
 //     fired through the live transport (a dead/stopped bridge is a successful
-//     status read, not an error).
+//     status read, not an error); manage_tools (P8.10) mutates the per-session
+//     tool-group visibility store and emits `notifications/tools/list_changed`
+//     when the visible surface changes.
 //   - **offline** (P8.7) — `unreal_open_mcp_read_compile_errors`,
 //     `unreal_open_mcp_source_read_offline`, and `unreal_open_mcp_project_index`
 //     resolve from disk with the editor DOWN (no bridge hop). read_compile_errors
@@ -40,7 +43,18 @@ import { RULE_CATALOG, FIX_CATALOG } from "./capabilities/rule-catalog.js";
 // P8.9 — tool-group catalog + per-tool resolver. capabilities surfaces the
 // session-agnostic group catalog (which groups exist + per-group rosters);
 // per-session activation state stays in manage_tools (P8.10).
-import { TOOL_GROUPS, groupFor } from "./capabilities/tool-groups.js";
+// P8.10 — GROUP_IDS validates activate/deactivate input; groupToTools supplies
+// the per-group roster for manage_tools list_groups.
+import {
+  TOOL_GROUPS,
+  GROUP_IDS,
+  groupFor,
+  groupToTools,
+} from "./capabilities/tool-groups.js";
+// P8.10 — the per-session visibility store manage_tools mutates. Threaded into
+// the router by index.ts (production + handleLocalTool); omitted by legacy
+// `new ToolRouter(live, null)` call sites that never call manage_tools.
+import type { ToolSessionState } from "./tool-session-state.js";
 import {
   readInstanceLock,
   classifyInstance,
@@ -116,6 +130,9 @@ export type SourceTag = "live" | "offline" | "local";
 const LOCAL_ROUTE_TOOLS: ReadonlySet<string> = new Set([
   "unreal_open_mcp_capabilities",
   "unreal_open_mcp_bridge_status",
+  // P8.10 — manage_tools mutates per-session group visibility in-process. The
+  // bridge does NOT track session state, so this must never route live.
+  "unreal_open_mcp_manage_tools",
 ]);
 
 /**
@@ -288,11 +305,21 @@ function describeSourceReadError(
  * this project's instance lock without re-resolving env at call time. Optional
  * callers (tests that drive a single handler directly) may leave it null —
  * bridge_status then reports a lock-less status (classification `gone`).
+ *
+ * `sessionState` (P8.10) is the per-session group-visibility store mutated by
+ * `manage_tools`. `onToolListChanged` is fired when an activate/deactivate/reset
+ * actually changes the visible tool set, so `index.ts` can emit
+ * `notifications/tools/list_changed`. Both are optional so the many existing
+ * `new ToolRouter(live, projectPath)` call sites that never invoke manage_tools
+ * keep working; a manage_tools call against a router without a session store
+ * returns a structured `session_state_not_wired` error (never crashes).
  */
 export class ToolRouter implements Router {
   constructor(
     private readonly live: Router,
     private readonly projectPath: string | null = null,
+    private readonly sessionState: ToolSessionState | null = null,
+    private readonly onToolListChanged?: () => void | Promise<void>,
   ) {}
 
   /**
@@ -343,6 +370,9 @@ export class ToolRouter implements Router {
     }
     if (name === "unreal_open_mcp_bridge_status") {
       return this.routeBridgeStatus();
+    }
+    if (name === "unreal_open_mcp_manage_tools") {
+      return this.routeManageTools(args);
     }
     // Unreachable when the policy table and handler set are in sync. Defensive
     // fallback keeps the call honest — a live fallthrough here would mask the
@@ -548,6 +578,161 @@ export class ToolRouter implements Router {
   }
 
   /**
+   * manage_tools (P8.10) — per-session tool-group visibility mutator. Resolved
+   * in-process; the bridge never sees it. Mutates the injected
+   * {@link sessionState} on activate / deactivate / reset and fires
+   * {@link onToolListChanged} only when the active group set actually changes
+   * (a no-op activate does NOT emit, so a chatty client is not spammed).
+   * `list_groups` is read-only. Not a gate mutator — no paths_hint, no editor
+   * or project state touched.
+   *
+   * Copied from Unity Open MCP's `routeManageTools` (copy fidelity for the four
+   * core actions). Intentional deltas: no suggest / activate_for (no intent→
+   * group recommendation engine yet), and the list_groups payload carries no
+   * `available` / `autoActivated` fields (no domain-package auto-activation).
+   */
+  private async routeManageTools(
+    args: Record<string, unknown>,
+  ): Promise<CallToolResult> {
+    // The session store is threaded in by index.ts. A router without one
+    // (legacy `new ToolRouter(live, path)` call sites, or a unit test that
+    // never calls manage_tools) surfaces a structured error rather than
+    // crashing — and never falls through to the bridge.
+    const session = this.sessionState;
+    if (!session) {
+      return localError(
+        "session_state_not_wired",
+        "manage_tools requires a per-session ToolSessionState, but this " +
+          "ToolRouter was constructed without one. The production wiring in " +
+          "index.ts threads the shared sessionState into the router; a " +
+          "no-session router cannot mutate group visibility.",
+      );
+    }
+    const action = typeof args.action === "string" ? args.action : "";
+    if (!action) {
+      return localError(
+        "missing_parameter",
+        "Missing required parameter 'action'. Valid actions: list_groups, " +
+          "activate, deactivate, reset.",
+      );
+    }
+
+    if (action === "list_groups") {
+      return sourceResult(this.buildManageToolsListGroups(session), "local", "local");
+    }
+
+    if (action === "activate" || action === "deactivate") {
+      const group = typeof args.group === "string" ? args.group : "";
+      if (!group) {
+        return localError(
+          "missing_parameter",
+          `Action '${action}' requires a 'group' parameter. Call list_groups ` +
+            `for the valid group ids.`,
+        );
+      }
+      if (!GROUP_IDS.has(group)) {
+        const valid = Array.from(GROUP_IDS).sort().join(", ");
+        return localError(
+          "unknown_group",
+          `Unknown group '${group}'. Valid group ids: ${valid}. Call ` +
+            `manage_tools with action 'list_groups' for the full catalog ` +
+            `with rosters.`,
+        );
+      }
+      const before = session.activeGroups();
+      const changed =
+        action === "activate"
+          ? session.activate(group)
+          : session.deactivate(group);
+      if (changed) {
+        await this.maybeNotifyToolListChanged(before);
+      }
+      const activeGroups = session.activeGroups();
+      return sourceResult(
+        {
+          action,
+          group,
+          changed,
+          activeGroups,
+          message: changed
+            ? `Group '${group}' ${action}d. The next tools/list reflects the new visible surface; a compliant client refreshes automatically after the tools/list_changed notification.`
+            : `Group '${group}' was already ${action === "activate" ? "active" : "inactive"}; no change.`,
+        },
+        "local",
+        "local",
+      );
+    }
+
+    if (action === "reset") {
+      const before = session.activeGroups();
+      session.reset();
+      // reset() always restores the default-on set; only emit when that differs
+      // from the pre-reset active set (a reset of an already-default session is
+      // a no-op for visibility).
+      await this.maybeNotifyToolListChanged(before);
+      return sourceResult(
+        {
+          reset: true,
+          activeGroups: session.activeGroups(),
+          message: "Session tool groups restored to the default-on set (core).",
+        },
+        "local",
+        "local",
+      );
+    }
+
+    return localError(
+      "unknown_action",
+      `Unknown action '${action}'. Valid actions: list_groups, activate, deactivate, reset.`,
+    );
+  }
+
+  /**
+   * Build the read-only `list_groups` payload: every catalog group with its
+   * active flag, default-on flag, activation source (default vs manual), and
+   * tool roster. Ordered by the catalog so output is stable.
+   */
+  private buildManageToolsListGroups(session: ToolSessionState): {
+    groups: Array<{
+      id: string;
+      description: string;
+      active: boolean;
+      defaultEnabled: boolean;
+      activationSource: string | null;
+      tools: readonly string[];
+    }>;
+    activeGroups: string[];
+  } {
+    const rosters = groupToTools();
+    const groups = TOOL_GROUPS.map((g) => ({
+      id: g.id,
+      description: g.description,
+      active: session.isGroupActive(g.id),
+      defaultEnabled: g.defaultEnabled,
+      activationSource: session.activationSource(g.id),
+      tools: rosters[g.id] ?? [],
+    }));
+    return { groups, activeGroups: session.activeGroups() };
+  }
+
+  /**
+   * Fire {@link onToolListChanged} only when the active group set actually
+   * changed. Mirrors Unity's `maybeNotifyToolListChanged`: a no-op mutation
+   * (activating an already-active group) must not emit, so a chatty client is
+   * not flooded with refresh requests.
+   */
+  private async maybeNotifyToolListChanged(
+    before: readonly string[],
+  ): Promise<void> {
+    if (!this.onToolListChanged) return;
+    const after = this.sessionState ? this.sessionState.activeGroups() : before;
+    if (JSON.stringify([...before].sort()) === JSON.stringify([...after].sort())) {
+      return;
+    }
+    await this.onToolListChanged();
+  }
+
+  /**
    * bridge_status (P5.7) — composes the instance-lock classifier with one /ping
    * probe fired through the live transport, then maps the result with the pure
    * `deriveBridgeStatus`. A dead/stopped bridge is a *successful* status read —
@@ -642,10 +827,11 @@ export class ToolRouter implements Router {
 // Intentional deltas from Unity Open MCP (mcp-server/src/tool-router.ts):
 //  - Skeleton + offline reads wired: live + local + offline wired end-to-end.
 //    Unity's router additionally owns the compressible-router / AssetModelCache
-//    offline asset parsers, batch spawn (BatchSpawn), tool-group manage_tools,
-//    generate_skill, hub_*, restart_editor / resource_pressure, and SSE event
-//    streaming. Those land in later phases here; the router is built to absorb
-//    them via the same routePolicy table + per-route handlers.
+//    offline asset parsers, batch spawn (BatchSpawn), the intent→group
+//    recommend engine behind manage_tools suggest / activate_for, generate_skill,
+//    hub_*, restart_editor / resource_pressure, and SSE event streaming. Those
+//    land in later phases here; the router is built to absorb them via the same
+//    routePolicy table + per-route handlers.
 //  - Narrower offline set (ADR-006 — no .uasset offline pipeline): only three
 //    read surfaces today — read_compile_errors (editor log tail), source_read
 //    _offline (Source/ jail), project_index (.uproject + file tree). No
@@ -656,8 +842,8 @@ export class ToolRouter implements Router {
 //  - Narrower batch (stub only). Unity's batch spawn covers compile_check +
 //    scan_all + baseline + regression; the Unreal commandlet equivalent is
 //    owned by a later phase.
-//  - Smaller always-local set: only capabilities + bridge_status today. Unity
-//    also routes manage_tools, generate_skill, restart_editor,
+//  - Smaller always-local set: capabilities + bridge_status + manage_tools
+//    today. Unity also routes generate_skill, restart_editor,
 //    resource_pressure, and the hub_* family locally. Each lands here as its
 //    phase ships.
 //  - Route metadata shape mirrors Unity (`_source` + `_route: { route }`); the

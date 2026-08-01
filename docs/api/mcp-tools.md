@@ -43,7 +43,7 @@ writes editor/project state (and so participates in the gate contract below).
 Mutating tools require a non-empty `paths_hint` and default to gate `enforce`;
 read-only tools are gate-free.
 
-### local (2)
+### local (3)
 
 Resolved in-process, no bridge round-trip.
 
@@ -51,6 +51,7 @@ Resolved in-process, no bridge round-trip.
 |---|---|---|---|
 | `unreal_open_mcp_capabilities` | local | no | Discovery surface — tools + verify rules + fixes in one call. |
 | `unreal_open_mcp_bridge_status` | local | no | Operator health snapshot — composes the instance-lock classifier with one `/ping` probe. A dead/stopped bridge is a successful status read, never an error. `dead_bridge` recovery hint points at `read_compile_errors`. |
+| `unreal_open_mcp_manage_tools` | local | no | Per-session tool-group visibility mutator (`list_groups` / `activate` / `deactivate` / `reset`). Always-visible so an agent can re-activate a torn-down group. Not a gate mutator — it touches session visibility only, never editor/project state. Emits `notifications/tools/list_changed` when the visible surface changes; no-op actions do not emit. |
 
 ### offline (3)
 

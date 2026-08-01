@@ -52,11 +52,42 @@ Group activation is driven by the `unreal_open_mcp_manage_tools` meta-tool
 (`activate` / `deactivate` / `reset` / `list_groups`). Activation is
 **ephemeral and per-session** — it lives in the stdio MCP server's memory, not
 on disk, and resets to the default-on set on every server restart. One stdio
-server process has one connected client and one session store.
+server process has one connected client and one session store. The tool routes
+**local** (resolved in-process; the bridge never sees it) and is always-visible
+so an agent can re-activate a group even after tearing every group down.
+
+When an `activate` / `deactivate` / `reset` actually changes the visible tool
+set, the server emits a `notifications/tools/list_changed` notification. A
+compliant client refreshes its cached `tools/list` automatically; a client that
+does not handle the notification should re-call `tools/list` after activating a
+group. No-op actions (activating an already-active group, or `reset` on an
+already-default session) do **not** emit, so the notification stream tracks real
+surface changes only.
 
 > **Example workflow:** "Reset tool groups, then activate `typed-editor` and
 > `gate-and-verify`." The next `tools/list` advertises the `core` tools, the
 > full typed-editor surface, and the verify surface — nothing else.
+
+`list_groups` enumerates the catalog with per-group state:
+
+```json
+{
+  "groups": [
+    {
+      "id": "typed-editor",
+      "description": "Typed editor surface: actors, levels, assets, …",
+      "active": false,
+      "defaultEnabled": false,
+      "activationSource": null,
+      "tools": ["unreal_open_mcp_actor_create", "…"]
+    }
+  ],
+  "activeGroups": ["core"]
+}
+```
+
+`activationSource` is `"default"` for a default-on group, `"manual"` for one
+activated via `manage_tools`, or `null` for a group never touched this session.
 
 ## Capabilities surface
 

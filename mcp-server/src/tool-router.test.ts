@@ -50,6 +50,7 @@ function makeStubLive(
 test("routePolicy classifies the local-route tools as local", () => {
   assert.equal(routePolicy("unreal_open_mcp_capabilities"), "local");
   assert.equal(routePolicy("unreal_open_mcp_bridge_status"), "local");
+  assert.equal(routePolicy("unreal_open_mcp_manage_tools"), "local");
 });
 
 test("routePolicy defaults every other tool to live", () => {

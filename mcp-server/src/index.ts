@@ -109,14 +109,39 @@ export function setBoundProjectPath(projectPath: string | null): void {
 export const sessionState = new ToolSessionState();
 
 /**
+ * The notifier the {@link ToolRouter} fires when manage_tools changes the
+ * visible tool set. Installed by {@link createServer} as
+ * `server.notification({ method: "notifications/tools/list_changed" })` (the
+ * same SDK call Unity uses). Held as a module-level thunk that resolves the
+ * current server at call time, so a `setLiveRouter` that runs before
+ * `createServer` (e.g. in a unit test) wires a callback that no-ops until a
+ * server is present rather than capturing a null server. The server advertises
+ * `tools.listChanged: true` in its capabilities (see {@link createServer}), so
+ * a compliant client already expects this notification.
+ */
+let notifyToolListChanged: (() => Promise<void>) | null = null;
+
+/**
  * Install the live transport. Called once from `main()`; wraps the supplied
  * transport in a {@link ToolRouter} bound to {@link boundProjectPath} so the
  * `tools/call` handler delegates every call through the single dispatch spine.
+ * The router is also bound to the shared {@link sessionState} (so manage_tools
+ * can mutate the same store ListTools reads) and the {@link notifyToolListChanged}
+ * thunk (so a visibility change emits `notifications/tools/list_changed`).
  * Exported so tests that want to drive `handleCallTool` against a stub bridge
  * can install their own transport.
  */
 export function setLiveRouter(router: Router | null): void {
-  toolRouter = router ? new ToolRouter(router, boundProjectPath) : null;
+  toolRouter = router
+    ? new ToolRouter(
+        router,
+        boundProjectPath,
+        sessionState,
+        async () => {
+          await notifyToolListChanged?.();
+        },
+      )
+    : null;
 }
 
 /**
@@ -153,10 +178,17 @@ export async function handleLocalTool(
   // A throwaway router bound to the same project path the production router
   // uses. The local handlers never escape to the live transport except for the
   // bridge_status /ping probe, so a null router degrades to a lock-only status
-  // (identical to the pre-P8.6 behavior).
+  // (identical to the pre-P8.6 behavior). The transient router shares the
+  // module-level sessionState + notifyToolListChanged thunk so manage_tools
+  // resolves identically whether it arrives via the production router or this
+  // fallback path (e.g. a unit test with no live router installed).
   const transient = new ToolRouter(
     router ?? NOT_WIRED_ROUTER,
     boundProjectPath,
+    sessionState,
+    async () => {
+      await notifyToolListChanged?.();
+    },
   );
   return transient.route(name, args);
 }
@@ -252,7 +284,12 @@ export async function handleCallTool(
  * Build the MCP server with the list/call handlers wired. Exported so tests
  * can construct a server against an in-memory transport if needed. The server
  * name and version come from the package; capabilities advertise
- * `tools.listChanged` so later-phase group activation can signal clients.
+ * `tools.listChanged` so manage_tools (P8.10) can signal clients when the
+ * visible tool set changes. This installs the {@link notifyToolListChanged}
+ * thunk the ToolRouter fires on a visibility change — the exact SDK call
+ * (`server.notification({ method: "notifications/tools/list_changed" })`)
+ * Unity uses, wrapped so a push failure is logged to stderr and never throws
+ * into the tool call that triggered it.
  */
 export function createServer(): Server {
   const server = new Server(
@@ -262,6 +299,22 @@ export function createServer(): Server {
 
   server.setRequestHandler(ListToolsRequestSchema, handleListTools);
   server.setRequestHandler(CallToolRequestSchema, handleCallTool);
+
+  // P8.10 — wire the tools/list_changed notifier. The ToolRouter holds this as
+  // a lazy thunk (see setLiveRouter), so installing it here (after the router
+  // in main()) still works: the thunk reads this assignment at call time.
+  notifyToolListChanged = async () => {
+    try {
+      await server.notification({ method: "notifications/tools/list_changed" });
+    } catch (err) {
+      // A failed push (client gone, transport closed) must never surface as a
+      // tool-call error — log and move on, matching Unity's notifyToolListChanged.
+      console.error(
+        `${SERVER_NAME}: failed to send tools/list_changed notification:`,
+        err,
+      );
+    }
+  };
 
   return server;
 }

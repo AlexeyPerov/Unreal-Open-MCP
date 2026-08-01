@@ -225,6 +225,14 @@ import { sourceCompile } from "./source-compile.js";
 import { readCompileErrors } from "./read-compile-errors.js";
 import { sourceReadOffline } from "./source-read-offline.js";
 import { projectIndex } from "./project-index.js";
+// P8.10 — manage_tools. Per-session tool-group visibility mutator. Local-route
+// (resolved in-process by the ToolRouter; the bridge never sees it) and always-
+// visible (in ALWAYS_VISIBLE_TOOLS + null group), so an agent can always reach
+// it to (re)activate a group. Activating a group makes its tools appear in the
+// next tools/list; on a visible-surface change the server emits
+// notifications/tools/list_changed. Copied from Unity Open MCP's manage-tools.ts
+// (copy fidelity for the four core actions; suggest / activate_for deferred).
+import { manageTools } from "./manage-tools.js";
 
 // Tool registry. P1.7 registers the first real tool — `unreal_open_mcp_ping` —
 // which the MCP server routes to the bridge's `GET /ping`. Each subsequent tool
@@ -373,4 +381,5 @@ export const ALL_TOOLS: Tool[] = [
   readCompileErrors,
   sourceReadOffline,
   projectIndex,
+  manageTools,
 ];

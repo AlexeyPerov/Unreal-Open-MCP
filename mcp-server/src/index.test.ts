@@ -24,7 +24,7 @@ const SERVER_ENTRY = resolve(here, "index.js");
 // tools/list returns the *visible* tool set, filtered through the per-session
 // tool-group state (P8.9). A fresh session advertises the lean `core` surface
 // plus the always-visible meta / recovery tools. The full registry is larger
-// (70 tools as of P8.7); the default surface is intentionally small so an
+// (71 tools as of P8.10); the default surface is intentionally small so an
 // agent's prompt is not bloated before it activates a group.
 //
 // Registry history (the full set is larger than the default surface): P1.7
@@ -48,6 +48,7 @@ test("handleListTools returns the lean default surface for a fresh session", asy
   assert.deepEqual(names, [
     "unreal_open_mcp_bridge_status",
     "unreal_open_mcp_capabilities",
+    "unreal_open_mcp_manage_tools",
     "unreal_open_mcp_ping",
     "unreal_open_mcp_project_index",
     "unreal_open_mcp_read_compile_errors",
@@ -65,7 +66,7 @@ test("handleListTools reflects the full registry when every group is active", as
   sessionState.activate("typed-editor");
   try {
     const result = await handleListTools();
-    assert.equal(result.tools.length, 70);
+    assert.equal(result.tools.length, 71);
     assert.equal(result.tools[0].name, "unreal_open_mcp_ping");
   } finally {
     sessionState.reset();
@@ -163,7 +164,7 @@ test("handleCallTool resolves unreal_open_mcp_capabilities locally without a rou
   assert.ok(payload.rules.length > 0);
   assert.ok(payload.fixes.length > 0);
   // Every registered tool is surfaced (capabilities is itself included).
-  assert.equal(payload.counts.toolsImplemented, 70);
+  assert.equal(payload.counts.toolsImplemented, 71);
   assert.equal(payload.counts.rulesImplemented, 3);
 });
 
@@ -287,6 +288,7 @@ test("subprocess: boots, answers initialize + tools/list, exits 0 on EOF", async
   assert.deepEqual(names, [
     "unreal_open_mcp_bridge_status",
     "unreal_open_mcp_capabilities",
+    "unreal_open_mcp_manage_tools",
     "unreal_open_mcp_ping",
     "unreal_open_mcp_project_index",
     "unreal_open_mcp_read_compile_errors",

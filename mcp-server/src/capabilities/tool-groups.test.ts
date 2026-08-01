@@ -126,6 +126,7 @@ test("groupFor returns null for the always-visible meta / recovery tools", () =>
   // every group torn down.
   for (const name of [
     "unreal_open_mcp_capabilities",
+    "unreal_open_mcp_manage_tools",
     "unreal_open_mcp_bridge_status",
     "unreal_open_mcp_read_compile_errors",
     "unreal_open_mcp_source_read_offline",

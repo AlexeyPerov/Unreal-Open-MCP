@@ -53,6 +53,9 @@ const LOCAL_TOOLS: ReadonlySet<string> = new Set([
   // P5.7 — bridge_status composes the lock classifier + one /ping probe
   // in-process; no bridge POST round-trip.
   "unreal_open_mcp_bridge_status",
+  // P8.10 — manage_tools mutates per-session group visibility in-process; the
+  // bridge does NOT track session state.
+  "unreal_open_mcp_manage_tools",
 ]);
 
 // P8.7 — offline-route tools (resolved from disk; never hit the bridge). Kept
@@ -126,6 +129,9 @@ const TOOL_CATEGORY: Record<string, string> = {
   unreal_open_mcp_apply_fix: "gate-and-verify",
   // P3.8 — capability discovery. Local-route, read-only.
   unreal_open_mcp_capabilities: "capability-discovery",
+  // P8.10 — per-session tool-group visibility mutator. Local-route, gate-free
+  // (it mutates session visibility, not editor / project state).
+  unreal_open_mcp_manage_tools: "capability-discovery",
   // P5.1 — editor application state (PIE). get-state read-only; set-state
   // mutating (route live, default gate Enforce, paths_hint required).
   unreal_open_mcp_editor_application_get_state: "editor",

@@ -159,7 +159,7 @@ Failure classification is the load-bearing contract — an agent (or a human rea
 Two layers guard the MCP ↔ bridge route. Use both when changing transport, discovery, or tool routing:
 
 1. **In-process integration tests** — `mcp-server/src/integration.test.ts` (`npm test`). Wires a real MCP SDK `Client` to `createServer()` over an in-memory transport, with the live router pointed at a `LiveClient` aimed at a loopback HTTP stub.
-2. **Scripted stdio smoke** — `mcp-server/scripts/*-parity-smoke.mjs` (`npm run smoke:p1` / `smoke:p2` / `smoke:p4` / `smoke:p6` / `smoke:p7`). Spawns the built `dist/index.js` and drives `initialize → tools/list → tools/call …` over stdio. This catches packaging, transport, and instance-discovery wiring drift the in-process suite cannot see. Pass `--port <n> --project <path>` to run the healthy case against a live Unreal Editor (bridge-down, tool-error, and compile-failed cases require the stub harness and are skipped in `--port` mode).
+2. **Scripted stdio smoke** — `mcp-server/scripts/*-parity-smoke.mjs` (`npm run smoke:p1` / `smoke:p2` / `smoke:p4` / `smoke:p6` / `smoke:p7` / `smoke:p8`). Spawns the built `dist/index.js` and drives `initialize → tools/list → tools/call …` over stdio. This catches packaging, transport, and instance-discovery wiring drift the in-process suite cannot see. Pass `--port <n> --project <path>` to run the healthy case against a live Unreal Editor (bridge-down, tool-error, and compile-failed cases require the stub harness and are skipped in `--port` mode).
 
 ### Ping route
 
@@ -264,6 +264,30 @@ When the smoke (or a real compile) fails, the code / symptom points at the owner
 | `success:false` + populated `diagnostics[]` | Real C++ errors — fix via `source_update` and recompile | the C++ edit loop |
 | Live Coding `InProgress` / empty `diagnostics` | LC coarse path (Windows-only) did not surface diagnostics | force `use_live_coding:false` for a deterministic UBT run |
 | `paths_hint_required` | Mutator called without Source-relative hints | gate policy + source tool docs |
+
+### Routing + offline + tool-group route
+
+```
+stdio MCP client  →  ToolRouter.routePolicy(name)  →  one of:
+  local   → unreal_open_mcp_capabilities / bridge_status / manage_tools   (in-process, no bridge hop)
+  offline → unreal_open_mcp_project_index / source_read_offline / read_compile_errors  (disk, editor DOWN)
+  live    → POST /tools/{name} via LiveClient                            (running bridge)
+  batch   → batch_not_implemented                                        (commandlet not yet shipped)
+```
+
+`smoke:p8` is the phase gate for the routing + offline + tool-group spine (Phase 8). It exercises every route class over the built `dist/index.js` plus the per-session tool-group visibility loop. Five cases are pinned: lean core surface (a fresh `tools/list` advertises only the `core` group + always-visible meta-tools — `actor_find` is HIDDEN until `typed-editor` activates); `manage_tools activate` emits exactly one `notifications/tools/list_changed` and grows `tools/list` (a no-op activate emits none); offline `project_index` resolves from disk with the bridge DOWN and stamps `_source:"offline"` + `_route.route:"offline"`; local `bridge_status` works with a dead bridge (`isError:false`, `_route.route:"local"`, status in the stopped/dead/gone family); and offline tool errors stay offline (`path_escapes_jail` / `invalid_parameter` carry `_route.route:"offline"` — the offline path never falls through to the dead live transport). Stdio smoke: `mcp-server/scripts/p8-parity-smoke.mjs`.
+
+`_source` + `_route: { route }` are stamped on **every** JSON result — success and error alike — so an agent can branch on where a response came from without scraping prose. The flat `route` token (`live` / `offline` / `local` / `batch`) is the load-bearing field.
+
+| Code / symptom | Likely cause | Owner area |
+|---|---|---|
+| `tools/list` shows actor_find by default | lean-core session filter regression (`tool-session-state.ts` / `tool-groups.ts`) | P8.9 group catalog |
+| `list_changed` not emitted on activate | notifier wiring regression (`index.ts` → `ToolRouter.onToolListChanged`) | P8.10 manage_tools |
+| Two `list_changed` on one real change | no-op guard regression (`ToolRouter.maybeNotifyToolListChanged`) | P8.10 manage_tools |
+| offline body missing `_route` | route-metadata stamping regression (`tool-router.ts` `withRouteTags`) | P8.6 router |
+| offline tool falls through to live on a dead bridge | `routePolicy` / handler drift (`routeOffline` missing handler → live fallback) | P8.6 router |
+| `bridge_status` `isError:true` on a dead bridge | a dead bridge is a SUCCESSFUL status read, never an error | P5.7 bridge_status |
+| `project_index` empty `uproject.found:false` on a real project | `.uproject` name-resolution / parse regression (`offline/project-index.ts`) | P8.7 offline readers |
 
 ## Versioning
 

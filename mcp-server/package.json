@@ -22,6 +22,7 @@
     "smoke:p4": "npm run build && node scripts/p4-parity-smoke.mjs",
     "smoke:p6": "npm run build && node scripts/p6-parity-smoke.mjs",
     "smoke:p7": "npm run build && node scripts/p7-parity-smoke.mjs",
+    "smoke:p8": "npm run build && node scripts/p8-parity-smoke.mjs",
     "prepublishOnly": "npm run build"
   },
   "keywords": [

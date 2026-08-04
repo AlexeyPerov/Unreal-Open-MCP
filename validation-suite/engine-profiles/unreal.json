@@ -1,0 +1,19 @@
+{
+  "id": "unreal",
+  "displayName": "Unreal Open MCP",
+  "mcpCliBinary": "unreal-open-mcp",
+  "paths": {
+    "fixtureRoot": "Content/_ValidationSuite/<test-id>/",
+    "stateRoot": "Saved/ValidationSuite/",
+    "stateFile": "Saved/ValidationSuite/.state.json",
+    "actualsDir": "Saved/ValidationSuite/actuals/",
+    "exportsDir": "Saved/ValidationSuite/exports/"
+  },
+  "markers": {
+    "dirs": ["Content", "Source", "Config"],
+    "files": ["*.uproject"]
+  },
+  "companions": [],
+  "placeholders": ["{fixtureRoot}", "{projectRoot}"],
+  "toolNamePrefix": "unreal_open_mcp_"
+}

@@ -1,0 +1,38 @@
+{
+  "id": "sample-ping-smoke",
+  "title": "Bridge ping smoke check",
+  "milestone": "sample",
+  "engineId": "unreal",
+  "order": 0,
+  "requirementLevel": "optional",
+  "tags": ["sample", "bridge"],
+  "steps": [
+    {
+      "id": "info",
+      "type": "info",
+      "body": "Confirm the Unreal Open MCP bridge answers a ping. This is a minimal sample scenario; the full validation scenario set lands next."
+    },
+    {
+      "id": "prompt",
+      "type": "agent_prompt",
+      "tool": "unreal_open_mcp_ping",
+      "title": "Run ping in the MCP client",
+      "payload": {
+        "tool": "unreal_open_mcp_ping",
+        "args": {}
+      }
+    },
+    {
+      "id": "expected",
+      "type": "expected",
+      "items": [
+        "The ping result reports status \"ready\" (or a non-error status).",
+        "No transport error is surfaced (the bridge is reachable)."
+      ]
+    },
+    {
+      "id": "done",
+      "type": "mark_done"
+    }
+  ]
+}

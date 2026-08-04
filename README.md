@@ -120,6 +120,7 @@ For contributors:
 - [Architecture](docs/architecture.md) — repository boundaries and runtime flow.
 - [Porting principles](docs/porting-principles.md) — Unity-first porting protocol.
 - [Demo project](demo/README.md) — minimal C++ project that hosts the bridge and serves as a smoke / validation fixture root.
+- [Validation Suite](validation-suite/README.md) — standalone guided manual-validation app (targets the `demo/` project via the `unreal` engine profile).
 
 The [MCP tools catalog](docs/api/mcp-tools.md) is the per-tool reference;
 [Manual setup](docs/manual-setup.md) covers the install path.

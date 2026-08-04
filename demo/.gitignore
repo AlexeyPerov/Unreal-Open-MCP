@@ -28,5 +28,9 @@ Script/
 # Per-user editor state
 *.log
 
+# Validation Suite — disposable per-scenario fixtures staged under Content.
+# Operator state (Saved/ValidationSuite/) is already covered by Saved/ above.
+Content/_ValidationSuite/
+
 # OS noise
 .DS_Store

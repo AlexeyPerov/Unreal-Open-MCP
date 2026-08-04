@@ -1,0 +1,10 @@
+# Content/ — binary UE assets (.uasset / .umap) are editor-generated.
+#
+# Binary assets cannot be authored by hand and are regenerated on first editor
+# open / first save, so they are gitignored by default. Source-controlled
+# fixture levels (see demo/README.md → "Smoke fixtures") may be force-added
+# with `git add -f` once they are stable; the .gitignore keeps a clean tree
+# while the editor churns the folder during smoke runs.
+*.uasset
+*.umap
+*.bak

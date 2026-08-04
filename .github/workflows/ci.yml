@@ -182,3 +182,88 @@ jobs:
 
       - name: Boundary check (Runtime must not reference Editor)
         run: python scripts/check-editor-boundary.py
+
+  demo-project:
+    # Demo C++ project fixture root. Always validates the project structure
+    # (.uproject parses as JSON, required source/config files present, the
+    # UE-generated trees are gitignored so an editor open never dirties the
+    # tree). The UE build itself only runs when an engine is reachable —
+    # GitHub-hosted runners have no UE install, so the build step detects the
+    # engine and skips with a clear log otherwise (a self-hosted UE 5.8 runner
+    # sets UE_ENGINE_ROOT to opt into the build).
+    name: Demo project (structure + conditional build)
+    runs-on: ubuntu-latest
+    env:
+      # Repository variable a self-hosted UE 5.8 runner sets to opt into the
+      # build. Absent on hosted runners → build step skips with a clear log.
+      UE_ENGINE_ROOT: ${{ vars.UE_ENGINE_ROOT }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate project structure
+        run: |
+          set -e
+          echo "Validating demo/ structure..."
+          test -f demo/UnrealOpenMcpDemo.uproject || { echo "Missing demo/*.uproject"; exit 1; }
+          test -f demo/Source/UnrealOpenMcpDemo/UnrealOpenMcpDemo.Build.cs || { echo "Missing module Build.cs"; exit 1; }
+          test -f demo/Source/UnrealOpenMcpDemo/Private/UnrealOpenMcpDemoModule.cpp || { echo "Missing module cpp"; exit 1; }
+          test -f demo/Source/UnrealOpenMcpDemoEditor.Target.cs || { echo "Missing editor target"; exit 1; }
+          test -f demo/Config/DefaultEngine.ini || { echo "Missing DefaultEngine.ini"; exit 1; }
+          test -f demo/README.md || { echo "Missing demo README"; exit 1; }
+          test -f demo/.gitignore || { echo "Missing demo .gitignore"; exit 1; }
+          # The descriptor is strict JSON (UE rejects comments) — confirm it parses.
+          python3 -c "import json,sys; json.load(open('demo/UnrealOpenMcpDemo.uproject'))" \
+            || { echo "demo/*.uproject is not valid JSON"; exit 1; }
+          echo "demo/ structure OK."
+
+      - name: Validate gitignore coverage
+        # Belt-and-braces: the demo .gitignore must cover every UE-generated
+        # tree so a smoke editor open never leaves Binaries/Intermediate/Saved
+        # behind in the working tree.
+        run: |
+          set -e
+          for dir in Binaries Intermediate Saved DerivedDataCache Script .vs; do
+            grep -q "^${dir}/" demo/.gitignore || { echo "demo/.gitignore missing ${dir}/"; exit 1; }
+          done
+          echo "demo/ gitignore coverage OK."
+
+      - name: Setup Node
+        # Node is only needed to run the CLI installer before the build (when UE
+        # is available). Kept as a separate step so the skip path stays Node-free.
+        if: env.UE_ENGINE_ROOT != ''
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Build demo (when Unreal Engine is available)
+        # UE is not installed on GitHub-hosted runners. A self-hosted runner
+        # with UE 5.8 installed opts in via UE_ENGINE_ROOT (the engine's
+        # Engine/... root). Absent that, the build is skipped — the structural
+        # validation above is the always-on guard.
+        run: |
+          if [ -z "${UE_ENGINE_ROOT}" ]; then
+            echo "::notice::Unreal Engine not available (UE_ENGINE_ROOT unset). Skipping demo build."
+            echo "To build the demo in CI, run this job on a self-hosted runner with UE 5.8 installed"
+            echo "and UE_ENGINE_ROOT (a repository variable) pointing at the engine root"
+            echo "(e.g. /Users/Shared/Epic Games/UE_5.8 or C:\\Program Files\\Epic Games\\UE_5.8)."
+            exit 0
+          fi
+          echo "UE_ENGINE_ROOT=${UE_ENGINE_ROOT}"
+          # The working directory is the repo root (GITHUB_WORKSPACE).
+          DEMO_UPROJECT="${GITHUB_WORKSPACE}/demo/UnrealOpenMcpDemo.uproject"
+          # Build the CLI (dev deps only) so install-plugin can place the plugin
+          # source from packages/ into demo/Plugins before UBT compiles it.
+          (cd cli && npm install && npm run build)
+          node cli/dist/index.js install-plugin --project "${GITHUB_WORKSPACE}/demo"
+          # Pick the platform's Build.sh — Linux on ubuntu, Mac on a macOS runner.
+          if [ -x "${UE_ENGINE_ROOT}/Engine/Build/BatchFiles/Linux/Build.sh" ]; then
+            BUILD="${UE_ENGINE_ROOT}/Engine/Build/BatchFiles/Linux/Build.sh"
+            PLATFORM=Linux
+          elif [ -x "${UE_ENGINE_ROOT}/Engine/Build/BatchFiles/Mac/Build.sh" ]; then
+            BUILD="${UE_ENGINE_ROOT}/Engine/Build/BatchFiles/Mac/Build.sh"
+            PLATFORM=Mac
+          else
+            echo "UE_ENGINE_ROOT set but no Build.sh found under it"; exit 1
+          fi
+          "${BUILD}" UnrealOpenMcpDemoEditor "${PLATFORM}" Development -Project="${DEMO_UPROJECT}"

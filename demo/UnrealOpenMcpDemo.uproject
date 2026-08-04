@@ -1,0 +1,26 @@
+{
+	"FileVersion": 3,
+	"EngineAssociation": "5.8",
+	"Category": "",
+	"Description": "",
+	"Modules": [
+		{
+			"Name": "UnrealOpenMcpDemo",
+			"Type": "Runtime",
+			"LoadingPhase": "Default",
+			"AdditionalDependencies": [
+				"Engine"
+			]
+		}
+	],
+	"Plugins": [
+		{
+			"Name": "UnrealOpenMCP",
+			"Enabled": true
+		},
+		{
+			"Name": "UnrealOpenMCPVerify",
+			"Enabled": true
+		}
+	]
+}

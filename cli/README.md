@@ -64,7 +64,9 @@ stderr (exit `2`).
 
 Writes a **stdio** MCP client config snippet for a supported AI agent so it can
 spawn `unreal-open-mcp` against a project without hand-editing JSON. Stdio only
-— no HTTP, no cloud URL, no OAuth.
+— no HTTP, no cloud URL, no OAuth. Prefer to edit the config by hand instead?
+See [Manual setup](../docs/manual-setup.md) for the same JSON snippets per
+client.
 
 ```sh
 unreal-open-mcp-cli setup-mcp <agent> [projectDir]

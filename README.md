@@ -94,18 +94,22 @@ Requires **Unreal Engine 5.6+** (developed against **5.8**).
 
 ## Quick setup
 
-Setup guides will land as the install path stabilizes.
-
-1. **Manual / local checkout:** build and run from this repository (CLI +
-   plugin + MCP server). Contributor-oriented notes live in
-   [Architecture](docs/architecture.md).
-2. **Agent / wizard setup:** planned — same shape as Unity Open MCP’s setup
-   docs once the Unreal install path is ready.
+1. **Manual setup:** install the bridge plugin and point your AI client at the
+   stdio MCP server by hand — copy-paste JSON snippets for Cursor, Claude
+   Desktop, Claude Code, VS Code, Gemini CLI, and Cline in
+   [Manual setup](docs/manual-setup.md).
+2. **CLI one-command path:** the `unreal-open-mcp-cli` tool can install the
+   plugin (`install-plugin`), write the MCP client config (`setup-mcp`), launch
+   the editor (`open`), and wait for the bridge (`wait-for-ready`). See
+   [Architecture](docs/architecture.md) for contributor-oriented notes and the
+   [`cli/` README](cli/README.md) for the command reference.
+3. **Agent / wizard setup:** a guided desktop wizard is planned.
 
 ## Documentation
 
 For users:
 
+- [Manual setup](docs/manual-setup.md) — install the plugin and wire an AI client by hand (Cursor, Claude Desktop, Claude Code, VS Code, Gemini CLI, Cline).
 - [API index](docs/api.md) — MCP, bridge, and contract documentation map.
 - [MCP tools catalog](docs/api/mcp-tools.md) — every tool's route (`live`/`offline`/`local`/`batch`), mutation + gate contract, and offline coverage.
 - [Tool groups and session visibility](docs/api/tool-groups.md) — group catalog, default surface, and per-session activation.
@@ -116,8 +120,8 @@ For contributors:
 - [Architecture](docs/architecture.md) — repository boundaries and runtime flow.
 - [Porting principles](docs/porting-principles.md) — Unity-first porting protocol.
 
-The [MCP tools catalog](docs/api/mcp-tools.md) is the per-tool reference; setup
-guides will be added as the install path stabilizes.
+The [MCP tools catalog](docs/api/mcp-tools.md) is the per-tool reference;
+[Manual setup](docs/manual-setup.md) covers the install path.
 
 ## Contributing
 

@@ -77,7 +77,10 @@ not bloated. Activate a family on demand via `manage_tools`.
 > **Example:** "Reset tool groups, then activate `typed-editor` and
 > `gate-and-verify`." See [Tool groups and session visibility](docs/api/tool-groups.md).
 
-Project skills (planned) will teach agents the mutate → gate → fix loop.
+An agent skill at [`skills/unreal-open-mcp/SKILL.md`](skills/unreal-open-mcp/SKILL.md)
+teaches the discover → activate → mutate → gate → fix loop: capabilities first,
+tool-group activation, scoped `paths_hint`, and offline triage when the bridge is
+dead.
 
 ### Native stdio MCP
 

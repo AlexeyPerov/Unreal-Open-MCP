@@ -36,6 +36,26 @@ offline/local/batch without a matching in-process handler surfaces a structured
 `offline_handler_missing` / `local_handler_missing` error (never a silent live
 fallthrough).
 
+## Tool groups
+
+Every registered tool maps to a **group id** via the canonical catalog in
+`mcp-server/src/capabilities/tool-groups.ts`. A fresh session advertises only
+the default-on group (`core`) plus a handful of always-visible meta / recovery
+tools; every other family activates on demand via `unreal_open_mcp_manage_tools`.
+See [Tool groups and session visibility](tool-groups.md) for the activation
+model and per-session state.
+
+The family sections below are organised by tool family; use this map to find
+each family's visibility bucket:
+
+| Group | Default | Families |
+|---|---|---|
+| `core` | **on** | ping — the connectivity probe. |
+| `gate-and-verify` | off | Gate & validation meta-tools (validate / checkpoint / delta / apply_fix). |
+| `typed-editor` | off | Actor, actor-component, level, asset, material, editor, console, reflection, screenshot, Blueprint, source. |
+| _always-visible (no group)_ | — | `capabilities`, `bridge_status`, `manage_tools` (local) + the offline recovery surface (`read_compile_errors`, `source_read_offline`, `project_index`). Reachable even with every group torn down. |
+| `diagnostics` | off | Reserved — empty today; future profiler / per-frame reads. |
+
 ## Route policy by tool
 
 Every shipped tool has one route. The `Mutating` column records whether the tool

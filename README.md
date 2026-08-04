@@ -116,7 +116,8 @@ For contributors:
 - [Architecture](docs/architecture.md) — repository boundaries and runtime flow.
 - [Porting principles](docs/porting-principles.md) — Unity-first porting protocol.
 
-Detailed MCP tool catalog and setup guides will be added as features ship.
+The [MCP tools catalog](docs/api/mcp-tools.md) is the per-tool reference; setup
+guides will be added as the install path stabilizes.
 
 ## Contributing
 

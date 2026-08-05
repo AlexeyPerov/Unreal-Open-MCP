@@ -1,0 +1,130 @@
+{
+  "id": "core-gate-fail",
+  "title": "Gate fail — validate_edit surfaces a broken soft reference",
+  "milestone": "core",
+  "engineId": "unreal",
+  "order": 20,
+  "requirementLevel": "required-core",
+  "tags": ["core", "gate", "verify", "broken-soft-reference"],
+  "steps": [
+    {
+      "id": "info",
+      "type": "info",
+      "title": "Prerequisites",
+      "body": "Editor open on the demo project with the bridge answering ping. The typed-editor tool group (asset / blueprint families) must be visible — activate it via unreal_open_mcp_manage_tools if a tool in the staging chain reports not found. Goal: confirm that a deliberately broken soft object pointer on a Blueprint is reported by validate_edit as a broken_soft_reference issue carrying the precise property-path suffix the clear_broken_soft_reference fix needs. The staging chain creates a disposable Blueprint under /Game/_ValidationSuite/GateFail/, adds a soft-object-pointer variable Weapon, compiles (so the property lands on the generated class), then points the CDO default at a deliberately-missing asset path. validate_edit then scans just that Blueprint."
+    },
+    {
+      "id": "stage",
+      "type": "setup",
+      "title": "Stage a Blueprint with a broken soft object pointer",
+      "actions": [
+        {
+          "action": "mcp_tool",
+          "tool": "unreal_open_mcp_asset_create_folder",
+          "args": { "path": "/Game/_ValidationSuite", "paths_hint": ["/Game/_ValidationSuite"], "gate": "off" },
+          "timeoutMs": 30000
+        },
+        {
+          "action": "mcp_tool",
+          "tool": "unreal_open_mcp_asset_create_folder",
+          "args": { "path": "/Game/_ValidationSuite/GateFail", "paths_hint": ["/Game/_ValidationSuite/GateFail"], "gate": "off" },
+          "timeoutMs": 30000
+        },
+        {
+          "action": "mcp_tool",
+          "tool": "unreal_open_mcp_blueprint_create",
+          "args": { "path": "/Game/_ValidationSuite/GateFail/BP_GateFail", "parent_class": "Actor", "paths_hint": ["/Game/_ValidationSuite/GateFail/BP_GateFail"], "gate": "off" },
+          "timeoutMs": 30000
+        },
+        {
+          "action": "mcp_tool",
+          "tool": "unreal_open_mcp_blueprint_add_variable",
+          "args": { "path": "/Game/_ValidationSuite/GateFail/BP_GateFail", "name": "Weapon", "type": "/Script/Engine.Actor", "paths_hint": ["/Game/_ValidationSuite/GateFail/BP_GateFail"], "gate": "off" },
+          "timeoutMs": 30000
+        },
+        {
+          "action": "mcp_tool",
+          "tool": "unreal_open_mcp_blueprint_compile",
+          "args": { "path": "/Game/_ValidationSuite/GateFail/BP_GateFail", "paths_hint": ["/Game/_ValidationSuite/GateFail/BP_GateFail"], "gate": "off" },
+          "timeoutMs": 60000
+        },
+        {
+          "action": "mcp_tool",
+          "tool": "unreal_open_mcp_blueprint_set_default",
+          "args": {
+            "path": "/Game/_ValidationSuite/GateFail/BP_GateFail",
+            "property": "Weapon",
+            "value": "/Game/_ValidationSuite/GateFail/Missing/Missing.Missing",
+            "paths_hint": ["/Game/_ValidationSuite/GateFail/BP_GateFail"],
+            "gate": "off"
+          },
+          "timeoutMs": 30000
+        }
+      ]
+    },
+    {
+      "id": "prompt",
+      "type": "agent_prompt",
+      "tool": "unreal_open_mcp_validate_edit",
+      "title": "Validate the Blueprint — expect a broken_soft_reference finding",
+      "payload": {
+        "tool": "unreal_open_mcp_validate_edit",
+        "args": {
+          "paths": ["/Game/_ValidationSuite/GateFail/BP_GateFail.BP_GateFail"],
+          "categories": ["broken_soft_references"],
+          "profile": "balanced"
+        }
+      }
+    },
+    {
+      "id": "expected",
+      "type": "expected",
+      "title": "Expected outcomes",
+      "items": [
+        "ok is true and the result is not a tool error (a verify finding is data, not a transport failure).",
+        "The issues list contains an entry whose ruleId is broken_soft_references and code is broken_soft_reference.",
+        "The finding's assetPath is /Game/_ValidationSuite/GateFail/BP_GateFail.BP_GateFail.",
+        "The finding carries fixId clear_broken_soft_reference and fixSafe true (the suffix pins a precise top-level property path).",
+        "Copy the finding's full issue_id (ruleId|severity|assetPath|issueCode) — core-fix uses it to drive the fix."
+      ]
+    },
+    {
+      "id": "cleanup",
+      "type": "setup",
+      "title": "Delete the staged Blueprint",
+      "actions": [
+        {
+          "action": "mcp_tool",
+          "tool": "unreal_open_mcp_asset_delete",
+          "args": { "path": "/Game/_ValidationSuite/GateFail/BP_GateFail", "force": true, "paths_hint": ["/Game/_ValidationSuite/GateFail/BP_GateFail"], "gate": "off" },
+          "timeoutMs": 30000
+        }
+      ]
+    },
+    {
+      "id": "actual",
+      "type": "actual",
+      "title": "Paste the agent output (validate_edit envelope + the broken_soft_reference issue_id)"
+    },
+    {
+      "id": "done",
+      "type": "mark_done",
+      "title": "Mark this test complete"
+    }
+  ],
+  "reset": {
+    "afterStep": {
+      "cleanup": {
+        "actions": [
+          {
+            "action": "mcp_tool",
+            "tool": "unreal_open_mcp_asset_delete",
+            "args": { "path": "/Game/_ValidationSuite/GateFail/BP_GateFail", "force": true, "paths_hint": ["/Game/_ValidationSuite/GateFail/BP_GateFail"], "gate": "off" },
+            "timeoutMs": 30000
+          }
+        ]
+      }
+    },
+    "note": "The disposable Blueprint lives under /Game/_ValidationSuite/, the suite's content root. Reset deletes the Blueprint package; the parent folders are left in place (idempotent asset_create_folder re-creates them on the next run). No demo asset is ever modified."
+  }
+}

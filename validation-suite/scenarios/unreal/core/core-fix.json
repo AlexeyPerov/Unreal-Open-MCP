@@ -1,0 +1,177 @@
+{
+  "id": "core-fix",
+  "title": "Fix — apply_fix dry-run preview then clear a broken soft reference",
+  "milestone": "core",
+  "engineId": "unreal",
+  "order": 30,
+  "requirementLevel": "required-core",
+  "tags": ["core", "fix", "apply_fix", "clear_broken_soft_reference"],
+  "steps": [
+    {
+      "id": "info",
+      "type": "info",
+      "title": "Prerequisites",
+      "body": "Editor open on the demo project with the bridge answering ping; typed-editor tool group visible (activate via unreal_open_mcp_manage_tools if needed). This scenario re-stages the same broken soft object pointer as core-gate-fail so it runs independently, then drives the clear_broken_soft_reference fix end to end. The contract: unreal_open_mcp_apply_fix defaults to dry_run true — always preview first. The dry run reports what would change with no mutation and no gate. Only after reviewing the preview, apply with dry_run false under gate enforce so a rollback snapshot protects the asset. You will need the issue_id from the validate_edit call — copy it from the actual envelope before the apply step."
+    },
+    {
+      "id": "stage",
+      "type": "setup",
+      "title": "Stage the broken soft reference (same fixture as core-gate-fail)",
+      "actions": [
+        {
+          "action": "mcp_tool",
+          "tool": "unreal_open_mcp_asset_create_folder",
+          "args": { "path": "/Game/_ValidationSuite", "paths_hint": ["/Game/_ValidationSuite"], "gate": "off" },
+          "timeoutMs": 30000
+        },
+        {
+          "action": "mcp_tool",
+          "tool": "unreal_open_mcp_asset_create_folder",
+          "args": { "path": "/Game/_ValidationSuite/GateFail", "paths_hint": ["/Game/_ValidationSuite/GateFail"], "gate": "off" },
+          "timeoutMs": 30000
+        },
+        {
+          "action": "mcp_tool",
+          "tool": "unreal_open_mcp_blueprint_create",
+          "args": { "path": "/Game/_ValidationSuite/GateFail/BP_GateFail", "parent_class": "Actor", "paths_hint": ["/Game/_ValidationSuite/GateFail/BP_GateFail"], "gate": "off" },
+          "timeoutMs": 30000
+        },
+        {
+          "action": "mcp_tool",
+          "tool": "unreal_open_mcp_blueprint_add_variable",
+          "args": { "path": "/Game/_ValidationSuite/GateFail/BP_GateFail", "name": "Weapon", "type": "/Script/Engine.Actor", "paths_hint": ["/Game/_ValidationSuite/GateFail/BP_GateFail"], "gate": "off" },
+          "timeoutMs": 30000
+        },
+        {
+          "action": "mcp_tool",
+          "tool": "unreal_open_mcp_blueprint_compile",
+          "args": { "path": "/Game/_ValidationSuite/GateFail/BP_GateFail", "paths_hint": ["/Game/_ValidationSuite/GateFail/BP_GateFail"], "gate": "off" },
+          "timeoutMs": 60000
+        },
+        {
+          "action": "mcp_tool",
+          "tool": "unreal_open_mcp_blueprint_set_default",
+          "args": {
+            "path": "/Game/_ValidationSuite/GateFail/BP_GateFail",
+            "property": "Weapon",
+            "value": "/Game/_ValidationSuite/GateFail/Missing/Missing.Missing",
+            "paths_hint": ["/Game/_ValidationSuite/GateFail/BP_GateFail"],
+            "gate": "off"
+          },
+          "timeoutMs": 30000
+        }
+      ]
+    },
+    {
+      "id": "scan",
+      "type": "agent_prompt",
+      "tool": "unreal_open_mcp_validate_edit",
+      "title": "Scan the Blueprint to obtain the issue_id",
+      "payload": {
+        "tool": "unreal_open_mcp_validate_edit",
+        "args": {
+          "paths": ["/Game/_ValidationSuite/GateFail/BP_GateFail.BP_GateFail"],
+          "categories": ["broken_soft_references"],
+          "profile": "balanced"
+        }
+      }
+    },
+    {
+      "id": "expected-scan",
+      "type": "expected",
+      "title": "Expected outcomes (scan)",
+      "items": [
+        "validate_edit returns a broken_soft_reference finding for the Blueprint.",
+        "Copy the finding's issue_id (ruleId|severity|assetPath|issueCode) — the next two steps use it."
+      ]
+    },
+    {
+      "id": "dry-run",
+      "type": "agent_prompt",
+      "tool": "unreal_open_mcp_apply_fix",
+      "title": "Preview the fix (dry_run true) — no mutation",
+      "payload": {
+        "tool": "unreal_open_mcp_apply_fix",
+        "args": {
+          "issue_id": "<paste the broken_soft_reference issue_id from the scan>",
+          "fix_id": "clear_broken_soft_reference",
+          "dry_run": true
+        }
+      }
+    },
+    {
+      "id": "expected-dry-run",
+      "type": "expected",
+      "title": "Expected outcomes (dry-run preview)",
+      "items": [
+        "ok is true; the result describes clearing the soft object pointer at Weapon on the Blueprint.",
+        "Nothing was written — the preview reports dryRun true / applied false and no touchedPaths.",
+        "The gate was skipped (dry_run bypasses the gate entirely)."
+      ]
+    },
+    {
+      "id": "apply",
+      "type": "agent_prompt",
+      "tool": "unreal_open_mcp_apply_fix",
+      "title": "Apply the fix (dry_run false, gate enforce)",
+      "payload": {
+        "tool": "unreal_open_mcp_apply_fix",
+        "args": {
+          "issue_id": "<paste the same issue_id>",
+          "fix_id": "clear_broken_soft_reference",
+          "dry_run": false,
+          "gate": "enforce"
+        }
+      }
+    },
+    {
+      "id": "expected-apply",
+      "type": "expected",
+      "title": "Expected outcomes (apply + re-scan)",
+      "items": [
+        "success is true and the package was saved (the fix clears the property and SavePackage writes the change).",
+        "touchedPaths includes /Game/_ValidationSuite/GateFail/BP_GateFail.BP_GateFail.",
+        "A follow-up validate_edit on the same Blueprint returns zero broken_soft_reference findings.",
+        "gate.validation.passed is true and gate.delta.newErrors is 0 under enforce (the fix resolved the only issue)."
+      ]
+    },
+    {
+      "id": "cleanup",
+      "type": "setup",
+      "title": "Delete the staged Blueprint",
+      "actions": [
+        {
+          "action": "mcp_tool",
+          "tool": "unreal_open_mcp_asset_delete",
+          "args": { "path": "/Game/_ValidationSuite/GateFail/BP_GateFail", "force": true, "paths_hint": ["/Game/_ValidationSuite/GateFail/BP_GateFail"], "gate": "off" },
+          "timeoutMs": 30000
+        }
+      ]
+    },
+    {
+      "id": "actual",
+      "type": "actual",
+      "title": "Paste the agent output (validate_edit + apply_fix dry-run + apply-fix + re-scan envelopes)"
+    },
+    {
+      "id": "done",
+      "type": "mark_done",
+      "title": "Mark this test complete"
+    }
+  ],
+  "reset": {
+    "afterStep": {
+      "cleanup": {
+        "actions": [
+          {
+            "action": "mcp_tool",
+            "tool": "unreal_open_mcp_asset_delete",
+            "args": { "path": "/Game/_ValidationSuite/GateFail/BP_GateFail", "force": true, "paths_hint": ["/Game/_ValidationSuite/GateFail/BP_GateFail"], "gate": "off" },
+            "timeoutMs": 30000
+          }
+        ]
+      }
+    },
+    "note": "Reset deletes the disposable Blueprint under /Game/_ValidationSuite/. The fix itself already cleared the soft pointer and saved the package, so delete is the only remaining cleanup. No demo asset is ever modified."
+  }
+}

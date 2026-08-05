@@ -1,0 +1,47 @@
+{
+  "id": "core-screenshot",
+  "title": "Screenshot — viewport PNG capture",
+  "milestone": "core",
+  "engineId": "unreal",
+  "order": 40,
+  "requirementLevel": "optional",
+  "tags": ["core", "screenshot", "viewport"],
+  "steps": [
+    {
+      "id": "info",
+      "type": "info",
+      "title": "Prerequisites",
+      "body": "Editor open on the demo project with the bridge answering ping, on a host with a real display (not headless). screenshot_viewport reads the editor viewport pixels and returns a base64 PNG as MCP image content — it needs an interactive GPU session. This scenario is optional: on a headless / CI agent with no display the capture fails (transport error or an empty result) and that is a documented skip, not a milestone blocker. Filter to Required · core to exclude this scenario from the closeout gate."
+    },
+    {
+      "id": "prompt",
+      "type": "agent_prompt",
+      "tool": "unreal_open_mcp_screenshot_viewport",
+      "title": "Capture the editor viewport",
+      "payload": {
+        "tool": "unreal_open_mcp_screenshot_viewport",
+        "args": { "width": 1024, "height": 576 }
+      }
+    },
+    {
+      "id": "expected",
+      "type": "expected",
+      "title": "Expected outcomes",
+      "items": [
+        "The result is MCP image content (a base64 PNG) with no isError flag.",
+        "Result metadata carries _source: \"live\" (screenshot_viewport routes to the running bridge).",
+        "On a headless host: the capture fails with a transport error or empty image — record the skip in the actual step (this scenario is optional, so a skip is not a regression)."
+      ]
+    },
+    {
+      "id": "actual",
+      "type": "actual",
+      "title": "Paste / attach the captured viewport PNG (or note the headless skip)"
+    },
+    {
+      "id": "done",
+      "type": "mark_done",
+      "title": "Mark this test complete"
+    }
+  ]
+}

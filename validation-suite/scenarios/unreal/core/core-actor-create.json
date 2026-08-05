@@ -1,0 +1,106 @@
+{
+  "id": "core-actor-create",
+  "title": "Actor create — mutator round-trip with gate",
+  "milestone": "core",
+  "engineId": "unreal",
+  "order": 10,
+  "requirementLevel": "required-core",
+  "tags": ["core", "actor", "mutator", "gate"],
+  "steps": [
+    {
+      "id": "info",
+      "type": "info",
+      "title": "Prerequisites",
+      "body": "Editor open on the demo project with the bridge answering ping. The current level is one you are willing to mutate transiently — the default editor map is fine; the scenario spawns one actor and destroys it in cleanup. The spawn uses a native class (PointLight) so no Blueprint asset dependency is required. Pick a run-unique actor label (e.g. suffix with a timestamp or counter) so repeated runs do not collide; the cleanup + reset destroy by that same label."
+    },
+    {
+      "id": "spawn",
+      "type": "setup",
+      "title": "Spawn a PointLight via the bridge (deterministic staging)",
+      "actions": [
+        {
+          "action": "mcp_tool",
+          "tool": "unreal_open_mcp_actor_create",
+          "args": {
+            "classPath": "/Script/Engine.PointLight",
+            "name": "VS_Core_PointLight",
+            "location": { "x": 0, "y": 0, "z": 200 },
+            "paths_hint": ["/Game/Maps/_SmokeLevel"],
+            "gate": "enforce"
+          },
+          "timeoutMs": 30000
+        }
+      ]
+    },
+    {
+      "id": "prompt",
+      "type": "agent_prompt",
+      "tool": "unreal_open_mcp_actor_create",
+      "title": "Spawn a PointLight in the MCP client (observe the gate)",
+      "payload": {
+        "tool": "unreal_open_mcp_actor_create",
+        "args": {
+          "classPath": "/Script/Engine.PointLight",
+          "name": "VS_Core_PointLight",
+          "location": { "x": 0, "y": 0, "z": 200 },
+          "paths_hint": ["/Game/Maps/_SmokeLevel"],
+          "gate": "enforce"
+        }
+      }
+    },
+    {
+      "id": "expected",
+      "type": "expected",
+      "title": "Expected outcomes",
+      "items": [
+        "The actor spawns: the result carries the new actor's path / name and no isError flag.",
+        "The actor is visible in the current level (outliner + viewport).",
+        "When the gate is enforced, gate.validation.passed is true and gate.delta.newErrors is 0 (spawning a native PointLight introduces no verify issues).",
+        "Result metadata carries _source: \"live\" (actor_create routes to the running bridge).",
+        "A single editor undo (or the cleanup destroy) removes the spawned actor."
+      ]
+    },
+    {
+      "id": "cleanup",
+      "type": "setup",
+      "title": "Destroy the spawned actor",
+      "actions": [
+        {
+          "action": "mcp_tool",
+          "tool": "unreal_open_mcp_actor_destroy",
+          "args": {
+            "actor": "VS_Core_PointLight",
+            "paths_hint": ["/Game/Maps/_SmokeLevel"],
+            "gate": "off"
+          },
+          "timeoutMs": 30000
+        }
+      ]
+    },
+    {
+      "id": "actual",
+      "type": "actual",
+      "title": "Paste the agent output (actor_create + actor_destroy envelopes)"
+    },
+    {
+      "id": "done",
+      "type": "mark_done",
+      "title": "Mark this test complete"
+    }
+  ],
+  "reset": {
+    "afterStep": {
+      "cleanup": {
+        "actions": [
+          {
+            "action": "mcp_tool",
+            "tool": "unreal_open_mcp_actor_destroy",
+            "args": { "actor": "VS_Core_PointLight", "paths_hint": ["/Game/Maps/_SmokeLevel"], "gate": "off" },
+            "timeoutMs": 30000
+          }
+        ]
+      }
+    },
+    "note": "Cleanup is a best-effort destroy of the spawned actor by its label. If the label was changed for this run, reset the matching actor; the level itself is never modified beyond the single spawn."
+  }
+}

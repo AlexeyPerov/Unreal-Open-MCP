@@ -116,6 +116,16 @@ git add -f demo/Content/Maps/SmokeLevel.umap
 git add -f demo/Content/Blueprints/BP_Smoke.uasset
 ```
 
+### Validation Suite fixtures
+
+The standalone [Validation Suite](../validation-suite/) stages disposable per-scenario
+fixtures under `Content/_ValidationSuite/` and writes operator state under
+`Saved/ValidationSuite/`. Both roots are gitignored (`demo/.gitignore` covers
+`Content/_ValidationSuite/`; `Saved/` is ignored globally), so a suite run never
+leaves a dirty tree. No demo asset is modified — the suite creates and reverts its
+own disposable assets (e.g. a Blueprint under `/Game/_ValidationSuite/GateFail/`
+for the gate-fail and fix scenarios).
+
 ## Engine association
 
 The `.uproject` declares `"EngineAssociation": "5.8"` (the develop / CI engine).

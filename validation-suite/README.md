@@ -47,6 +47,28 @@ npm run tauri dev
 
 Then use **Open project…** to select an Unreal project folder (e.g. `../demo`). The suite validates the folder against the engine profile's project markers and scopes all state + fixtures under that project.
 
+## Core scenarios
+
+The suite ships five guided scenarios under `scenarios/unreal/core/` that exercise the connectivity floor, a mutator round-trip with the gate, a controlled verify failure, the fix workflow, and a viewport capture:
+
+| Scenario | Tool family | Tier |
+|---|---|---|
+| `core-ping` — bridge ping connectivity smoke | ping | required-core |
+| `core-actor-create` — spawn + destroy a PointLight with `gate: enforce` | actor | required-core |
+| `core-gate-fail` — `validate_edit` surfaces a staged `broken_soft_reference` | gate & verify | required-core |
+| `core-fix` — `apply_fix` dry-run preview then clear the broken soft reference | gate & verify | required-core |
+| `core-screenshot` — viewport PNG capture | screenshot | optional |
+
+Use the **Required · core** filter to isolate the four closeout-gate scenarios. `core-screenshot` is `optional` because it needs an interactive GPU session — on a headless / CI host the capture fails and that is a documented skip, not a regression.
+
+### Operator prerequisites
+
+- **Editor open** on the target project (e.g. `demo/`) with both Open MCP plugins compiled — wait for the status bar to settle.
+- **MCP client** pointed at the project: set `UNREAL_PROJECT_PATH` to the absolute project path so the server discovers the bridge's deterministic per-project port (see [Manual setup](../docs/manual-setup.md)).
+- **Tool groups** — the gate-fail and fix scenarios stage a disposable Blueprint, so the typed-editor group (asset + Blueprint families) must be visible. Activate it via `unreal_open_mcp_manage_tools` if a staging tool reports not found.
+- **Deterministic staging** — the gate-fail and fix scenarios create a disposable Blueprint under `/Game/_ValidationSuite/GateFail/`, add a soft-object-pointer variable, and point its default at a deliberately-missing path. The suite stages and reverts this fixture; no demo asset is modified. The fixture lives under the gitignored `Content/_ValidationSuite/` root.
+- **Issue id hand-off** — copy the `issue_id` from `core-gate-fail`'s / `core-fix`'s `validate_edit` result; the `apply_fix` steps paste it verbatim.
+
 ## Tests
 
 ```bash

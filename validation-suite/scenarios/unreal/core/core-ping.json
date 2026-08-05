@@ -1,0 +1,47 @@
+{
+  "id": "core-ping",
+  "title": "Bridge ping — connectivity smoke",
+  "milestone": "core",
+  "engineId": "unreal",
+  "order": 0,
+  "requirementLevel": "required-core",
+  "tags": ["core", "bridge", "ping"],
+  "steps": [
+    {
+      "id": "info",
+      "type": "info",
+      "title": "Prerequisites",
+      "body": "The demo project is open in the Unreal Editor and both Open MCP plugins are compiled (wait for the editor status bar to settle). The MCP server is configured with UNREAL_PROJECT_PATH pointing at the absolute path to the demo/ directory, so the server discovers the bridge's deterministic per-project port. This is the connectivity floor every later scenario depends on."
+    },
+    {
+      "id": "prompt",
+      "type": "agent_prompt",
+      "tool": "unreal_open_mcp_ping",
+      "title": "Run ping in the MCP client",
+      "payload": {
+        "tool": "unreal_open_mcp_ping",
+        "args": {}
+      }
+    },
+    {
+      "id": "expected",
+      "type": "expected",
+      "title": "Expected outcomes",
+      "items": [
+        "The ping result reports a ready / non-error bridge status.",
+        "No transport error is surfaced — the bridge is reachable.",
+        "The result metadata carries _source: \"live\" and _route.route: \"live\" (ping routes to the running editor bridge)."
+      ]
+    },
+    {
+      "id": "actual",
+      "type": "actual",
+      "title": "Paste the agent output (raw envelope)"
+    },
+    {
+      "id": "done",
+      "type": "mark_done",
+      "title": "Mark this test complete"
+    }
+  ]
+}
